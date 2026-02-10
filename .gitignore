@@ -416,3 +416,47 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Type check / lint / test caches ---
+.mypy_cache/
+_mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+*.log
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Jupyter (if you ever use it) ---
+.ipynb_checkpoints/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+
+# --- VS Code (pick ONE of the two options) ---
+
+# Option A: ignore all VS Code settings
+.vscode/
+
+# Option B: keep some VS Code files, ignore only user-specific settings
+# .vscode/*
+# !.vscode/extensions.json
+# !.vscode/launch.json
+# !.vscode/tasks.json
+# .vscode/settings.json
+
+
+# --- Outputs (enable if these are generated, not source) ---
+# TotalXP.xlsx
+# *.xlsx
