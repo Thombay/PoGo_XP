@@ -34,8 +34,8 @@ def sanitize_name(text: str) -> str:
     return cleaned.strip("_") or "Group"
 
 
-def build_output_name(order: int, date_str: str, group_name: str, stem: str) -> str:
-    return f"{order}_{normalize_date(date_str)}_{sanitize_name(group_name)}_{stem}.png"
+def build_output_name(order: str | int, date_str: str, group_name: str, stem: str) -> str:
+    return f"{normalize_date(date_str)}_{order}_{sanitize_name(group_name)}_{stem}.png"
 
 
 def group_output_dir(group_name: str) -> str:
@@ -429,6 +429,68 @@ def plot_history_progress(
     return fig
 
 
+def plot_history_progress_per_day(
+    history: pd.DataFrame,
+    group_name: str,
+    progress_png: str,
+    title_suffix: str = "",
+):
+    if history.empty:
+        print(f"{group_name}: no matching history rows; skipped per-day progress plot.")
+        return None
+
+    hist = history.copy()
+    hist["Date"] = pd.to_datetime(hist["Date"])
+    hist = hist.sort_values(["Spieler", "Date"])
+    min_date = hist["Date"].min()
+    max_date = hist["Date"].max()
+
+    hist["Days Delta"] = (
+        hist.groupby("Spieler")["Date"].diff().dt.total_seconds() / 86_400
+    )
+    hist["XP Delta"] = hist.groupby("Spieler")["Total XP"].diff()
+    # First snapshot (or same-day snapshots) has no reliable daily rate.
+    hist["XP/day"] = np.where(
+        hist["Days Delta"] > 0,
+        hist["XP Delta"] / hist["Days Delta"],
+        np.nan,
+    )
+
+    fig, ax = plt.subplots(figsize=(14, 6.5))
+    for player, grp in hist.groupby("Spieler", sort=True):
+        grp = grp.sort_values("Date")
+        y = grp["XP/day"].fillna(0.0)
+        ax.plot(grp["Date"], y, marker="o", linewidth=1.8, markersize=4, label=player)
+
+        x_last = grp["Date"].iloc[-1]
+        y_last = y.iloc[-1]
+        ax.annotate(
+            player,
+            xy=(x_last, y_last),
+            xytext=(5, 3),
+            textcoords="offset points",
+            fontsize=8,
+            alpha=0.9,
+        )
+
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    ax.set_title(f"{group_name}: Player XP Progress per Day{title_suffix}")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("XP/day")
+    ax.yaxis.set_major_formatter(FuncFormatter(xp_axis_fmt))
+    if min_date == max_date:
+        ax.set_xlim(min_date - pd.Timedelta(days=1), max_date + pd.Timedelta(days=1))
+    else:
+        ax.set_xlim(min_date - pd.Timedelta(hours=12), max_date + pd.Timedelta(hours=12))
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", ncol=2, fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(progress_png, dpi=200)
+    print(f"Saved: {progress_png}")
+    return fig
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Pogo XP plots by named player groups.")
     parser.add_argument("--groups-file", default=GROUPS_FILE, help="Group definition file.")
@@ -468,8 +530,13 @@ def main():
 
         out1 = os.path.join(out_dir, build_output_name(1, output_date, group_name, "xp_growth_with_players_pogo"))
         out2 = os.path.join(out_dir, build_output_name(2, output_date, group_name, "xp_progress_player_pogo"))
-        out3 = os.path.join(out_dir, build_output_name(3, output_date, group_name, "log_xp_growth_with_players_pogo"))
-        out4 = os.path.join(out_dir, build_output_name(4, output_date, group_name, "log_xp_progress_player_pogo"))
+        out3 = os.path.join(out_dir, build_output_name(3, output_date, group_name, "xp_progress_per_day_player_pogo"))
+        out_log1 = os.path.join(
+            out_dir, build_output_name("log1", output_date, group_name, "log_xp_growth_with_players_pogo")
+        )
+        out_log2 = os.path.join(
+            out_dir, build_output_name("log2", output_date, group_name, "log_xp_progress_player_pogo")
+        )
 
         figures.append(plot_curve_with_players(curve, latest, group_name, out1))
         figures.append(plot_history_progress(group_hist, group_name, out2))
@@ -478,7 +545,7 @@ def main():
                 curve,
                 latest,
                 group_name,
-                out3,
+                out_log1,
                 y_scale="log",
                 title_suffix=" (Log Y)",
             )
@@ -487,11 +554,12 @@ def main():
             plot_history_progress(
                 group_hist,
                 group_name,
-                out4,
+                out_log2,
                 y_scale="log",
                 title_suffix=" (Log Y)",
             )
         )
+        figures.append(plot_history_progress_per_day(group_hist, group_name, out3))
 
     for fig in figures:
         if fig is not None:

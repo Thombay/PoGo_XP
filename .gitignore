@@ -460,3 +460,6 @@ Thumbs.db
 # --- Outputs (enable if these are generated, not source) ---
 # TotalXP.xlsx
 # *.xlsx
+
+# --- PoGo generated graphs ---
+**/*_pogo.png
