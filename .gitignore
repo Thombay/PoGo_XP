@@ -463,3 +463,9 @@ Thumbs.db
 
 # --- PoGo generated graphs ---
 **/*_pogo.png
+
+# --- Project outputs ---
+medal-tracker/out/
+output/medal-tracker/
+pogo-xp/out/
+inputs/private/

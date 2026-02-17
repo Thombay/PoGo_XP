@@ -2,6 +2,8 @@ import argparse
 import difflib
 import os
 import re
+import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,9 +11,16 @@ import pandas as pd
 from matplotlib.ticker import FuncFormatter
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-CURVE_FILE = "pogo_totalXP.csv"
-HISTORY_FILE = "pogo_totalXP_history.csv"
-GROUPS_FILE = "pogo_player_groups.csv"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.paths import player_groups_path, repo_root, total_xp_curve_path, xp_history_path
+
+CURVE_FILE = str(total_xp_curve_path())
+HISTORY_FILE = str(xp_history_path())
+GROUPS_FILE = str(player_groups_path())
+OUTPUT_ROOT = repo_root()
 
 
 def to_int_series(s: pd.Series) -> pd.Series:
@@ -41,7 +50,7 @@ def build_output_name(order: str | int, date_str: str, group_name: str, stem: st
 
 
 def group_output_dir(group_name: str) -> str:
-    return sanitize_name(group_name)
+    return str(OUTPUT_ROOT / "output" / sanitize_name(group_name))
 
 
 def xp_axis_fmt(x: float, _pos: float) -> str:
@@ -320,6 +329,31 @@ def resolve_group_players(players_in_group: list[str], history_names: set[str], 
             out.append(p)
             seen.add(p)
     return out
+
+
+def restrict_to_common_interval(history: pd.DataFrame, group_name: str) -> pd.DataFrame:
+    if history.empty:
+        return history.copy()
+
+    hist = history.copy()
+    hist["Date"] = pd.to_datetime(hist["Date"])
+    ranges = hist.groupby("Spieler")["Date"].agg(["min", "max"])
+    if ranges.empty:
+        return hist
+
+    common_start = pd.to_datetime(ranges["min"].max())
+    common_end = pd.to_datetime(ranges["max"].min())
+    if common_start > common_end:
+        print(
+            f"Warning [{group_name}]: no overlapping date window across all players "
+            f"({common_start.date()} > {common_end.date()}); skipped."
+        )
+        return hist.iloc[0:0].copy()
+
+    clipped = hist[(hist["Date"] >= common_start) & (hist["Date"] <= common_end)].copy()
+    clipped["Date"] = clipped["Date"].dt.date.astype(str)
+    print(f"Info [{group_name}]: using common interval {common_start.date()} to {common_end.date()}")
+    return clipped
 
 
 def build_player_colors(players: list[str]) -> dict[str, tuple[float, float, float, float]]:
@@ -918,6 +952,10 @@ def main():
         group_hist = history[history["Spieler"].isin(resolved_players)].copy()
         if group_hist.empty:
             print(f"{group_name}: no matching players in history, skipped.")
+            continue
+        group_hist = restrict_to_common_interval(group_hist, group_name)
+        if group_hist.empty:
+            print(f"{group_name}: no data left after common-interval filter, skipped.")
             continue
 
         interval_hist = add_interval_columns(group_hist)

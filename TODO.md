@@ -1,38 +1,87 @@
-# PoGo XP plots - Current Task Checklist
+# TODO (Codex): Restructure repo into 2 projects + shared inputs (no double XP)
 
-## Improve Graph 5 (rank over time)
+## 0) Goal
 
-- [x] Switch rank plotting to step style (`where="post"`).
-- [x] Detect if no rank changes happened in the shown date range.
-- [x] If none: add annotation `No rank changes in this time window`.
-- [x] Handle ties explicitly with stable ordering so ranks do not jitter when `Total XP` matches.
-- [x] Label ranks at the right edge and avoid crowded legend.
+- [~] Keep ONE canonical XP dataset.
+- [ ] Medal tracker reads XP from the XP dataset (no manual Total XP entry in medal tracker).
+- [x] Keep shared data for both projects under `inputs/`.
+- [x] Minimize disruption to existing script usage and output folders.
 
-## Improve Graph 6 (gap to leader)
+Notes:
 
-- [x] Keep absolute gap plot for context.
-- [x] Add inset showing gap change since first snapshot:
-  - `gap_change = gap - gap_first`
-  - negative = catching up, positive = falling behind
-- [x] Add horizontal reference line at 0 for `gap_change`.
-- [x] Annotate last point per player with final absolute gap.
-- [x] Add derived variant for per-interval gap change:
-  - `Delta gap = gap_now - gap_prev`
-  - filename tag: `*_6d_<Group>_gap_delta_per_interval_pogo.png`
+- Static XP curve is now clearly named: `inputs/reference/total_xp_curve.csv`.
+- Dynamic shared data is under `inputs/data/`.
+- Shared config is under `inputs/config/`.
 
-## Improve Graph 8 readability (colors + clutter)
+---
 
-- [x] Create a single `player_colors` mapping (player -> color) and reuse it across all plots.
-- [x] In Graph 8: use same color per player; raw pace and trend differ by style (not by color).
-- [x] Remove trend legend entries; use end-of-line labels at the right edge.
+## 1) Folder layout
 
-## Output + naming scheme
+- [x] `inputs/`
+- [x] `inputs/config/`
+- [x] `inputs/data/`
+- [x] `inputs/reference/`
+- [x] `inputs/templates/`
+- [x] `pogo-xp/`, `pogo-xp/src/`, `pogo-xp/tools/`
+- [x] `medal-tracker/`, `medal-tracker/tools/` (config/data moved to shared `inputs/`)
+- [x] `shared/`
+- [x] `output/`
 
-- [x] Keep existing filename scheme: `<date>_<index-or-tag>_<Group>_<stem>.png`.
-- [x] Keep existing output names; derived variant uses safe tag `6d`.
+---
 
-## De-duplicate Graph 2 vs Graph 7
+## 2) Shared files moved and renamed
 
-- [x] Remove Graph 7 from outputs and TODO (redundant with Graph 2).
-- [x] Keep Graph 2 stem as-is for compatibility; make title and y-label explicitly `Gain Since First Snapshot`.
-- [x] Remove Graph 7 code path from generation.
+- [x] `pogo_totalXP.csv` -> `inputs/reference/total_xp_curve.csv`
+- [x] `pogo_totalXP_history.csv` -> `inputs/data/xp_history.csv`
+- [x] `pogo_player_groups.csv` -> `inputs/config/player_groups.csv`
+- [x] `TotalXP.xlsx` -> `inputs/templates/TotalXP.xlsx`
+- [x] `Vorlage.csv` -> `inputs/templates/Vorlage.csv`
+- [x] `Pogo Medals.xlsx` -> `inputs/templates/Pogo Medals.xlsx`
+- [x] `medal-tracker/config/medals.csv` -> `inputs/config/medal_goals.csv`
+- [x] `medal-tracker/data/medal_snapshots.csv` -> `inputs/data/medal_snapshots.csv`
+- [x] `medal-tracker/out/medal_report.csv` -> `output/medal-tracker/medal_report.csv`
+
+---
+
+## 3) XP project wiring
+
+- [x] XP code moved: `pogo-xp/pogo_totalXP.py`
+- [x] Uses shared path resolver `shared/paths.py`
+- [x] Reads:
+  - [x] `inputs/reference/total_xp_curve.csv`
+  - [x] `inputs/data/xp_history.csv`
+  - [x] `inputs/config/player_groups.csv`
+- [x] Writes group outputs to `output/<Group>/...`
+
+---
+
+## 4) Medal tracker wiring
+
+- [x] Project scaffold exists (`tools`; config/data are shared in `inputs/`)
+- [x] `run_medals.py` executes report pipeline
+- [x] `medal-tracker/tools/generate_report.py` tries XP injection with `merge_asof`
+- [x] `medal-tracker/tools/append_from_xlsx.py` extracts workbook data into:
+  - [x] `inputs/data/medal_snapshots.csv` (medal progress rows)
+  - [x] `inputs/config/medal_goals.csv` (shared goals)
+- [x] `total_xp` rows are excluded from `medal_snapshots.csv` (no manual Total XP in medal snapshots)
+- [ ] Canonical XP snapshots still missing for injection:
+  - expected file: `inputs/data/xp_snapshots.csv`
+  - expected columns: `date`, `spieler`, `total xp`
+- [~] Ensure medal template flow has no manual Total XP field
+
+---
+
+## 5) Entry points
+
+- [x] `run_xp.py`
+- [x] `run_medals.py`
+- [x] `update_all.py` (basic chain)
+- [ ] Extend `update_all.py` with real XLSX append step once mapping is defined
+
+---
+
+## 6) Validation
+
+- [x] `python run_xp.py --no-show` works after rename/move
+- [x] `python run_medals.py` runs and writes `output/medal-tracker/medal_report.csv`
+- [ ] Medal report includes derived `total_xp` rows (blocked by missing `inputs/data/xp_snapshots.csv`)
