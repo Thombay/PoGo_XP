@@ -216,7 +216,9 @@ def _ordered_medal_ids_for_template(goals: pd.DataFrame) -> list[str]:
     g = goals.copy()
     g["_order"] = g["display_name"].astype(str).str.lower().map(order_map).fillna(9_999)
     g = g.sort_values(["_order", "display_name"]).reset_index(drop=True)
-    return g["medal_id"].astype(str).tolist()
+    ordered_ids = g["medal_id"].astype(str).tolist()
+    # Total XP is derived from XP history; keep it out of manual snapshot template.
+    return [mid for mid in ordered_ids if mid != "total_xp"]
 
 
 def main():
@@ -279,7 +281,9 @@ def main():
                     }
                 )
                 first_row_for_account = False
-        pd.DataFrame(template_rows).to_csv(template_csv, index=False, encoding="utf-8-sig")
+        pd.DataFrame(template_rows, columns=["date", "account", "medal_id", "value"]).to_csv(
+            template_csv, index=False, encoding="utf-8-sig"
+        )
         print(f"Saved: {template_csv}")
 
     print(f"Saved: {out_csv}")

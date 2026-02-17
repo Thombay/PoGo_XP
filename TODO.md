@@ -3,7 +3,7 @@
 ## 0) Goal
 
 - [~] Keep ONE canonical XP dataset.
-- [ ] Medal tracker reads XP from the XP dataset (no manual Total XP entry in medal tracker).
+- [x] Medal tracker reads XP from the XP dataset (no manual Total XP entry in medal tracker).
 - [x] Keep shared data for both projects under `inputs/`.
 - [x] Minimize disruption to existing script usage and output folders.
 
@@ -59,15 +59,16 @@ Notes:
 
 - [x] Project scaffold exists (`tools`; config/data are shared in `inputs/`)
 - [x] `run_medals.py` executes report pipeline
-- [x] `medal-tracker/tools/generate_report.py` tries XP injection with `merge_asof`
+- [x] `medal-tracker/tools/generate_report.py` injects XP with `merge_asof`
 - [x] `medal-tracker/tools/append_from_xlsx.py` extracts workbook data into:
   - [x] `inputs/data/medal_snapshots.csv` (medal progress rows)
   - [x] `inputs/config/medal_goals.csv` (shared goals)
 - [x] `total_xp` rows are excluded from `medal_snapshots.csv` (no manual Total XP in medal snapshots)
-- [ ] Canonical XP snapshots still missing for injection:
+- [~] Preferred canonical XP snapshots file still optional:
   - expected file: `inputs/data/xp_snapshots.csv`
   - expected columns: `date`, `spieler`, `total xp`
-- [~] Ensure medal template flow has no manual Total XP field
+- [x] Medal template flow has no manual Total XP field (`inputs/templates/medal_snapshots_template.csv`)
+- [x] XP injection now works from `inputs/data/xp_history.csv` (+ `inputs/reference/total_xp_curve.csv`) when `xp_snapshots.csv` is not present
 
 ---
 
@@ -84,4 +85,12 @@ Notes:
 
 - [x] `python run_xp.py --no-show` works after rename/move
 - [x] `python run_medals.py` runs and writes `output/medal-tracker/medal_report.csv`
-- [ ] Medal report includes derived `total_xp` rows (blocked by missing `inputs/data/xp_snapshots.csv`)
+- [x] Medal report includes derived `total_xp` rows
+
+---
+
+## 7) Pending (do not implement yet)
+
+- [ ] Calculate `platinum_medals` from existing data:
+  - medal counts as platinum when `value >= goal_value`
+- [ ] Add graphs and calculations based on derived `platinum_medals`

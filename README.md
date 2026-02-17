@@ -22,6 +22,7 @@ inputs/
   templates/
     TotalXP.xlsx
     Vorlage.csv
+    medal_snapshots_template.csv
 
 pogo-xp/
   pogo_totalXP.py
@@ -101,16 +102,18 @@ Filename scheme remains:
 Current scaffold is in place. `medal-tracker/tools/generate_report.py` already:
 
 - reads `inputs/data/medal_snapshots.csv`
-- tries to inject XP-derived rows as `medal_id=total_xp`
+- removes any manual `medal_id=total_xp` rows from snapshots input
+- injects XP-derived rows as `medal_id=total_xp`
 - writes `output/medal-tracker/medal_report.csv`
 
 `medal-tracker/tools/append_from_xlsx.py` now:
 
 - extracts medal progress rows into `inputs/data/medal_snapshots.csv`
 - extracts shared goals into `inputs/config/medal_goals.csv` (once, not per account)
-- excludes `total_xp` from medal snapshots (XP should come from canonical XP snapshots pipeline)
+- excludes `total_xp` from medal snapshots
+- generates `inputs/templates/medal_snapshots_template.csv` without `total_xp` rows
 
-Current blocker:
+XP source for medal report:
 
-- `inputs/reference/total_xp_curve.csv` is static curve/reference data (used by XP plotter), not per-account snapshots.
-- `inputs/data/xp_snapshots.csv` is still missing/canonical schema not provided yet (`date`, `spieler`, `total xp`), so XP injection is skipped with a warning until that file exists.
+- Preferred canonical file: `inputs/data/xp_snapshots.csv` with columns `date`, `spieler`, `total xp`
+- Current working fallback: `inputs/data/xp_history.csv` + `inputs/reference/total_xp_curve.csv` (level + XP bar converted to total XP)
