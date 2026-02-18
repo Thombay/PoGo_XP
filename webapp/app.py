@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
+import re
 import subprocess
 import sys
 from datetime import date
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -396,6 +399,51 @@ def build_goal_projection_trace(
     )
 
 
+def build_xp_projection_trace(
+    series: pd.DataFrame,
+    goal_value: float,
+    account: str,
+    color: str | None = None,
+) -> go.Scatter | None:
+    s = series.copy()
+    s["Date"] = pd.to_datetime(s["Date"], errors="coerce")
+    s["Total XP"] = pd.to_numeric(s["Total XP"], errors="coerce")
+    s = s.dropna(subset=["Date", "Total XP"]).sort_values("Date")
+    if s.empty:
+        return None
+
+    eta = _predict_goal_eta(s.rename(columns={"Date": "date", "Total XP": "value"})[["date", "value"]], goal_value)
+    if eta is None:
+        return None
+
+    x = s["Date"].map(pd.Timestamp.toordinal).astype(float)
+    y = s["Total XP"].astype(float)
+    x_mean = float(x.mean())
+    y_mean = float(y.mean())
+    denom = float(((x - x_mean) ** 2).sum())
+    if denom <= 0:
+        return None
+    slope = float(((x - x_mean) * (y - y_mean)).sum() / denom)
+    intercept = y_mean - slope * x_mean
+
+    last_date = pd.Timestamp(s["Date"].iloc[-1])
+    last_x = float(last_date.toordinal())
+    y_start = intercept + slope * last_x
+
+    line_style: dict[str, object] = {"dash": "dot"}
+    if color:
+        line_style["color"] = color
+
+    return go.Scatter(
+        x=[last_date, eta],
+        y=[y_start, float(goal_value)],
+        mode="lines",
+        name=f"{account} trend -> {eta.date().isoformat()}",
+        line=line_style,
+        hovertemplate="trend to goal<extra></extra>",
+    )
+
+
 def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -439,6 +487,110 @@ def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
     out["XP/day"] = out["XP Delta"] / out["Days Delta"]
     out = out[out["Days Delta"] > 0].copy()
     return out
+
+
+def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> None:
+    st.subheader("XP Explorer")
+    if xp_subset_df.empty:
+        st.info("No XP history data found for this dashboard selection.")
+        return
+
+    player_options = sorted(xp_subset_df["Spieler"].dropna().astype(str).unique().tolist())
+    selected_players = st.multiselect(
+        "Players",
+        options=player_options,
+        default=player_options,
+        key=f"{key_prefix}_players",
+    )
+    common_interval_only = st.checkbox(
+        "Use common interval for all selected players",
+        value=True,
+        key=f"{key_prefix}_common_interval",
+    )
+
+    df = xp_subset_df[xp_subset_df["Spieler"].isin(selected_players)].copy()
+    if common_interval_only:
+        df = restrict_to_common_interval(df)
+    if df.empty:
+        st.warning("No rows for selected filters.")
+        return
+
+    min_date = df["Date"].min().date()
+    max_date = df["Date"].max().date()
+    d_start, d_end = st.slider(
+        "Date range",
+        min_value=min_date,
+        max_value=max_date,
+        value=(min_date, max_date),
+        key=f"{key_prefix}_date_range",
+    )
+    df = df[(df["Date"] >= pd.Timestamp(d_start)) & (df["Date"] <= pd.Timestamp(d_end))].copy()
+    if df.empty:
+        st.warning("No rows in selected date range.")
+        return
+
+    fig_total = px.line(
+        df,
+        x="Date",
+        y="Total XP",
+        color="Spieler",
+        markers=True,
+        title="Total XP Over Time",
+    )
+    st.plotly_chart(fig_total, use_container_width=True)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        rank_df = build_rank_df(df)
+        fig_rank = go.Figure()
+        for player, grp in rank_df.groupby("Spieler", sort=True):
+            fig_rank.add_trace(
+                go.Scatter(
+                    x=grp["Date"],
+                    y=grp["Rank"],
+                    mode="lines+markers",
+                    line_shape="hv",
+                    name=player,
+                )
+            )
+        fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
+        fig_rank.update_yaxes(autorange="reversed", dtick=1)
+        no_rank_changes = all(grp["Rank"].nunique() <= 1 for _, grp in rank_df.groupby("Spieler"))
+        if no_rank_changes:
+            fig_rank.add_annotation(
+                text="No rank changes in this time window",
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.95,
+                showarrow=False,
+            )
+        st.plotly_chart(fig_rank, use_container_width=True)
+
+    with col_b:
+        gap_df = build_gap_change_df(df)
+        fig_gap = px.line(
+            gap_df,
+            x="Date",
+            y="Gap Change",
+            color="Spieler",
+            markers=True,
+            title="Gap Change Since First Snapshot",
+        )
+        fig_gap.add_hline(y=0, line_dash="dash")
+        st.plotly_chart(fig_gap, use_container_width=True)
+
+    pace_df = build_pace_df(df)
+    if not pace_df.empty:
+        fig_pace = px.line(
+            pace_df,
+            x="Date",
+            y="XP/day",
+            color="Spieler",
+            markers=True,
+            title="Interval Pace (XP/day)",
+        )
+        st.plotly_chart(fig_pace, use_container_width=True)
 
 
 def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: int) -> None:
@@ -782,7 +934,10 @@ def build_xp_growth_figure(curve_map: dict[int, int], latest_df: pd.DataFrame) -
             x=curve_df["Level"],
             y=curve_df["XP per Level (M)"],
             name="XP per level",
-            marker_color="rgba(150,170,190,0.35)",
+            marker_color="rgba(148,163,184,0.22)",
+            marker_line_width=0,
+            opacity=0.45,
+            hoverinfo="skip",
         ),
         secondary_y=True,
     )
@@ -872,6 +1027,785 @@ def accounts_for_selected_group(selected_group: str, groups: dict[str, list[str]
     group_accounts = [str(a).strip() for a in groups.get(selected_group, []) if str(a).strip()]
     available = set(all_accounts)
     return [a for a in group_accounts if a in available]
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip()).strip("_").lower()
+    return slug or "group"
+
+
+def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    for col in out.columns:
+        col_l = str(col).lower()
+        if "date" in col_l:
+            dt = pd.to_datetime(out[col], errors="coerce")
+            out[col] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out[col].astype(str))
+            continue
+        if pd.api.types.is_numeric_dtype(out[col]):
+            vals = pd.to_numeric(out[col], errors="coerce")
+            if col_l == "pct_goal":
+                out[col] = vals.map(lambda v: "" if pd.isna(v) else f"{float(v):.1f}")
+            else:
+                out[col] = vals.map(lambda v: "" if pd.isna(v) else f"{int(round(float(v))):,}")
+    return out
+
+
+def _df_section_html(title: str, df: pd.DataFrame) -> str:
+    if df.empty:
+        return f"<section><h2>{escape(title)}</h2><p>No data.</p></section>"
+    out = _format_export_df(df)
+    table_html = out.to_html(index=False, border=0, classes="report-table", escape=True)
+    return f"<section><h2>{escape(title)}</h2>{table_html}</section>"
+
+
+def _export_theme(mode: str) -> dict[str, object]:
+    m = str(mode).strip().lower()
+    if m == "light":
+        return {
+            "name": "Light",
+            "template": "plotly_white",
+            "paper_bg": "#ffffff",
+            "plot_bg": "#ffffff",
+            "font": "#0f172a",
+            "grid": "rgba(15,23,42,0.12)",
+            "line": "rgba(15,23,42,0.35)",
+            "body_bg": "#f8fafc",
+            "muted": "#475569",
+            "card_bg": "#ffffff",
+            "border": "#d0d7de",
+            "table_bg": "#ffffff",
+            "table_head": "#eef2f7",
+            "colorway": ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#17becf", "#bcbd22", "#8c564b"],
+            "max_width": "1400px",
+            "base_font_size": "14px",
+        }
+    if m == "whatsapp":
+        return {
+            "name": "WhatsApp",
+            "template": "plotly_white",
+            "paper_bg": "#ffffff",
+            "plot_bg": "#ffffff",
+            "font": "#0b1f16",
+            "grid": "rgba(11,31,22,0.10)",
+            "line": "rgba(11,31,22,0.25)",
+            "body_bg": "#ecfdf5",
+            "muted": "#36524a",
+            "card_bg": "#ffffff",
+            "border": "#a7f3d0",
+            "table_bg": "#ffffff",
+            "table_head": "#d1fae5",
+            "colorway": ["#0ea5a4", "#1d4ed8", "#16a34a", "#f59e0b", "#e11d48", "#7c3aed", "#0f766e", "#f97316"],
+            "max_width": "980px",
+            "base_font_size": "15px",
+        }
+    return {
+        "name": "Dark",
+        "template": "plotly_dark",
+        "paper_bg": "#0b1220",
+        "plot_bg": "#0f172a",
+        "font": "#e5e7eb",
+        "grid": "rgba(148,163,184,0.15)",
+        "line": "rgba(148,163,184,0.35)",
+        "body_bg": "#0b1220",
+        "muted": "#b8c0cc",
+        "card_bg": "#111827",
+        "border": "#1f2937",
+        "table_bg": "#0f172a",
+        "table_head": "#1f2937",
+        "colorway": ["#4fa3ff", "#22c55e", "#f59e0b", "#ef4444", "#a78bfa", "#14b8a6", "#f97316", "#eab308"],
+        "max_width": "1400px",
+        "base_font_size": "14px",
+    }
+
+
+def _style_export_figure(fig: go.Figure, mode: str) -> None:
+    theme = _export_theme(mode)
+    palette = [str(c) for c in theme["colorway"]]
+    fig.update_layout(
+        template=str(theme["template"]),
+        paper_bgcolor=str(theme["paper_bg"]),
+        plot_bgcolor=str(theme["plot_bg"]),
+        font=dict(color=str(theme["font"])),
+        colorway=list(theme["colorway"]),  # keep trace colors readable in exported HTML
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+    )
+    fig.update_xaxes(
+        gridcolor=str(theme["grid"]),
+        zerolinecolor=str(theme["grid"]),
+        linecolor=str(theme["line"]),
+        automargin=True,
+    )
+
+    # Force readable trace colors in exported HTML across browsers/viewers.
+    name_to_color: dict[str, str] = {}
+    next_idx = 0
+    for tr in fig.data:
+        trace_name = str(getattr(tr, "name", "")).strip() or f"trace_{next_idx}"
+        if trace_name not in name_to_color:
+            name_to_color[trace_name] = palette[next_idx % len(palette)]
+            next_idx += 1
+        color = name_to_color[trace_name]
+        trace_type = str(getattr(tr, "type", ""))
+        if trace_type in {"scatter", "scattergl"}:
+            tr.update(
+                line=dict(color=color),
+                marker=dict(color=color),
+            )
+        elif trace_type == "bar":
+            tr.update(marker=dict(color=color))
+    fig.update_yaxes(
+        gridcolor=str(theme["grid"]),
+        zerolinecolor=str(theme["grid"]),
+        linecolor=str(theme["line"]),
+        automargin=True,
+    )
+
+
+def _build_medal_export_tables(
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if dash_display_medal_df.empty or goals_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    latest_medals = dash_display_medal_df.sort_values("date").groupby(["account", "medal_id"], as_index=False).tail(1)
+    latest_medals = latest_medals.merge(goals_df, on="medal_id", how="left")
+    latest_medals["pct_goal"] = (latest_medals["value"] / latest_medals["goal_value"] * 100).round(1)
+    latest_medals["is_platinum"] = latest_medals["value"] >= latest_medals["goal_value"]
+    latest_medals_view = latest_medals[
+        ["date", "account", "display_name", "value", "goal_value", "pct_goal", "is_platinum"]
+    ].sort_values(["account", "display_name"])
+
+    history = dash_medal_df.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    history["account"] = history["account"].astype(str).str.strip()
+    history["medal_id"] = history["medal_id"].astype(str).str.strip().str.lower()
+    history["value"] = pd.to_numeric(history["value"], errors="coerce")
+    history = history.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    history = history[history["medal_id"] != DERIVED_MEDAL_ID].copy()
+
+    goals_map = goals_df[["medal_id", "display_name", "goal_value"]].copy()
+    goals_map["medal_id"] = goals_map["medal_id"].astype(str).str.strip().str.lower()
+    goals_map["goal_value"] = pd.to_numeric(goals_map["goal_value"], errors="coerce")
+    goals_map = goals_map.dropna(subset=["goal_value"]).drop_duplicates(subset=["medal_id"], keep="last")
+
+    achieved = history.merge(goals_map, on="medal_id", how="left")
+    achieved = achieved.dropna(subset=["goal_value"]).copy()
+    achieved["is_platinum"] = achieved["value"] >= achieved["goal_value"]
+    achieved = achieved[achieved["is_platinum"]].copy()
+    if achieved.empty:
+        return latest_medals_view, pd.DataFrame()
+
+    first_achieved = (
+        achieved.sort_values("date")
+        .groupby(["account", "medal_id"], as_index=False)
+        .head(1)[["date", "account", "display_name", "medal_id", "value", "goal_value"]]
+    )
+    first_achieved = first_achieved.rename(columns={"date": "achieved_date", "value": "value_at_achievement"})
+
+    existing_pairs = set(
+        zip(
+            first_achieved["account"].astype(str).tolist(),
+            first_achieved["medal_id"].astype(str).tolist(),
+        )
+    )
+    special_rows: list[dict[str, object]] = []
+    for special in SPECIAL_PLATINUM_MEDALS:
+        medal_id = str(special.get("medal_id", "")).strip().lower()
+        display_name = str(special.get("display_name", medal_id)).strip() or medal_id
+        flags = special.get("account_flags", {})
+        achieved_dates = special.get("account_achieved_date", {})
+        for acc, is_true in flags.items():
+            account = str(acc).strip()
+            if not account or not bool(is_true):
+                continue
+            if (account, medal_id) in existing_pairs:
+                continue
+            achieved_date = pd.to_datetime(achieved_dates.get(account), errors="coerce")
+            if pd.isna(achieved_date):
+                continue
+            special_rows.append(
+                {
+                    "achieved_date": pd.to_datetime(achieved_date),
+                    "account": account,
+                    "display_name": display_name,
+                    "medal_id": medal_id,
+                    "value_at_achievement": 1.0,
+                    "goal_value": 1.0,
+                }
+            )
+    if special_rows:
+        first_achieved = pd.concat([first_achieved, pd.DataFrame(special_rows)], ignore_index=True)
+
+    first_achieved["_acc_order"] = first_achieved["account"].map({a: i for i, a in enumerate(ACCOUNT_ORDER)}).fillna(999)
+    first_achieved = first_achieved.sort_values(["achieved_date", "_acc_order", "account"], ascending=[False, True, True])
+    first_achieved = first_achieved.drop(columns=["_acc_order"])
+    return latest_medals_view, first_achieved[
+        ["achieved_date", "account", "display_name", "value_at_achievement", "goal_value"]
+    ].copy()
+
+
+def _build_dashboard_export_payload(
+    selected_accounts: list[str],
+    dash_xp_df: pd.DataFrame,
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    curve_map: dict[int, int],
+    show_medals: bool,
+) -> dict[str, object]:
+    dash_latest_xp_df = latest_xp_snapshot(dash_xp_df)
+    dash_recent_gain_df = xp_recent_gain(dash_xp_df, days=30)
+
+    metric_cards: list[tuple[str, str, str]] = []
+    if not dash_latest_xp_df.empty:
+        leader_row = dash_latest_xp_df.sort_values("Total XP", ascending=False).iloc[0]
+        metric_cards.append(
+            (
+                "XP Leader",
+                f"{int(leader_row['Total XP']):,}",
+                f"{leader_row['Spieler']} (Lvl {int(leader_row['Lvl'])})",
+            )
+        )
+    else:
+        metric_cards.append(("XP Leader", "-", "no data"))
+
+    if not dash_recent_gain_df.empty:
+        gain_leader = dash_recent_gain_df.sort_values("xp_gain", ascending=False).iloc[0]
+        metric_cards.append(("Top 30d XP Gain", f"{int(gain_leader['xp_gain']):,}", str(gain_leader["Spieler"])))
+    else:
+        metric_cards.append(("Top 30d XP Gain", "-", "no data"))
+
+    if show_medals:
+        platinum_latest = dash_display_medal_df[dash_display_medal_df["medal_id"] == DERIVED_MEDAL_ID].copy()
+        if not platinum_latest.empty:
+            platinum_latest = platinum_latest.sort_values("date").groupby("account", as_index=False).tail(1)
+            team_platinum_total = int(pd.to_numeric(platinum_latest["value"], errors="coerce").fillna(0).sum())
+            breakdown = []
+            for acc in ACCOUNT_ORDER:
+                row = platinum_latest[platinum_latest["account"].astype(str) == acc]
+                if not row.empty:
+                    breakdown.append(f"{acc}:{int(float(row['value'].iloc[0]))}")
+            metric_cards.append(("Team Platinum Total", f"{team_platinum_total:,}", " | ".join(breakdown)))
+        else:
+            metric_cards.append(("Team Platinum Total", "-", "no data"))
+    else:
+        newcomer = top_newcomer(dash_xp_df)
+        if newcomer is None:
+            metric_cards.append(("Most Improved Pace", "-", "no data"))
+        else:
+            metric_cards.append(
+                (
+                    "Most Improved Pace",
+                    str(newcomer["spieler"]),
+                    (
+                        f"{int(round(float(newcomer['current_pace']))):,} XP/day "
+                        f"({int(round(float(newcomer['improvement']))):+,} vs own median)"
+                    ),
+                )
+            )
+
+    if not dash_latest_xp_df.empty:
+        latest_xp_date = pd.to_datetime(dash_latest_xp_df["Date"], errors="coerce").max()
+        if pd.notna(latest_xp_date):
+            days_ago = (pd.Timestamp.today().normalize() - latest_xp_date.normalize()).days
+            metric_cards.append(("Last XP Snapshot", latest_xp_date.strftime("%Y-%m-%d"), f"{int(days_ago)} day(s) ago"))
+        else:
+            metric_cards.append(("Last XP Snapshot", "-", "no data"))
+    else:
+        metric_cards.append(("Last XP Snapshot", "-", "no data"))
+
+    ranking_view = pd.DataFrame()
+    gain_view = pd.DataFrame()
+    fig_growth = None
+    fig_gain = None
+    fig_xp_total = None
+    fig_rank = None
+    fig_gap = None
+    fig_pace = None
+    if not dash_latest_xp_df.empty:
+        ranking_df = dash_latest_xp_df.sort_values("Total XP", ascending=False).reset_index(drop=True).copy()
+        ranking_df["rank"] = range(1, len(ranking_df) + 1)
+        leader_xp = float(ranking_df["Total XP"].iloc[0]) if not ranking_df.empty else 0.0
+        ranking_df["gap_to_leader"] = leader_xp - ranking_df["Total XP"]
+        if not dash_recent_gain_df.empty:
+            gain_map = dash_recent_gain_df.set_index("Spieler")["xp_per_day"].to_dict()
+            ranking_df["xp_per_day_30d"] = ranking_df["Spieler"].map(gain_map)
+        else:
+            ranking_df["xp_per_day_30d"] = pd.NA
+        ranking_view = ranking_df[["rank", "Spieler", "Lvl", "Total XP", "gap_to_leader", "xp_per_day_30d"]].copy()
+        fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df)
+
+        if not dash_recent_gain_df.empty:
+            gain_top = dash_recent_gain_df.sort_values("xp_gain", ascending=False).head(10).copy()
+            fig_gain = px.bar(
+                gain_top.sort_values("xp_gain", ascending=True),
+                x="xp_gain",
+                y="Spieler",
+                orientation="h",
+                title="Top XP Gain (30d)",
+                labels={"xp_gain": "XP Gain", "Spieler": "Account"},
+            )
+            gain_height = max(320, 34 * len(gain_top) + 80)
+            fig_gain.update_layout(height=gain_height, margin=dict(l=150, r=30, t=45, b=35))
+            fig_gain.update_xaxes(tickformat=",")
+            fig_gain.update_yaxes(automargin=True)
+            gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy()
+
+    xp_explorer_df = dash_xp_df.copy()
+    if not xp_explorer_df.empty:
+        xp_explorer_df = restrict_to_common_interval(xp_explorer_df)
+        if xp_explorer_df.empty:
+            xp_explorer_df = dash_xp_df.copy()
+        xp_explorer_df = xp_explorer_df.sort_values(["Date", "Spieler"]).copy()
+
+        fig_xp_total = px.line(
+            xp_explorer_df,
+            x="Date",
+            y="Total XP",
+            color="Spieler",
+            markers=True,
+            title="Total XP Over Time",
+        )
+
+        rank_df = build_rank_df(xp_explorer_df)
+        if not rank_df.empty:
+            fig_rank = go.Figure()
+            for player, grp in rank_df.groupby("Spieler", sort=True):
+                fig_rank.add_trace(
+                    go.Scatter(
+                        x=grp["Date"],
+                        y=grp["Rank"],
+                        mode="lines+markers",
+                        line_shape="hv",
+                        name=player,
+                    )
+                )
+            fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
+            fig_rank.update_yaxes(autorange="reversed", dtick=1)
+            no_rank_changes = all(grp["Rank"].nunique() <= 1 for _, grp in rank_df.groupby("Spieler"))
+            if no_rank_changes:
+                fig_rank.add_annotation(
+                    text="No rank changes in this time window",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.95,
+                    showarrow=False,
+                )
+
+        gap_df = build_gap_change_df(xp_explorer_df)
+        if not gap_df.empty:
+            fig_gap = px.line(
+                gap_df,
+                x="Date",
+                y="Gap Change",
+                color="Spieler",
+                markers=True,
+                title="Gap Change Since First Snapshot",
+            )
+            fig_gap.add_hline(y=0, line_dash="dash")
+
+        pace_df = build_pace_df(xp_explorer_df)
+        if not pace_df.empty:
+            fig_pace = px.line(
+                pace_df,
+                x="Date",
+                y="XP/day",
+                color="Spieler",
+                markers=True,
+                title="Interval Pace (XP/day)",
+            )
+
+    latest_medals_view = pd.DataFrame()
+    first_achieved_view = pd.DataFrame()
+    if show_medals:
+        latest_medals_view, first_achieved_view = _build_medal_export_tables(dash_medal_df, dash_display_medal_df, goals_df)
+
+    chart_items: list[tuple[str, go.Figure | None]] = [
+        ("PoGo XP Growth", fig_growth),
+        ("XP Gain (Last 30 Days)", fig_gain),
+        ("XP Explorer: Total XP Over Time", fig_xp_total),
+        ("XP Explorer: Rank Over Time (Step)", fig_rank),
+        ("XP Explorer: Gap Change Since First Snapshot", fig_gap),
+        ("XP Explorer: Interval Pace (XP/day)", fig_pace),
+    ]
+
+    sections: list[tuple[str, pd.DataFrame]] = [
+        ("Current XP Ranking", ranking_view),
+        ("XP Gain Table (Last 30 Days)", gain_view),
+    ]
+    if show_medals:
+        sections.append(("Latest Medal Status", latest_medals_view))
+        sections.append(("Latest Achieved Platinum Medals", first_achieved_view))
+
+    accounts_text = ", ".join([str(a) for a in selected_accounts]) if selected_accounts else "-"
+    generated_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "metric_cards": metric_cards,
+        "chart_items": chart_items,
+        "sections": sections,
+        "accounts_text": accounts_text,
+        "generated_at": generated_at,
+    }
+
+
+def build_dashboard_export_html(
+    dashboard_title: str,
+    selected_group: str,
+    selected_accounts: list[str],
+    dash_xp_df: pd.DataFrame,
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    curve_map: dict[int, int],
+    show_medals: bool,
+    export_mode: str,
+) -> str:
+    theme = _export_theme(export_mode)
+    payload = _build_dashboard_export_payload(
+        selected_accounts=selected_accounts,
+        dash_xp_df=dash_xp_df,
+        dash_medal_df=dash_medal_df,
+        dash_display_medal_df=dash_display_medal_df,
+        goals_df=goals_df,
+        curve_map=curve_map,
+        show_medals=show_medals,
+    )
+    metric_cards = payload["metric_cards"]
+    chart_items = payload["chart_items"]
+    sections_data = payload["sections"]
+    accounts_text = str(payload["accounts_text"])
+    generated_at = str(payload["generated_at"])
+
+    chart_blocks: list[str] = []
+    include_js = True
+    for chart_title, fig in chart_items:
+        if fig is None:
+            continue
+        _style_export_figure(fig, export_mode)
+        chart_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
+        chart_blocks.append(
+            fig.to_html(
+                full_html=False,
+                include_plotlyjs="inline" if include_js else False,
+                config={"displaylogo": False},
+            )
+        )
+        chart_blocks.append("</section>")
+        include_js = False
+
+    cards_html = "".join(
+        [
+            (
+                "<div class='metric-card'>"
+                f"<div class='metric-label'>{escape(lbl)}</div>"
+                f"<div class='metric-value'>{escape(val)}</div>"
+                f"<div class='metric-delta'>{escape(delta)}</div>"
+                "</div>"
+            )
+            for (lbl, val, delta) in metric_cards
+        ]
+    )
+    sections = [_df_section_html(str(title), df) for (title, df) in sections_data]
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{escape(dashboard_title)} - {escape(selected_group)}</title>
+  <style>
+    body {{ background:{theme["body_bg"]}; color:{theme["font"]}; font-family:Segoe UI, Arial, sans-serif; margin:20px; font-size:{theme["base_font_size"]}; }}
+    .container {{ max-width:{theme["max_width"]}; margin:0 auto; }}
+    h1, h2 {{ margin:0 0 10px 0; }}
+    p {{ color:{theme["muted"]}; }}
+    .meta {{ margin-bottom:18px; }}
+    .metrics {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin:14px 0 18px 0; }}
+    .metric-card {{ background:{theme["card_bg"]}; border:1px solid {theme["border"]}; border-radius:10px; padding:12px; }}
+    .metric-label {{ color:{theme["muted"]}; font-size:12px; }}
+    .metric-value {{ font-size:30px; margin:8px 0 6px 0; }}
+    .metric-delta {{ color:{theme["font"]}; opacity:0.9; font-size:13px; min-height:16px; }}
+    section {{ margin-bottom:18px; }}
+    .report-table {{ width:100%; border-collapse:collapse; background:{theme["table_bg"]}; border:1px solid {theme["border"]}; }}
+    .report-table th, .report-table td {{ border:1px solid {theme["border"]}; padding:6px 8px; text-align:left; }}
+    .report-table th {{ background:{theme["table_head"]}; }}
+    @media (max-width: 1000px) {{
+      .metrics {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+  <h1>{escape(dashboard_title)}</h1>
+  <div class="meta">
+    <p><strong>Group:</strong> {escape(selected_group)}</p>
+    <p><strong>Export Mode:</strong> {escape(str(theme["name"]))}</p>
+    <p><strong>Accounts:</strong> {escape(accounts_text)}</p>
+    <p><strong>Generated:</strong> {escape(generated_at)}</p>
+  </div>
+  <div class="metrics">{cards_html}</div>
+  {''.join(chart_blocks)}
+  {''.join(sections)}
+  </div>
+</body>
+</html>
+"""
+    return html
+
+
+def _figure_to_png_via_subprocess(fig: go.Figure, width: int, height: int, scale: int = 2) -> tuple[bytes | None, str | None]:
+    script = r"""
+import json
+import sys
+import plotly.graph_objects as go
+
+w = int(sys.argv[1])
+h = int(sys.argv[2])
+s = int(sys.argv[3])
+raw = sys.stdin.buffer.read().decode("utf-8")
+fig = go.Figure(json.loads(raw))
+out = fig.to_image(format="png", width=w, height=h, scale=s)
+sys.stdout.buffer.write(out)
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(int(width)), str(int(height)), str(int(scale))],
+            input=fig.to_json().encode("utf-8"),
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except Exception as e:
+        return None, str(e)
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
+        return None, err or f"subprocess exited with code {proc.returncode}"
+    return bytes(proc.stdout or b""), None
+
+
+def build_dashboard_export_png(
+    dashboard_title: str,
+    selected_group: str,
+    selected_accounts: list[str],
+    dash_xp_df: pd.DataFrame,
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    curve_map: dict[int, int],
+    show_medals: bool,
+    export_mode: str,
+) -> tuple[bytes | None, str | None]:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None, "Picture export requires `Pillow`. Install dependencies and retry."
+
+    payload = _build_dashboard_export_payload(
+        selected_accounts=selected_accounts,
+        dash_xp_df=dash_xp_df,
+        dash_medal_df=dash_medal_df,
+        dash_display_medal_df=dash_display_medal_df,
+        goals_df=goals_df,
+        curve_map=curve_map,
+        show_medals=show_medals,
+    )
+    theme = _export_theme(export_mode)
+    chart_items: list[tuple[str, go.Figure | None]] = payload["chart_items"]
+    sections_data: list[tuple[str, pd.DataFrame]] = payload["sections"]
+    metric_cards: list[tuple[str, str, str]] = payload["metric_cards"]
+    accounts_text = str(payload["accounts_text"])
+    generated_at = str(payload["generated_at"])
+
+    width = 1800
+    pad = 20
+    bg = str(theme["body_bg"])
+    fg = str(theme["font"])
+    card_bg = str(theme["card_bg"])
+    border = str(theme["border"])
+    muted = str(theme["muted"])
+
+    def _load_font(candidates: list[str], size: int) -> "ImageFont.ImageFont":
+        for fp in candidates:
+            try:
+                p = Path(fp)
+                if p.exists():
+                    return ImageFont.truetype(str(p), size=size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    font_title = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 36)
+    font_section = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 24)
+    font_body = _load_font(["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"], 18)
+    font_mono = _load_font(["C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/cour.ttf"], 16)
+
+    def _line_height(font_obj: "ImageFont.ImageFont") -> int:
+        try:
+            box = font_obj.getbbox("Ag")
+            return max(16, (box[3] - box[1]) + 6)
+        except Exception:
+            return 22
+
+    def text_block(
+        title: str,
+        lines: list[str],
+        title_color: str | None = None,
+        title_font: "ImageFont.ImageFont | None" = None,
+        body_font: "ImageFont.ImageFont | None" = None,
+    ) -> "Image.Image":
+        tcol = title_color or fg
+        tf = title_font or font_section
+        bf = body_font or font_body
+        title_h = _line_height(tf)
+        line_h = _line_height(bf)
+        body_rows = len(lines)
+        block_h = pad * 2 + title_h + (body_rows * line_h if body_rows else 0)
+        img = Image.new("RGB", (width, block_h), card_bg)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(0, 0), (width - 1, block_h - 1)], outline=border, width=1)
+        draw.text((pad, pad), title, fill=tcol, font=tf)
+        y = pad + title_h
+        for ln in lines:
+            draw.text((pad, y), ln, fill=fg, font=bf)
+            y += line_h
+        return img
+
+    blocks: list["Image.Image"] = []
+    header_lines = [
+        f"Group: {selected_group}",
+        f"Export Mode: {theme['name']}",
+        f"Accounts: {accounts_text}",
+        f"Generated: {generated_at}",
+    ]
+    blocks.append(text_block(dashboard_title, header_lines, title_color=fg, title_font=font_title, body_font=font_body))
+    metric_lines = [f"{lbl}: {val} ({delta})" for (lbl, val, delta) in metric_cards]
+    blocks.append(text_block("Metrics", metric_lines, title_color=muted, title_font=font_section, body_font=font_body))
+
+    for chart_title, fig in chart_items:
+        if fig is None:
+            continue
+        _style_export_figure(fig, export_mode)
+        try:
+            h = int(fig.layout.height) if getattr(fig.layout, "height", None) else 520
+            png_bytes = fig.to_image(format="png", width=width, height=max(320, h), scale=2)
+        except Exception as e:
+            msg = str(e).strip()
+            if "broadcast_args_to_dicts" in msg or "plotly.io._utils" in msg:
+                png_bytes, sub_err = _figure_to_png_via_subprocess(fig, width=width, height=max(320, h), scale=2)
+                if png_bytes:
+                    pass
+                else:
+                    detail = f" ({sub_err})" if sub_err else ""
+                    return None, (
+                        "Picture export failed due to mixed Plotly/Kaleido runtime. "
+                        f"Restart Streamlit after dependency updates (`python run_server.py`).{detail}"
+                    )
+            if "Chrome" in msg or "chrom" in msg.lower():
+                return None, (
+                    "Picture export needs Chrome for Kaleido v1. "
+                    "Install Chrome and retry."
+                )
+            if msg:
+                return None, f"Picture export failed: {msg}"
+            return None, "Picture export failed while rendering Plotly images."
+        chart_img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        if chart_img.width != width:
+            new_h = int(chart_img.height * (width / chart_img.width))
+            chart_img = chart_img.resize((width, new_h))
+        blocks.append(chart_img)
+
+    for sec_title, sec_df in sections_data:
+        if sec_df.empty:
+            blocks.append(text_block(sec_title, ["No data."], title_color=muted, title_font=font_section, body_font=font_body))
+            continue
+        formatted = _format_export_df(sec_df)
+        preview_rows = min(len(formatted), 40)
+        table_text = formatted.head(preview_rows).to_string(index=False).splitlines()
+        lines = table_text
+        if len(formatted) > preview_rows:
+            lines += [f"... ({len(formatted) - preview_rows} more rows)"]
+        blocks.append(text_block(sec_title, lines, title_color=muted, title_font=font_section, body_font=font_mono))
+
+    total_h = pad
+    for b in blocks:
+        total_h += b.height + pad
+    canvas = Image.new("RGB", (width + (pad * 2), total_h), bg)
+    y = pad
+    for b in blocks:
+        canvas.paste(b, (pad, y))
+        y += b.height + pad
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")
+    return out.getvalue(), None
+
+
+def render_dashboard_export_button(
+    dashboard_title: str,
+    selected_group: str,
+    selected_accounts: list[str],
+    dash_xp_df: pd.DataFrame,
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    curve_map: dict[int, int],
+    show_medals: bool,
+    key: str,
+) -> None:
+    mode_options = ["Dark", "Light", "WhatsApp"]
+    mode_label = st.selectbox("Export Mode", options=mode_options, index=0, key=f"{key}_mode")
+    export_mode = str(mode_label).strip().lower()
+    export_format = st.selectbox("Export Format", options=["HTML", "Picture (PNG)"], index=0, key=f"{key}_format")
+    stamp = pd.Timestamp.now().strftime("%Y-%m-%d")
+    base_name = f"{stamp}_{_slugify(selected_group)}_{_slugify(dashboard_title)}_{_slugify(export_mode)}"
+
+    if export_format == "Picture (PNG)":
+        png_bytes, png_err = build_dashboard_export_png(
+            dashboard_title=dashboard_title,
+            selected_group=selected_group,
+            selected_accounts=selected_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            show_medals=show_medals,
+            export_mode=export_mode,
+        )
+        if png_err:
+            st.warning(png_err)
+        st.download_button(
+            "Export This Group (PNG)",
+            data=png_bytes or b"",
+            file_name=f"{base_name}_picture.png",
+            mime="image/png",
+            disabled=png_bytes is None,
+            key=f"{key}_png",
+        )
+        return
+
+    html = build_dashboard_export_html(
+        dashboard_title=dashboard_title,
+        selected_group=selected_group,
+        selected_accounts=selected_accounts,
+        dash_xp_df=dash_xp_df,
+        dash_medal_df=dash_medal_df,
+        dash_display_medal_df=dash_display_medal_df,
+        goals_df=goals_df,
+        curve_map=curve_map,
+        show_medals=show_medals,
+        export_mode=export_mode,
+    )
+    st.download_button(
+        "Export This Group (HTML)",
+        data=html.encode("utf-8"),
+        file_name=f"{base_name}.html",
+        mime="text/html",
+        key=f"{key}_html",
+    )
 
 
 def render_dashboard_content(
@@ -1113,7 +2047,6 @@ recent_gain_df = xp_recent_gain(xp_df, days=30)
 pages = [
     "Dashboard Global",
     "Dashboard Personal",
-    "XP Explorer",
     "Medal Explorer",
     "Data Input",
     "Last Inputs",
@@ -1143,6 +2076,18 @@ if page == "Dashboard Global":
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
         dash_medal_df = medal_df[medal_df["account"].isin(dashboard_accounts)].copy()
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
+        render_dashboard_export_button(
+            dashboard_title="Dashboard Global",
+            selected_group=selected_dashboard_group,
+            selected_accounts=dashboard_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            show_medals=False,
+            key="export_dashboard_global",
+        )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -1151,6 +2096,8 @@ if page == "Dashboard Global":
             curve_map=curve_map,
             show_medals=False,
         )
+        st.divider()
+        render_xp_explorer_section(dash_xp_df, key_prefix="dashboard_global_xp_explorer")
 
 if page == "Dashboard Personal":
     st.subheader("Dashboard Personal")
@@ -1173,6 +2120,18 @@ if page == "Dashboard Personal":
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
         dash_medal_df = medal_df[medal_df["account"].isin(dashboard_accounts)].copy()
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
+        render_dashboard_export_button(
+            dashboard_title="Dashboard Personal",
+            selected_group=selected_dashboard_group,
+            selected_accounts=dashboard_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            show_medals=True,
+            key="export_dashboard_personal",
+        )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -1181,100 +2140,8 @@ if page == "Dashboard Personal":
             curve_map=curve_map,
             show_medals=True,
         )
-
-if page == "XP Explorer":
-    st.subheader("XP Explorer")
-    if xp_df.empty:
-        st.warning("No XP history data found.")
-    else:
-        group_names = list(groups.keys())
-        if not group_names:
-            group_names = ["All players"]
-            groups = {"All players": sorted(xp_df["Spieler"].unique().tolist())}
-
-        default_group = "3Accounts" if "3Accounts" in groups else group_names[0]
-        selected_group = st.selectbox("Group", group_names, index=group_names.index(default_group))
-        default_players = groups.get(selected_group, [])
-        selected_players = st.multiselect(
-            "Players",
-            options=sorted(xp_df["Spieler"].unique().tolist()),
-            default=[p for p in default_players if p in set(xp_df["Spieler"])],
-        )
-        common_interval_only = st.checkbox("Use common interval for all selected players", value=True)
-
-        df = xp_df[xp_df["Spieler"].isin(selected_players)].copy()
-        if common_interval_only:
-            df = restrict_to_common_interval(df)
-        if df.empty:
-            st.warning("No rows for selected filters.")
-        else:
-            min_date = df["Date"].min().date()
-            max_date = df["Date"].max().date()
-            d_start, d_end = st.slider("Date range", min_value=min_date, max_value=max_date, value=(min_date, max_date))
-            df = df[(df["Date"] >= pd.Timestamp(d_start)) & (df["Date"] <= pd.Timestamp(d_end))].copy()
-
-            fig_total = px.line(
-                df,
-                x="Date",
-                y="Total XP",
-                color="Spieler",
-                markers=True,
-                title="Total XP Over Time",
-            )
-            st.plotly_chart(fig_total, use_container_width=True)
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                rank_df = build_rank_df(df)
-                fig_rank = go.Figure()
-                for player, grp in rank_df.groupby("Spieler", sort=True):
-                    fig_rank.add_trace(
-                        go.Scatter(
-                            x=grp["Date"],
-                            y=grp["Rank"],
-                            mode="lines+markers",
-                            line_shape="hv",
-                            name=player,
-                        )
-                    )
-                fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
-                fig_rank.update_yaxes(autorange="reversed", dtick=1)
-                no_rank_changes = all(grp["Rank"].nunique() <= 1 for _, grp in rank_df.groupby("Spieler"))
-                if no_rank_changes:
-                    fig_rank.add_annotation(
-                        text="No rank changes in this time window",
-                        xref="paper",
-                        yref="paper",
-                        x=0.5,
-                        y=0.95,
-                        showarrow=False,
-                    )
-                st.plotly_chart(fig_rank, use_container_width=True)
-
-            with col_b:
-                gap_df = build_gap_change_df(df)
-                fig_gap = px.line(
-                    gap_df,
-                    x="Date",
-                    y="Gap Change",
-                    color="Spieler",
-                    markers=True,
-                    title="Gap Change Since First Snapshot",
-                )
-                fig_gap.add_hline(y=0, line_dash="dash")
-                st.plotly_chart(fig_gap, use_container_width=True)
-
-            pace_df = build_pace_df(df)
-            if not pace_df.empty:
-                fig_pace = px.line(
-                    pace_df,
-                    x="Date",
-                    y="XP/day",
-                    color="Spieler",
-                    markers=True,
-                    title="Interval Pace (XP/day)",
-                )
-                st.plotly_chart(fig_pace, use_container_width=True)
+        st.divider()
+        render_xp_explorer_section(dash_xp_df, key_prefix="dashboard_personal_xp_explorer")
 
 if page == "Medal Explorer":
     st.subheader("Medal Explorer")
@@ -1322,14 +2189,21 @@ if page == "Medal Explorer":
                 goal_val = goals_map.get(goal_lookup_id)
                 if goal_val is None or pd.isna(goal_val):
                     return
+                goal_val_f = float(goal_val)
 
                 fig_medal.add_hline(
-                    y=float(goal_val),
+                    y=goal_val_f,
                     line_dash="dash",
                     line_color="gray",
                     annotation_text=f"Goal: {goal_val:g}",
                     annotation_position="top left",
                 )
+                y_max_data = pd.to_numeric(line_df.get("value"), errors="coerce").max()
+                if pd.notna(y_max_data):
+                    y_top = max(float(y_max_data), goal_val_f)
+                    if y_top <= 0:
+                        y_top = 1.0
+                    fig_medal.update_yaxes(range=[0, y_top * 1.05])
                 if not show_goal_trends:
                     return
                 color_by_account: dict[str, str | None] = {}
@@ -1374,6 +2248,57 @@ if page == "Medal Explorer":
                     add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID)
                     fig_platinum.update_layout(height=520)
                     st.plotly_chart(fig_platinum, use_container_width=True)
+
+            xp_line_df = xp_df[xp_df["Spieler"].isin(selected_accounts)].copy()
+            xp_line_df = xp_line_df[
+                (xp_line_df["Date"] >= pd.Timestamp(d_start)) & (xp_line_df["Date"] <= pd.Timestamp(d_end))
+            ].copy()
+            if not xp_line_df.empty:
+                xp_goal_value: float | None = None
+                fig_xp = px.line(
+                    xp_line_df,
+                    x="Date",
+                    y="Total XP",
+                    color="Spieler",
+                    markers=True,
+                    title="Progress: XP",
+                )
+                if curve_map:
+                    xp_goal_level = 80 if 80 in curve_map else int(max(curve_map.keys()))
+                    xp_goal_value = float(curve_map[xp_goal_level])
+                    fig_xp.add_hline(
+                        y=xp_goal_value,
+                        line_dash="dash",
+                        line_color="gray",
+                        annotation_text=f"Goal L{xp_goal_level}: {int(xp_goal_value):,}",
+                        annotation_position="top left",
+                    )
+                if show_goal_trends:
+                    color_by_player: dict[str, str | None] = {}
+                    for tr in fig_xp.data:
+                        name = str(getattr(tr, "name", ""))
+                        color = getattr(getattr(tr, "line", None), "color", None)
+                        color_by_player[name] = color
+                    if xp_goal_value is not None:
+                        for player, grp in xp_line_df.groupby("Spieler", sort=True):
+                            trend_trace = build_xp_projection_trace(
+                                grp[["Date", "Total XP"]],
+                                float(xp_goal_value),
+                                str(player),
+                                color_by_player.get(str(player)),
+                            )
+                            if trend_trace is not None:
+                                fig_xp.add_trace(trend_trace)
+                fig_xp.update_layout(height=460)
+                y_max_xp = pd.to_numeric(xp_line_df["Total XP"], errors="coerce").max()
+                if xp_goal_value is not None:
+                    y_max_xp = max(float(y_max_xp), xp_goal_value)
+                if pd.notna(y_max_xp):
+                    y_top_xp = max(1.0, float(y_max_xp) * 1.05)
+                    fig_xp.update_yaxes(range=[0, y_top_xp], tickformat=",.0f")
+                else:
+                    fig_xp.update_yaxes(tickformat=",.0f")
+                st.plotly_chart(fig_xp, use_container_width=True)
 
             medals_for_grid = {
                 m for m in medal_ids_available if m not in EXCLUDED_MEDAL_GRAPH_IDS and m != DERIVED_MEDAL_ID
@@ -1495,23 +2420,29 @@ if page == "Data Input":
                 xp_editor_rows.append(
                     {
                         "account": acc,
+                        "lvl_last": int(lvl_default),
+                        "xp_bar_last": int(xp_default),
                         "lvl": lvl_default,
                         "xp_bar": xp_default,
                     }
                 )
 
-            _, xp_input_col, _ = st.columns([0.22, 0.56, 0.22], gap="small")
-            col_widths = [1.5, 0.9, 1.2]
-            h1, h2, h3 = xp_input_col.columns(col_widths, gap="small")
+            _, xp_input_col, _ = st.columns([0.28, 0.44, 0.28], gap="small")
+            col_widths = [1.45, 0.7, 1.0, 0.85, 1.2]
+            h1, h2, h3, h4, h5 = xp_input_col.columns(col_widths, gap="small")
             h1.markdown("**Account**")
-            h2.markdown("**Level**")
-            h3.markdown("**XP Bar**")
+            h2.markdown("**Level (last Data)**")
+            h3.markdown("**XPBar (last Data)**")
+            h4.markdown("**Level**")
+            h5.markdown("**XP Bar**")
 
             xp_inputs: list[dict[str, object]] = []
             for row in xp_editor_rows:
                 acc = str(row["account"])
-                c1, c2, c3 = xp_input_col.columns(col_widths, gap="small")
+                c1, c2, c3, c4, c5 = xp_input_col.columns(col_widths, gap="small")
                 c1.write(acc)
+                c2.markdown(f"`{int(row['lvl_last'])}`")
+                c3.markdown(f"`{int(row['xp_bar_last']):,}`")
                 lvl_state_key = f"xp_level_input_{xp_date.isoformat()}_{acc}"
                 if lvl_state_key not in st.session_state:
                     st.session_state[lvl_state_key] = int(row["lvl"])
@@ -1521,7 +2452,7 @@ if page == "Data Input":
                     except Exception:
                         current_lvl = int(row["lvl"])
                     st.session_state[lvl_state_key] = max(1, min(100, current_lvl))
-                lvl_value = c2.number_input(
+                lvl_value = c4.number_input(
                     "Level",
                     min_value=1,
                     max_value=100,
@@ -1529,7 +2460,7 @@ if page == "Data Input":
                     key=lvl_state_key,
                     label_visibility="collapsed",
                 )
-                xp_bar_value = c3.text_input(
+                xp_bar_value = c5.text_input(
                     "XP Bar",
                     value=str(int(row["xp_bar"])),
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
@@ -1660,19 +2591,22 @@ if page == "Data Input":
                         "value": last_input_value,
                     }
                 )
-            edited_medals = st.data_editor(
-                pd.DataFrame(editor_rows),
-                hide_index=True,
-                use_container_width=True,
-                disabled=["display_name", "goal_value", "last_input_value"],
-                column_config={
-                    "display_name": st.column_config.TextColumn("Display Name"),
-                    "goal_value": st.column_config.NumberColumn("Goal"),
-                    "last_input_value": st.column_config.NumberColumn("Last Input Value"),
-                    "value": st.column_config.NumberColumn("Value", step=1.0),
-                },
-                key=f"medal_full_editor_{medal_account}",
-            )
+            _, medal_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
+            with medal_input_col:
+                edited_medals = st.data_editor(
+                    pd.DataFrame(editor_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                    disabled=["display_name", "goal_value", "last_input_value"],
+                    height=520,
+                    column_config={
+                        "display_name": st.column_config.TextColumn("Display Name", width="medium"),
+                        "goal_value": st.column_config.NumberColumn("Goal", width="small"),
+                        "last_input_value": st.column_config.NumberColumn("Last Input Value", width="small"),
+                        "value": st.column_config.NumberColumn("Value", step=1.0, width="small"),
+                    },
+                    key=f"medal_full_editor_{medal_account}",
+                )
             if st.button("Save full medal snapshot for account", key="save_full_medal_snapshot"):
                 rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
