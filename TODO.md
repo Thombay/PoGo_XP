@@ -94,3 +94,4 @@ Notes:
 - [ ] Calculate `platinum_medals` from existing data:
   - medal counts as platinum when `value >= goal_value`
 - [ ] Add graphs and calculations based on derived `platinum_medals`
+- [] medal snapshots.csv shouldnt use "" for data (, or ; as separator)
