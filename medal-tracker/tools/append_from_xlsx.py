@@ -13,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
 from shared.paths import inputs_dir, medal_snapshots_path, medals_config_path
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
+DERIVED_MEDAL_ID = "platinum_medals"
+EXCLUDED_MANUAL_MEDAL_IDS = {"total_xp", DERIVED_MEDAL_ID}
 MEDAL_DISPLAY_ORDER = [
     "Kanto",
     "Collector",
@@ -126,8 +128,8 @@ def _extract_data_sheet(xlsx: Path, sheet: str, account: str) -> pd.DataFrame:
         for _, r in body.iterrows():
             medal = str(r["Medal"]).strip()
             medal_id = _medal_id(medal)
-            if medal_id == "total_xp":
-                # Total XP is imported from canonical XP snapshots, never from medal sheet.
+            if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
+                # total_xp and platinum_medals are derived, never imported from medal sheets.
                 continue
             val = _as_number(r[dcol])
             if not medal or val is None:
@@ -158,8 +160,8 @@ def _extract_single_snapshot_sheet(xlsx: Path, sheet: str, account: str) -> pd.D
     for _, r in body.iterrows():
         medal = str(r["Medal"]).strip()
         medal_id = _medal_id(medal)
-        if medal_id == "total_xp":
-            # Total XP is imported from canonical XP snapshots, never from medal sheet.
+        if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
+            # total_xp and platinum_medals are derived, never imported from medal sheets.
             continue
         val = _as_number(r["Date Start"])
         if not medal or val is None:
@@ -217,8 +219,8 @@ def _ordered_medal_ids_for_template(goals: pd.DataFrame) -> list[str]:
     g["_order"] = g["display_name"].astype(str).str.lower().map(order_map).fillna(9_999)
     g = g.sort_values(["_order", "display_name"]).reset_index(drop=True)
     ordered_ids = g["medal_id"].astype(str).tolist()
-    # Total XP is derived from XP history; keep it out of manual snapshot template.
-    return [mid for mid in ordered_ids if mid != "total_xp"]
+    # total_xp and platinum_medals are derived values; keep both out of manual snapshot template.
+    return [mid for mid in ordered_ids if mid not in EXCLUDED_MANUAL_MEDAL_IDS]
 
 
 def main():

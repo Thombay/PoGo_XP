@@ -95,3 +95,4 @@ Notes:
   - medal counts as platinum when `value >= goal_value`
 - [ ] Add graphs and calculations based on derived `platinum_medals`
 - [] medal snapshots.csv shouldnt use "" for data (, or ; as separator)
+- [ ] Medal Explorer: add a full-width top graph for `platinum_medals` including a trend line that projects when the platinum goal is reached

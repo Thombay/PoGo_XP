@@ -19,6 +19,8 @@ from shared.paths import (
 )
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
+DERIVED_MEDAL_ID = "platinum_medals"
+EXCLUDED_MANUAL_MEDAL_IDS = {"total_xp", DERIVED_MEDAL_ID}
 
 
 def _load_csv(path: Path) -> pd.DataFrame:
@@ -144,6 +146,49 @@ def inject_total_xp_rows(medal_df: pd.DataFrame, xp_df: pd.DataFrame) -> pd.Data
     return combined
 
 
+def inject_derived_platinum_rows(medal_df: pd.DataFrame, cfg_df: pd.DataFrame) -> pd.DataFrame:
+    if medal_df.empty or cfg_df.empty:
+        return medal_df
+
+    if not {"medal_id", "goal_value"}.issubset(cfg_df.columns):
+        return medal_df
+
+    goals = cfg_df[["medal_id", "goal_value"]].copy()
+    goals["medal_id"] = goals["medal_id"].astype(str).str.strip().str.lower()
+    goals["goal_value"] = pd.to_numeric(goals["goal_value"], errors="coerce")
+    goals = goals.dropna(subset=["medal_id", "goal_value"]).drop_duplicates(subset=["medal_id"], keep="last")
+
+    source = medal_df.copy()
+    source["date"] = pd.to_datetime(source["date"], errors="coerce")
+    source["account"] = source["account"].astype(str).str.strip()
+    source["medal_id"] = source["medal_id"].astype(str).str.strip().str.lower()
+    source["value"] = pd.to_numeric(source["value"], errors="coerce")
+    source = source.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    source = source[~source["medal_id"].isin(EXCLUDED_MANUAL_MEDAL_IDS)].copy()
+    if source.empty:
+        return medal_df
+
+    source = source.merge(goals, on="medal_id", how="left")
+    source = source.dropna(subset=["goal_value"]).copy()
+    source = source.sort_values("date").drop_duplicates(["date", "account", "medal_id"], keep="last")
+    source["reached"] = source["value"] >= source["goal_value"]
+    platinum_counts = source.groupby(["date", "account"], as_index=False)["reached"].sum()
+    if platinum_counts.empty:
+        return medal_df
+
+    platinum_rows = pd.DataFrame(
+        {
+            "date": platinum_counts["date"].dt.date.astype(str),
+            "account": platinum_counts["account"],
+            "medal_id": DERIVED_MEDAL_ID,
+            "value": platinum_counts["reached"],
+        }
+    )
+    combined = pd.concat([medal_df, platinum_rows], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
+    return combined
+
+
 def sort_medal_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -169,16 +214,19 @@ def main():
         snapshots_df["account"] = snapshots_df["account"].replace("", pd.NA).ffill()
         snapshots_df = snapshots_df[snapshots_df["date"].astype(str).str.upper() != "YYYY-MM-DD"].copy()
     if not snapshots_df.empty and "medal_id" in snapshots_df.columns:
-        manual_total_xp = snapshots_df["medal_id"].astype(str).str.strip().str.lower().eq("total_xp")
-        dropped_count = int(manual_total_xp.sum())
+        medal_ids = snapshots_df["medal_id"].astype(str).str.strip().str.lower()
+        manual_derived = medal_ids.isin(EXCLUDED_MANUAL_MEDAL_IDS)
+        dropped_count = int(manual_derived.sum())
         if dropped_count:
             print(
-                f"Info: removed {dropped_count} manual total_xp row(s) from medal snapshots; "
-                "total_xp is injected from XP history/snapshots."
+                f"Info: removed {dropped_count} manual derived row(s) from medal snapshots "
+                f"({', '.join(sorted(EXCLUDED_MANUAL_MEDAL_IDS))}); "
+                "derived medals are injected by the pipeline."
             )
-            snapshots_df = snapshots_df[~manual_total_xp].copy()
+            snapshots_df = snapshots_df[~manual_derived].copy()
     xp_df = _try_load_xp_snapshots(xp_snapshots)
     enriched = inject_total_xp_rows(snapshots_df, xp_df)
+    enriched = inject_derived_platinum_rows(enriched, cfg_df)
     enriched = sort_medal_rows(enriched)
 
     out_file = medal_report_path()
@@ -188,7 +236,7 @@ def main():
     print(f"Saved: {out_file}")
     print(f"Rows in medal config: {len(cfg_df)}")
     print(f"Rows in medal snapshots: {len(snapshots_df)}")
-    print(f"Rows in report after XP injection: {len(enriched)}")
+    print(f"Rows in report after derived injections: {len(enriched)}")
 
 
 if __name__ == "__main__":
