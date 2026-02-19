@@ -478,6 +478,24 @@ def build_gap_change_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def gap_baseline_annotation_text(gap_df: pd.DataFrame) -> str:
+    if gap_df.empty or not {"Date", "Spieler", "Total XP"}.issubset(gap_df.columns):
+        return "Baseline (0)"
+    d = gap_df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["Total XP"] = pd.to_numeric(d["Total XP"], errors="coerce")
+    d = d.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
+    if d.empty:
+        return "Baseline (0)"
+    latest_date = d["Date"].max()
+    latest = d[d["Date"] == latest_date].copy()
+    if latest.empty:
+        return "Baseline (0)"
+    latest = latest.sort_values(["Total XP", "Spieler"], ascending=[False, True])
+    leader = str(latest.iloc[0]["Spieler"])
+    return leader
+
+
 def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -486,6 +504,14 @@ def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
     out["XP Delta"] = out.groupby("Spieler")["Total XP"].diff()
     out["XP/day"] = out["XP Delta"] / out["Days Delta"]
     out = out[out["Days Delta"] > 0].copy()
+    return out
+
+
+def build_xp_gain_over_time_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    out = df.sort_values(["Spieler", "Date"]).copy()
+    out["XP Gain"] = out["Total XP"] - out.groupby("Spieler")["Total XP"].transform("first")
     return out
 
 
@@ -529,19 +555,56 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         st.warning("No rows in selected date range.")
         return
 
-    fig_total = px.line(
-        df,
-        x="Date",
-        y="Total XP",
-        color="Spieler",
-        markers=True,
-        title="Total XP Over Time",
-    )
-    st.plotly_chart(fig_total, use_container_width=True)
+    gain_df = build_xp_gain_over_time_df(df)
+    pace_df = build_pace_df(df)
+    gap_df = build_gap_change_df(df)
+    rank_df = build_rank_df(df)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        rank_df = build_rank_df(df)
+    # Top row: XP gain over time | interval pace
+    top_left, top_right = st.columns(2)
+    with top_left:
+        fig_gain = px.line(
+            gain_df,
+            x="Date",
+            y="XP Gain",
+            color="Spieler",
+            markers=True,
+            title="XP Gain Over Time",
+        )
+        st.plotly_chart(fig_gain, use_container_width=True)
+    with top_right:
+        if pace_df.empty:
+            st.info("Interval Pace (XP/day): not enough intervals yet.")
+        else:
+            fig_pace = px.line(
+                pace_df,
+                x="Date",
+                y="XP/day",
+                color="Spieler",
+                markers=True,
+                title="Interval Pace (XP/day)",
+            )
+            st.plotly_chart(fig_pace, use_container_width=True)
+
+    # Middle row: gap change | rank over time
+    mid_left, mid_right = st.columns(2)
+    with mid_left:
+        fig_gap = px.line(
+            gap_df,
+            x="Date",
+            y="Gap Change",
+            color="Spieler",
+            markers=True,
+            title="Gap Change Since First Snapshot",
+        )
+        fig_gap.add_hline(
+            y=0,
+            line_dash="dash",
+            annotation_text=gap_baseline_annotation_text(gap_df),
+            annotation_position="bottom right",
+        )
+        st.plotly_chart(fig_gap, use_container_width=True)
+    with mid_right:
         fig_rank = go.Figure()
         for player, grp in rank_df.groupby("Spieler", sort=True):
             fig_rank.add_trace(
@@ -567,30 +630,16 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             )
         st.plotly_chart(fig_rank, use_container_width=True)
 
-    with col_b:
-        gap_df = build_gap_change_df(df)
-        fig_gap = px.line(
-            gap_df,
-            x="Date",
-            y="Gap Change",
-            color="Spieler",
-            markers=True,
-            title="Gap Change Since First Snapshot",
-        )
-        fig_gap.add_hline(y=0, line_dash="dash")
-        st.plotly_chart(fig_gap, use_container_width=True)
-
-    pace_df = build_pace_df(df)
-    if not pace_df.empty:
-        fig_pace = px.line(
-            pace_df,
-            x="Date",
-            y="XP/day",
-            color="Spieler",
-            markers=True,
-            title="Interval Pace (XP/day)",
-        )
-        st.plotly_chart(fig_pace, use_container_width=True)
+    # Bottom row: total XP full width
+    fig_total = px.line(
+        df,
+        x="Date",
+        y="Total XP",
+        color="Spieler",
+        markers=True,
+        title="Total XP Over Time",
+    )
+    st.plotly_chart(fig_total, use_container_width=True)
 
 
 def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: int) -> None:
@@ -907,6 +956,57 @@ def top_newcomer(xp_df: pd.DataFrame) -> dict[str, object] | None:
         "baseline_pace": float(row["baseline_pace"]),
         "improvement": float(row["improvement"]),
         "ratio": float(row["ratio"]),
+        "as_of": pd.to_datetime(row["as_of"]),
+    }
+
+
+def top_decliner(xp_df: pd.DataFrame) -> dict[str, object] | None:
+    if xp_df.empty:
+        return None
+
+    d = xp_df.sort_values(["Spieler", "Date"]).copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["Total XP"] = pd.to_numeric(d["Total XP"], errors="coerce")
+    d = d.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
+    d["days_delta"] = d.groupby("Spieler")["Date"].diff().dt.total_seconds() / 86_400
+    d["xp_delta"] = d.groupby("Spieler")["Total XP"].diff()
+    d["xp_per_day"] = d["xp_delta"] / d["days_delta"]
+    intervals = d[(d["days_delta"] > 0) & d["xp_per_day"].notna()].copy()
+    if intervals.empty:
+        return None
+
+    candidates: list[dict[str, object]] = []
+    for player, grp in intervals.groupby("Spieler", sort=True):
+        g = grp.sort_values("Date").reset_index(drop=True)
+        if len(g) < 2:
+            continue
+        current_pace = float(g.iloc[-1]["xp_per_day"])
+        baseline_pace = float(g.iloc[:-1]["xp_per_day"].median())
+        if pd.isna(current_pace) or pd.isna(baseline_pace):
+            continue
+        improvement = current_pace - baseline_pace
+        ratio = current_pace / baseline_pace if baseline_pace > 0 else pd.NA
+        candidates.append(
+            {
+                "spieler": str(player),
+                "current_pace": current_pace,
+                "baseline_pace": baseline_pace,
+                "improvement": improvement,
+                "ratio": ratio,
+                "as_of": pd.to_datetime(g.iloc[-1]["Date"]),
+            }
+        )
+    if not candidates:
+        return None
+    ranked = pd.DataFrame(candidates).sort_values(["improvement", "ratio"], ascending=[True, True]).reset_index(drop=True)
+    row = ranked.iloc[0]
+    ratio_value = row["ratio"]
+    return {
+        "spieler": str(row["spieler"]),
+        "current_pace": float(row["current_pace"]),
+        "baseline_pace": float(row["baseline_pace"]),
+        "improvement": float(row["improvement"]),
+        "ratio": float(ratio_value) if pd.notna(ratio_value) else float("nan"),
         "as_of": pd.to_datetime(row["as_of"]),
     }
 
@@ -1308,6 +1408,20 @@ def _build_dashboard_export_payload(
                     ),
                 )
             )
+        decliner = top_decliner(dash_xp_df)
+        if decliner is None:
+            metric_cards.append(("Most Declined Pace", "-", "no data"))
+        else:
+            metric_cards.append(
+                (
+                    "Most Declined Pace",
+                    str(decliner["spieler"]),
+                    (
+                        f"{int(round(float(decliner['current_pace']))):,} XP/day "
+                        f"({int(round(float(decliner['improvement']))):+,} vs own median)"
+                    ),
+                )
+            )
 
     if not dash_latest_xp_df.empty:
         latest_xp_date = pd.to_datetime(dash_latest_xp_df["Date"], errors="coerce").max()
@@ -1324,6 +1438,7 @@ def _build_dashboard_export_payload(
     fig_growth = None
     fig_gain = None
     fig_xp_total = None
+    fig_xp_gain_over_time = None
     fig_rank = None
     fig_gap = None
     fig_pace = None
@@ -1362,6 +1477,16 @@ def _build_dashboard_export_payload(
         if xp_explorer_df.empty:
             xp_explorer_df = dash_xp_df.copy()
         xp_explorer_df = xp_explorer_df.sort_values(["Date", "Spieler"]).copy()
+
+        gain_over_time_df = build_xp_gain_over_time_df(xp_explorer_df)
+        fig_xp_gain_over_time = px.line(
+            gain_over_time_df,
+            x="Date",
+            y="XP Gain",
+            color="Spieler",
+            markers=True,
+            title="XP Gain Over Time",
+        )
 
         fig_xp_total = px.line(
             xp_explorer_df,
@@ -1408,7 +1533,12 @@ def _build_dashboard_export_payload(
                 markers=True,
                 title="Gap Change Since First Snapshot",
             )
-            fig_gap.add_hline(y=0, line_dash="dash")
+            fig_gap.add_hline(
+                y=0,
+                line_dash="dash",
+                annotation_text=gap_baseline_annotation_text(gap_df),
+                annotation_position="bottom right",
+            )
 
         pace_df = build_pace_df(xp_explorer_df)
         if not pace_df.empty:
@@ -1429,10 +1559,11 @@ def _build_dashboard_export_payload(
     chart_items: list[tuple[str, go.Figure | None]] = [
         ("PoGo XP Growth", fig_growth),
         ("XP Gain (Last 30 Days)", fig_gain),
-        ("XP Explorer: Total XP Over Time", fig_xp_total),
-        ("XP Explorer: Rank Over Time (Step)", fig_rank),
-        ("XP Explorer: Gap Change Since First Snapshot", fig_gap),
+        ("XP Explorer: XP Gain Over Time", fig_xp_gain_over_time),
         ("XP Explorer: Interval Pace (XP/day)", fig_pace),
+        ("XP Explorer: Gap Change Since First Snapshot", fig_gap),
+        ("XP Explorer: Rank Over Time (Step)", fig_rank),
+        ("XP Explorer: Total XP Over Time", fig_xp_total),
     ]
 
     sections: list[tuple[str, pd.DataFrame]] = [
@@ -1756,9 +1887,26 @@ def render_dashboard_export_button(
     key: str,
 ) -> None:
     mode_options = ["Dark", "Light", "WhatsApp"]
-    mode_label = st.selectbox("Export Mode", options=mode_options, index=0, key=f"{key}_mode")
+    mode_col, fmt_col, action_col = st.columns([1.2, 1.3, 1.2])
+    with mode_col:
+        st.caption("Mode")
+        mode_label = st.selectbox(
+            "Export Mode",
+            options=mode_options,
+            index=0,
+            key=f"{key}_mode",
+            label_visibility="collapsed",
+        )
     export_mode = str(mode_label).strip().lower()
-    export_format = st.selectbox("Export Format", options=["HTML", "Picture (PNG)"], index=0, key=f"{key}_format")
+    with fmt_col:
+        st.caption("Format")
+        export_format = st.selectbox(
+            "Export Format",
+            options=["HTML", "Picture (PNG)"],
+            index=0,
+            key=f"{key}_format",
+            label_visibility="collapsed",
+        )
     stamp = pd.Timestamp.now().strftime("%Y-%m-%d")
     base_name = f"{stamp}_{_slugify(selected_group)}_{_slugify(dashboard_title)}_{_slugify(export_mode)}"
 
@@ -1777,14 +1925,16 @@ def render_dashboard_export_button(
         )
         if png_err:
             st.warning(png_err)
-        st.download_button(
-            "Export This Group (PNG)",
-            data=png_bytes or b"",
-            file_name=f"{base_name}_picture.png",
-            mime="image/png",
-            disabled=png_bytes is None,
-            key=f"{key}_png",
-        )
+        with action_col:
+            st.caption("Export")
+            st.download_button(
+                "PNG",
+                data=png_bytes or b"",
+                file_name=f"{base_name}_picture.png",
+                mime="image/png",
+                disabled=png_bytes is None,
+                key=f"{key}_png",
+            )
         return
 
     html = build_dashboard_export_html(
@@ -1799,13 +1949,15 @@ def render_dashboard_export_button(
         show_medals=show_medals,
         export_mode=export_mode,
     )
-    st.download_button(
-        "Export This Group (HTML)",
-        data=html.encode("utf-8"),
-        file_name=f"{base_name}.html",
-        mime="text/html",
-        key=f"{key}_html",
-    )
+    with action_col:
+        st.caption("Export")
+        st.download_button(
+            "HTML",
+            data=html.encode("utf-8"),
+            file_name=f"{base_name}.html",
+            mime="text/html",
+            key=f"{key}_html",
+        )
 
 
 def render_dashboard_content(
@@ -1819,7 +1971,12 @@ def render_dashboard_content(
     dash_latest_xp_df = latest_xp_snapshot(dash_xp_df)
     dash_recent_gain_df = xp_recent_gain(dash_xp_df, days=30)
 
-    c1, c2, c3, c4 = st.columns(4)
+    if show_medals:
+        c1, c2, c3, c4 = st.columns(4)
+        last_snapshot_col = c4
+    else:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        last_snapshot_col = c5
     if not dash_latest_xp_df.empty:
         leader_row = dash_latest_xp_df.sort_values("Total XP", ascending=False).iloc[0]
         c1.metric(
@@ -1866,16 +2023,28 @@ def render_dashboard_content(
                     f"({int(round(float(newcomer['improvement']))):+,} vs own median)"
                 ),
             )
+        decliner = top_decliner(dash_xp_df)
+        if decliner is None:
+            c4.metric("Most Declined Pace", "-", delta="no data")
+        else:
+            c4.metric(
+                "Most Declined Pace",
+                decliner["spieler"],
+                delta=(
+                    f"{int(round(float(decliner['current_pace']))):,} XP/day "
+                    f"({int(round(float(decliner['improvement']))):+,} vs own median)"
+                ),
+            )
 
     if not dash_latest_xp_df.empty:
         latest_xp_date = pd.to_datetime(dash_latest_xp_df["Date"], errors="coerce").max()
         if pd.notna(latest_xp_date):
             days_ago = (pd.Timestamp.today().normalize() - latest_xp_date.normalize()).days
-            c4.metric("Last XP Snapshot", latest_xp_date.strftime("%Y-%m-%d"), delta=f"{int(days_ago)} day(s) ago")
+            last_snapshot_col.metric("Last XP Snapshot", latest_xp_date.strftime("%Y-%m-%d"), delta=f"{int(days_ago)} day(s) ago")
         else:
-            c4.metric("Last XP Snapshot", "-", delta="no data")
+            last_snapshot_col.metric("Last XP Snapshot", "-", delta="no data")
     else:
-        c4.metric("Last XP Snapshot", "-", delta="no data")
+        last_snapshot_col.metric("Last XP Snapshot", "-", delta="no data")
 
     if not dash_latest_xp_df.empty:
         ranking_df = dash_latest_xp_df.sort_values("Total XP", ascending=False).reset_index(drop=True).copy()
@@ -2062,13 +2231,15 @@ if page == "Dashboard Global":
     )
     personal_group_names = {g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
     dashboard_group_options = ["All"] + [g for g in groups.keys() if g and g != "All" and g not in personal_group_names]
-    selected_dashboard_group = st.radio(
-        "Global Group",
-        dashboard_group_options,
-        index=0,
-        horizontal=True,
-        key="dashboard_global_group",
-    )
+    top_left, top_right = st.columns([3.6, 1.4])
+    with top_left:
+        selected_dashboard_group = st.radio(
+            "Global Group",
+            dashboard_group_options,
+            index=0,
+            horizontal=True,
+            key="dashboard_global_group",
+        )
     dashboard_accounts = accounts_for_selected_group(selected_dashboard_group, groups, all_dashboard_accounts)
     if not dashboard_accounts:
         st.info("No accounts found for the selected global group.")
@@ -2076,18 +2247,19 @@ if page == "Dashboard Global":
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
         dash_medal_df = medal_df[medal_df["account"].isin(dashboard_accounts)].copy()
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
-        render_dashboard_export_button(
-            dashboard_title="Dashboard Global",
-            selected_group=selected_dashboard_group,
-            selected_accounts=dashboard_accounts,
-            dash_xp_df=dash_xp_df,
-            dash_medal_df=dash_medal_df,
-            dash_display_medal_df=dash_display_medal_df,
-            goals_df=goals_df,
-            curve_map=curve_map,
-            show_medals=False,
-            key="export_dashboard_global",
-        )
+        with top_right:
+            render_dashboard_export_button(
+                dashboard_title="Dashboard Global",
+                selected_group=selected_dashboard_group,
+                selected_accounts=dashboard_accounts,
+                dash_xp_df=dash_xp_df,
+                dash_medal_df=dash_medal_df,
+                dash_display_medal_df=dash_display_medal_df,
+                goals_df=goals_df,
+                curve_map=curve_map,
+                show_medals=False,
+                key="export_dashboard_global",
+            )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -2104,15 +2276,21 @@ if page == "Dashboard Personal":
     all_dashboard_accounts = sorted(
         set(xp_df["Spieler"].dropna().astype(str).tolist()) | set(display_medal_df["account"].dropna().astype(str).tolist())
     )
-    personal_group_options = [g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}]
-    dashboard_group_options = ["All"] + personal_group_options
-    selected_dashboard_group = st.radio(
-        "Personal Group",
-        dashboard_group_options,
-        index=0,
-        horizontal=True,
-        key="dashboard_personal_group",
-    )
+    personal_groups_by_key = {str(g).strip().lower(): g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
+    dashboard_group_options = [personal_groups_by_key[k] for k in ["ownaccounts", "ich"] if k in personal_groups_by_key]
+    if not dashboard_group_options:
+        st.info("No personal groups found. Add `Ich:` and/or `OwnAccounts:` to `inputs/config/player_groups.csv`.")
+        st.stop()
+
+    top_left, top_right = st.columns([3.6, 1.4])
+    with top_left:
+        selected_dashboard_group = st.radio(
+            "Personal Group",
+            dashboard_group_options,
+            index=0,
+            horizontal=True,
+            key="dashboard_personal_group",
+        )
     dashboard_accounts = accounts_for_selected_group(selected_dashboard_group, groups, all_dashboard_accounts)
     if not dashboard_accounts:
         st.info("No accounts found for the selected personal group.")
@@ -2120,18 +2298,19 @@ if page == "Dashboard Personal":
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
         dash_medal_df = medal_df[medal_df["account"].isin(dashboard_accounts)].copy()
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
-        render_dashboard_export_button(
-            dashboard_title="Dashboard Personal",
-            selected_group=selected_dashboard_group,
-            selected_accounts=dashboard_accounts,
-            dash_xp_df=dash_xp_df,
-            dash_medal_df=dash_medal_df,
-            dash_display_medal_df=dash_display_medal_df,
-            goals_df=goals_df,
-            curve_map=curve_map,
-            show_medals=True,
-            key="export_dashboard_personal",
-        )
+        with top_right:
+            render_dashboard_export_button(
+                dashboard_title="Dashboard Personal",
+                selected_group=selected_dashboard_group,
+                selected_accounts=dashboard_accounts,
+                dash_xp_df=dash_xp_df,
+                dash_medal_df=dash_medal_df,
+                dash_display_medal_df=dash_display_medal_df,
+                goals_df=goals_df,
+                curve_map=curve_map,
+                show_medals=True,
+                key="export_dashboard_personal",
+            )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,

@@ -100,7 +100,14 @@ Dashboard pages:
 
 - top horizontal page selector (no sidebar dropdown)
 - `Dashboard`: latest XP + medal tables
+- dashboard KPIs now include both `Most Improved Pace` and `Most Declined Pace`
+- `Dashboard Personal` group selector shows only personal groups in this order: `OwnAccounts`, then `Ich` (no `All`)
+- dashboard export controls (`Mode`, `Format`, `Export`) are compact, right-aligned, and on the same row as the group radio
 - `XP Explorer`: interactive Total XP, rank step chart, gap change, interval pace
+  - graph order:
+    - top row: `XP Gain Over Time` | `Interval Pace (XP/day)`
+    - middle row: `Gap Change Since First Snapshot` (baseline line + per-account baseline labels) | `Rank Over Time (Step)`
+    - bottom row: `Total XP Over Time` (full width)
 - `Medal Explorer`: interactive medal progress and derived platinum counts
 - `Data Input`:
   - XP snapshot input for multiple accounts in one save
