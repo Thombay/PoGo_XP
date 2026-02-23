@@ -594,6 +594,66 @@ def build_xp_gain_over_time_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _trace_last_numeric_y(trace: object) -> float | None:
+    y_values = getattr(trace, "y", None)
+    if y_values is None:
+        return None
+    values = pd.to_numeric(pd.Series(y_values), errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.iloc[-1])
+
+
+def _is_figure_y_axis_reversed(fig: go.Figure, axis_token: str) -> bool:
+    axis_name = "yaxis" if axis_token in {"", "y"} else f"yaxis{axis_token[1:]}"
+    axis_obj = getattr(fig.layout, axis_name, None)
+    if axis_obj is None:
+        return False
+    autorange = str(getattr(axis_obj, "autorange", "")).strip().lower()
+    if autorange.startswith("reversed"):
+        return True
+    axis_range = getattr(axis_obj, "range", None)
+    if isinstance(axis_range, (list, tuple)) and len(axis_range) == 2:
+        try:
+            return float(axis_range[0]) > float(axis_range[1])
+        except Exception:
+            return False
+    return False
+
+
+def sort_legend_by_latest_y(fig: go.Figure | None) -> None:
+    if fig is None or not getattr(fig, "data", None):
+        return
+    ranked: list[tuple[int, float, str]] = []
+    for idx, trace in enumerate(fig.data):
+        if getattr(trace, "showlegend", None) is False:
+            continue
+        name = str(getattr(trace, "name", "")).strip()
+        if not name or name == "_nolegend_":
+            continue
+        score = _trace_last_numeric_y(trace)
+        if score is None:
+            continue
+        axis_token = str(getattr(trace, "yaxis", "y") or "y")
+        ranked.append((idx, score, axis_token))
+    if len(ranked) < 2:
+        return
+
+    def _sort_key(item: tuple[int, float, str]) -> tuple[float, int]:
+        idx, score, axis_token = item
+        reversed_axis = _is_figure_y_axis_reversed(fig, axis_token)
+        return (score if reversed_axis else -score, idx)
+
+    ordered = sorted(ranked, key=_sort_key)
+    for rank, (idx, _score, _axis) in enumerate(ordered, start=1):
+        fig.data[idx].update(legendrank=rank)
+
+
+def render_plotly_chart(fig: go.Figure, **kwargs: object) -> None:
+    sort_legend_by_latest_y(fig)
+    st.plotly_chart(fig, **kwargs)
+
+
 def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> None:
     st.subheader("XP Explorer")
     if xp_subset_df.empty:
@@ -650,7 +710,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             markers=True,
             title="XP Gain Over Time",
         )
-        st.plotly_chart(fig_gain, use_container_width=True)
+        render_plotly_chart(fig_gain, use_container_width=True)
     with top_right:
         if pace_df.empty:
             st.info("Interval Pace (XP/day): not enough intervals yet.")
@@ -663,7 +723,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
                 markers=True,
                 title="Interval Pace (XP/day)",
             )
-            st.plotly_chart(fig_pace, use_container_width=True)
+            render_plotly_chart(fig_pace, use_container_width=True)
 
     # Middle row: gap change | rank over time
     mid_left, mid_right = st.columns(2)
@@ -682,7 +742,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             annotation_text=gap_baseline_annotation_text(gap_df),
             annotation_position="bottom right",
         )
-        st.plotly_chart(fig_gap, use_container_width=True)
+        render_plotly_chart(fig_gap, use_container_width=True)
     with mid_right:
         fig_rank = go.Figure()
         for player, grp in rank_df.groupby("Spieler", sort=True):
@@ -707,7 +767,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
                 y=0.95,
                 showarrow=False,
             )
-        st.plotly_chart(fig_rank, use_container_width=True)
+        render_plotly_chart(fig_rank, use_container_width=True)
 
     # Bottom row: total XP full width
     fig_total = px.line(
@@ -718,7 +778,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         markers=True,
         title="Total XP Over Time",
     )
-    st.plotly_chart(fig_total, use_container_width=True)
+    render_plotly_chart(fig_total, use_container_width=True)
 
 
 def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: int) -> None:
@@ -1884,6 +1944,7 @@ def build_dashboard_export_html(
         for chart_title, fig in chart_items:
             if fig is None:
                 continue
+            sort_legend_by_latest_y(fig)
             _style_export_figure(fig, export_mode)
             chart_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
             chart_blocks.append(
@@ -2174,6 +2235,7 @@ def build_dashboard_export_png(
     for chart_title, fig in chart_items:
         if fig is None:
             continue
+        sort_legend_by_latest_y(fig)
         _style_export_figure(fig, export_mode)
         try:
             h = int(fig.layout.height) if getattr(fig.layout, "height", None) else 520
@@ -2677,7 +2739,7 @@ def render_dashboard_content(
 
         fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df)
         if fig_growth is not None:
-            st.plotly_chart(fig_growth, use_container_width=True)
+            render_plotly_chart(fig_growth, use_container_width=True)
 
         d_left, d_right = st.columns([1.05, 1.0])
         with d_left:
@@ -2735,7 +2797,7 @@ def render_dashboard_content(
                     labels={"xp_gain": "XP Gain", "Spieler": "Account"},
                 )
                 fig_gain.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
-                st.plotly_chart(fig_gain, use_container_width=True)
+                render_plotly_chart(fig_gain, use_container_width=True)
                 gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy()
                 st.dataframe(
                     gain_view,
@@ -3123,7 +3185,7 @@ if page == "Medal Explorer":
                     )
                     add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID)
                     fig_platinum.update_layout(height=520)
-                    st.plotly_chart(fig_platinum, use_container_width=True)
+                    render_plotly_chart(fig_platinum, use_container_width=True)
                     st.caption(
                         "Platinum graph starts at medal tracking start per account "
                         f"(first date with >= {MIN_MEDAL_ROWS_FOR_TRACKING_START} medal rows)."
@@ -3178,7 +3240,7 @@ if page == "Medal Explorer":
                     fig_xp.update_yaxes(range=[0, y_top_xp], tickformat=",.0f")
                 else:
                     fig_xp.update_yaxes(tickformat=",.0f")
-                st.plotly_chart(fig_xp, use_container_width=True)
+                render_plotly_chart(fig_xp, use_container_width=True)
 
             medals_for_grid = {
                 m for m in medal_ids_available if m not in EXCLUDED_MEDAL_GRAPH_IDS and m != DERIVED_MEDAL_ID
@@ -3217,7 +3279,7 @@ if page == "Medal Explorer":
                         add_goal_and_trends(fig_medal, line_df, medal_id)
                         fig_medal.update_layout(height=320)
                         with row_cols[col_idx]:
-                            st.plotly_chart(fig_medal, use_container_width=True)
+                            render_plotly_chart(fig_medal, use_container_width=True)
 
 if page == "Last Inputs":
     st.subheader("Last Inputs")
