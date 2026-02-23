@@ -2067,7 +2067,7 @@ def build_dashboard_export_html(
     export_mode: str,
     window_days: int,
 ) -> str:
-    def _render_payload_block(payload: dict[str, object], include_js: bool) -> tuple[str, bool]:
+    def _render_payload_block(payload: dict[str, object], include_js: bool, mode: str) -> tuple[str, bool]:
         metric_cards = payload["metric_cards"]
         chart_items = payload["chart_items"]
         sections_data = payload["sections"]
@@ -2077,7 +2077,7 @@ def build_dashboard_export_html(
             if fig is None:
                 continue
             sort_legend_by_latest_y(fig)
-            _style_export_figure(fig, export_mode)
+            _style_export_figure(fig, mode)
             chart_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
             chart_blocks.append(
                 fig.to_html(
@@ -2105,7 +2105,12 @@ def build_dashboard_export_html(
         block_html = f"<div class='metrics'>{cards_html}</div>{''.join(chart_blocks)}{sections_html}"
         return block_html, include_plotly
 
-    theme = _export_theme(export_mode)
+    layout_theme = _export_theme(export_mode)
+    dark_theme = _export_theme("dark")
+    light_theme = _export_theme("light")
+    default_theme_mode = "dark" if str(export_mode).strip().lower() == "dark" else "light"
+    default_theme_label = "Dark" if default_theme_mode == "dark" else "Light"
+
     default_window = int(window_days)
     export_windows = [int(w) for w in DASHBOARD_WINDOW_OPTIONS]
     if default_window not in export_windows:
@@ -2131,19 +2136,31 @@ def build_dashboard_export_html(
     include_js = True
     window_panes: list[str] = []
     for w in export_windows:
-        block_html, include_js = _render_payload_block(payloads_by_window[w], include_js=include_js)
-        display_mode = "block" if int(w) == int(default_window) else "none"
-        window_panes.append(
-            f"<div class='window-pane' id='window-pane-{int(w)}' style='display:{display_mode};'>{block_html}</div>"
-        )
+        for theme_mode in ["dark", "light"]:
+            block_html, include_js = _render_payload_block(payloads_by_window[w], include_js=include_js, mode=theme_mode)
+            display_mode = "block" if int(w) == int(default_window) and theme_mode == default_theme_mode else "none"
+            window_panes.append(
+                (
+                    f"<div class='window-pane theme-pane' "
+                    f"id='window-pane-{int(w)}-{theme_mode}' "
+                    f"data-window='{int(w)}' data-theme='{theme_mode}' "
+                    f"style='display:{display_mode};'>{block_html}</div>"
+                )
+            )
 
-    toggle_buttons = "".join(
+    window_buttons = "".join(
         [
             (
                 f"<button type='button' class='window-btn' id='window-btn-{int(w)}' "
                 f"onclick='setWindow({int(w)})'>{int(w)}d</button>"
             )
             for w in export_windows
+        ]
+    )
+    theme_buttons = "".join(
+        [
+            "<button type='button' class='theme-btn' id='theme-btn-dark' onclick=\"setTheme('dark')\">Dark</button>",
+            "<button type='button' class='theme-btn' id='theme-btn-light' onclick=\"setTheme('light')\">Light</button>",
         ]
     )
 
@@ -2153,51 +2170,91 @@ def build_dashboard_export_html(
   <meta charset="utf-8" />
   <title>{escape(dashboard_title)} - {escape(selected_group)}</title>
   <style>
-    body {{ background:{theme["body_bg"]}; color:{theme["font"]}; font-family:Segoe UI, Arial, sans-serif; margin:20px; font-size:{theme["base_font_size"]}; }}
-    .container {{ max-width:{theme["max_width"]}; margin:0 auto; }}
+    :root {{
+      --body-bg: {dark_theme["body_bg"]};
+      --font: {dark_theme["font"]};
+      --muted: {dark_theme["muted"]};
+      --card-bg: {dark_theme["card_bg"]};
+      --border: {dark_theme["border"]};
+      --table-bg: {dark_theme["table_bg"]};
+      --table-head: {dark_theme["table_head"]};
+      --line: {dark_theme["line"]};
+    }}
+    body.theme-dark {{
+      --body-bg: {dark_theme["body_bg"]};
+      --font: {dark_theme["font"]};
+      --muted: {dark_theme["muted"]};
+      --card-bg: {dark_theme["card_bg"]};
+      --border: {dark_theme["border"]};
+      --table-bg: {dark_theme["table_bg"]};
+      --table-head: {dark_theme["table_head"]};
+      --line: {dark_theme["line"]};
+    }}
+    body.theme-light {{
+      --body-bg: {light_theme["body_bg"]};
+      --font: {light_theme["font"]};
+      --muted: {light_theme["muted"]};
+      --card-bg: {light_theme["card_bg"]};
+      --border: {light_theme["border"]};
+      --table-bg: {light_theme["table_bg"]};
+      --table-head: {light_theme["table_head"]};
+      --line: {light_theme["line"]};
+    }}
+    body {{ background:var(--body-bg); color:var(--font); font-family:Segoe UI, Arial, sans-serif; margin:20px; font-size:{layout_theme["base_font_size"]}; }}
+    .container {{ max-width:{layout_theme["max_width"]}; margin:0 auto; }}
     h1, h2 {{ margin:0 0 10px 0; }}
-    p {{ color:{theme["muted"]}; }}
+    p {{ color:var(--muted); }}
     .meta {{ margin-bottom:12px; }}
     .switch-row {{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }}
-    .switch-label {{ color:{theme["muted"]}; font-size:13px; }}
-    .window-switch {{ display:flex; gap:8px; }}
-    .window-btn {{ background:{theme["card_bg"]}; color:{theme["font"]}; border:1px solid {theme["border"]}; border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px; }}
-    .window-btn.active {{ background:{theme["table_head"]}; border-color:{theme["line"]}; font-weight:600; }}
+    .switch-label {{ color:var(--muted); font-size:13px; }}
+    .window-switch, .theme-switch {{ display:flex; gap:8px; }}
+    .window-btn, .theme-btn {{ background:var(--card-bg); color:var(--font); border:1px solid var(--border); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px; }}
+    .window-btn.active, .theme-btn.active {{ background:var(--table-head); border-color:var(--line); font-weight:600; }}
     .metrics {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin:14px 0 18px 0; }}
     .window-pane {{ width:100%; }}
-    .metric-card {{ background:{theme["card_bg"]}; border:1px solid {theme["border"]}; border-radius:10px; padding:12px; }}
-    .metric-label {{ color:{theme["muted"]}; font-size:12px; }}
+    .metric-card {{ background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:12px; }}
+    .metric-label {{ color:var(--muted); font-size:12px; }}
     .metric-value {{ font-size:30px; margin:8px 0 6px 0; }}
-    .metric-delta {{ color:{theme["font"]}; opacity:0.9; font-size:13px; min-height:16px; }}
+    .metric-delta {{ color:var(--font); opacity:0.9; font-size:13px; min-height:16px; }}
     section {{ margin-bottom:18px; }}
-    .report-table {{ width:100%; border-collapse:collapse; background:{theme["table_bg"]}; border:1px solid {theme["border"]}; }}
-    .report-table th, .report-table td {{ border:1px solid {theme["border"]}; padding:6px 8px; text-align:left; }}
-    .report-table th {{ background:{theme["table_head"]}; }}
+    .report-table {{ width:100%; border-collapse:collapse; background:var(--table-bg); border:1px solid var(--border); }}
+    .report-table th, .report-table td {{ border:1px solid var(--border); padding:6px 8px; text-align:left; }}
+    .report-table th {{ background:var(--table-head); }}
     @media (max-width: 1000px) {{
       .metrics {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }}
     }}
   </style>
 </head>
-<body>
+<body class="theme-{default_theme_mode}">
   <div class="container">
   <h1>{escape(dashboard_title)}</h1>
   <div class="meta">
     <p><strong>Group:</strong> {escape(selected_group)}</p>
     <p><strong>Window:</strong> <span id="window-value">{int(default_window)}d</span></p>
-    <p><strong>Export Mode:</strong> {escape(str(theme["name"]))}</p>
+    <p><strong>Theme:</strong> <span id="theme-value">{default_theme_label}</span></p>
     <p><strong>Accounts:</strong> {escape(accounts_text)}</p>
     <p><strong>Generated:</strong> {escape(generated_at)}</p>
   </div>
   <div class="switch-row">
     <span class="switch-label"><strong>Window:</strong></span>
-    <div class="window-switch">{toggle_buttons}</div>
+    <div class="window-switch">{window_buttons}</div>
+  </div>
+  <div class="switch-row">
+    <span class="switch-label"><strong>Theme:</strong></span>
+    <div class="theme-switch">{theme_buttons}</div>
   </div>
   {''.join(window_panes)}
   </div>
   <script>
     const exportWindows = [{", ".join(str(int(w)) for w in export_windows)}];
-    function resizePlotsInPane(windowDays) {{
-      const pane = document.getElementById(`window-pane-${{windowDays}}`);
+    const exportThemes = ["dark", "light"];
+    let activeWindow = {int(default_window)};
+    let activeTheme = "{default_theme_mode}";
+    function paneId(windowDays, themeMode) {{
+      return `window-pane-${{windowDays}}-${{themeMode}}`;
+    }}
+    function resizePlotsInPane(windowDays, themeMode) {{
+      const pane = document.getElementById(paneId(windowDays, themeMode));
       if (!pane || !window.Plotly || !window.Plotly.Plots) return;
       const plotEls = pane.querySelectorAll(".js-plotly-plot, .plotly-graph-div");
       plotEls.forEach((el) => {{
@@ -2208,24 +2265,46 @@ def build_dashboard_export_html(
         }}
       }});
     }}
-    function setWindow(windowDays) {{
-      exportWindows.forEach((w) => {{
-        const pane = document.getElementById(`window-pane-${{w}}`);
-        const btn = document.getElementById(`window-btn-${{w}}`);
-        const active = Number(w) === Number(windowDays);
-        if (pane) pane.style.display = active ? "block" : "none";
-        if (btn) btn.classList.toggle("active", active);
-      }});
-      const label = document.getElementById("window-value");
-      if (label) label.textContent = `${{windowDays}}d`;
-      if (window.requestAnimationFrame) {{
-        window.requestAnimationFrame(() => resizePlotsInPane(windowDays));
-      }} else {{
-        resizePlotsInPane(windowDays);
-      }}
-      window.setTimeout(() => resizePlotsInPane(windowDays), 60);
+    function applyThemeClass(themeMode) {{
+      document.body.classList.toggle("theme-dark", themeMode === "dark");
+      document.body.classList.toggle("theme-light", themeMode === "light");
     }}
-    setWindow({int(default_window)});
+    function renderState() {{
+      exportWindows.forEach((w) => {{
+        const winBtn = document.getElementById(`window-btn-${{w}}`);
+        if (winBtn) winBtn.classList.toggle("active", Number(w) === Number(activeWindow));
+        exportThemes.forEach((t) => {{
+          const pane = document.getElementById(paneId(w, t));
+          const active = Number(w) === Number(activeWindow) && t === activeTheme;
+          if (pane) pane.style.display = active ? "block" : "none";
+        }});
+      }});
+      exportThemes.forEach((t) => {{
+        const themeBtn = document.getElementById(`theme-btn-${{t}}`);
+        if (themeBtn) themeBtn.classList.toggle("active", t === activeTheme);
+      }});
+      const windowLabel = document.getElementById("window-value");
+      if (windowLabel) windowLabel.textContent = `${{activeWindow}}d`;
+      const themeLabel = document.getElementById("theme-value");
+      if (themeLabel) themeLabel.textContent = activeTheme === "dark" ? "Dark" : "Light";
+      if (window.requestAnimationFrame) {{
+        window.requestAnimationFrame(() => resizePlotsInPane(activeWindow, activeTheme));
+      }} else {{
+        resizePlotsInPane(activeWindow, activeTheme);
+      }}
+      window.setTimeout(() => resizePlotsInPane(activeWindow, activeTheme), 60);
+    }}
+    function setWindow(windowDays) {{
+      activeWindow = Number(windowDays);
+      renderState();
+    }}
+    function setTheme(themeMode) {{
+      activeTheme = themeMode === "dark" ? "dark" : "light";
+      applyThemeClass(activeTheme);
+      renderState();
+    }}
+    applyThemeClass(activeTheme);
+    renderState();
   </script>
 </body>
 </html>
