@@ -790,6 +790,73 @@ def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: 
         f.write(f"{row_date.isoformat()};{account};{level};{xp_bar}\n")
 
 
+def _validate_xp_rows_non_decreasing(
+    existing_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    curve_map: dict[int, int],
+) -> list[str]:
+    errors: list[str] = []
+    if new_df.empty:
+        return errors
+
+    existing = existing_df.copy()
+    if not existing.empty:
+        existing = existing.drop_duplicates(subset=["Date", "Spieler"], keep="last")
+        existing["base_xp"] = existing["Lvl"].map(curve_map)
+        existing["Total XP"] = pd.to_numeric(existing["base_xp"], errors="coerce") + pd.to_numeric(
+            existing["XP Bar"], errors="coerce"
+        )
+        existing = existing.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
+
+    rows = new_df.drop_duplicates(subset=["Date", "Spieler"], keep="last").copy()
+    rows["base_xp"] = rows["Lvl"].map(curve_map)
+    for _, row in rows.iterrows():
+        player = str(row["Spieler"]).strip()
+        dt = pd.to_datetime(row["Date"], errors="coerce")
+        lvl = pd.to_numeric(row["Lvl"], errors="coerce")
+        xp_bar = pd.to_numeric(row["XP Bar"], errors="coerce")
+        base_xp = pd.to_numeric(row["base_xp"], errors="coerce")
+        if pd.isna(dt) or not player or pd.isna(lvl) or pd.isna(xp_bar):
+            continue
+        if pd.isna(base_xp):
+            errors.append(f"{player} {pd.Timestamp(dt).date().isoformat()}: missing XP curve entry for level {int(lvl)}.")
+            continue
+
+        total_xp = int(base_xp) + int(xp_bar)
+        if existing.empty:
+            continue
+
+        without_same_day = existing[~((existing["Spieler"] == player) & (existing["Date"] == dt))].copy()
+        player_hist = without_same_day[without_same_day["Spieler"] == player].copy()
+        if player_hist.empty:
+            continue
+
+        prev_rows = player_hist[player_hist["Date"] < dt].sort_values("Date")
+        if not prev_rows.empty:
+            prev = prev_rows.iloc[-1]
+            prev_total = int(round(float(prev["Total XP"])))
+            if total_xp < prev_total:
+                prev_date = pd.to_datetime(prev["Date"], errors="coerce")
+                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
+                errors.append(
+                    f"{player} {pd.Timestamp(dt).date().isoformat()}: Total XP {total_xp:,} is below previous "
+                    f"{prev_total:,} on {prev_date_txt}."
+                )
+
+        next_rows = player_hist[player_hist["Date"] > dt].sort_values("Date")
+        if not next_rows.empty:
+            nxt = next_rows.iloc[0]
+            next_total = int(round(float(nxt["Total XP"])))
+            if total_xp > next_total:
+                next_date = pd.to_datetime(nxt["Date"], errors="coerce")
+                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
+                errors.append(
+                    f"{player} {pd.Timestamp(dt).date().isoformat()}: Total XP {total_xp:,} is above next "
+                    f"{next_total:,} on {next_date_txt}."
+                )
+    return errors
+
+
 def upsert_xp_rows(path: Path, rows: list[dict[str, object]]) -> int:
     if not rows:
         return 0
@@ -802,6 +869,7 @@ def upsert_xp_rows(path: Path, rows: list[dict[str, object]]) -> int:
     new_df = new_df.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
     new_df["Lvl"] = new_df["Lvl"].astype(int)
     new_df["XP Bar"] = new_df["XP Bar"].astype(int)
+    new_df = new_df.drop_duplicates(subset=["Date", "Spieler"], keep="last")
     if new_df.empty:
         return 0
 
@@ -820,6 +888,13 @@ def upsert_xp_rows(path: Path, rows: list[dict[str, object]]) -> int:
         existing = existing.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
         existing["Lvl"] = existing["Lvl"].astype(int)
         existing["XP Bar"] = existing["XP Bar"].astype(int)
+
+    curve_map = load_curve_map(total_xp_curve_path())
+    monotonic_errors = _validate_xp_rows_non_decreasing(existing, new_df, curve_map)
+    if monotonic_errors:
+        details = "\n".join(monotonic_errors[:12])
+        extra = f"\n... and {len(monotonic_errors) - 12} more issue(s)." if len(monotonic_errors) > 12 else ""
+        raise ValueError("XP input rejected: values must be non-decreasing over time.\n" + details + extra)
 
     combined = pd.concat([existing, new_df], ignore_index=True)
     combined = combined.drop_duplicates(subset=["Date", "Spieler"], keep="last")
@@ -843,8 +918,54 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     new_df["value"] = pd.to_numeric(new_df["value"], errors="coerce")
     new_df = new_df.dropna(subset=["date", "account", "medal_id", "value"]).copy()
     new_df = new_df[~new_df["medal_id"].isin(EXCLUDED_MANUAL_MEDAL_IDS)].copy()
+    new_df = new_df.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
     if new_df.empty:
         return 0
+
+    monotonic_errors: list[str] = []
+    if not existing.empty:
+        existing = existing.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
+    for _, row in new_df.iterrows():
+        dt = pd.to_datetime(row["date"], errors="coerce")
+        account = str(row["account"]).strip()
+        medal_id = str(row["medal_id"]).strip().lower()
+        value = pd.to_numeric(row["value"], errors="coerce")
+        if pd.isna(dt) or not account or not medal_id or pd.isna(value):
+            continue
+
+        hist = existing[(existing["account"] == account) & (existing["medal_id"] == medal_id)].copy()
+        if hist.empty:
+            continue
+        hist = hist[hist["date"] != dt].copy()
+
+        prev_rows = hist[hist["date"] < dt].sort_values("date")
+        if not prev_rows.empty:
+            prev = prev_rows.iloc[-1]
+            prev_value = float(prev["value"])
+            if float(value) < prev_value:
+                prev_date = pd.to_datetime(prev["date"], errors="coerce")
+                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
+                monotonic_errors.append(
+                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is below previous "
+                    f"{prev_value:g} on {prev_date_txt}."
+                )
+
+        next_rows = hist[hist["date"] > dt].sort_values("date")
+        if not next_rows.empty:
+            nxt = next_rows.iloc[0]
+            next_value = float(nxt["value"])
+            if float(value) > next_value:
+                next_date = pd.to_datetime(nxt["date"], errors="coerce")
+                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
+                monotonic_errors.append(
+                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is above next "
+                    f"{next_value:g} on {next_date_txt}."
+                )
+
+    if monotonic_errors:
+        details = "\n".join(monotonic_errors[:12])
+        extra = f"\n... and {len(monotonic_errors) - 12} more issue(s)." if len(monotonic_errors) > 12 else ""
+        raise ValueError("Medal input rejected: values must be non-decreasing over time.\n" + details + extra)
 
     combined = pd.concat([existing, new_df], ignore_index=True)
     combined = combined.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
@@ -3370,18 +3491,20 @@ if page == "Data Input":
                 )
 
             _, xp_input_col, _ = st.columns([0.28, 0.44, 0.28], gap="small")
-            col_widths = [1.45, 0.7, 1.0, 0.85, 1.2]
-            h1, h2, h3, h4, h5 = xp_input_col.columns(col_widths, gap="small")
+            col_widths = [1.45, 0.7, 1.0, 0.24, 0.62, 0.24, 1.2]
+            h1, h2, h3, h4, h5, h6, h7 = xp_input_col.columns(col_widths, gap="small")
             h1.markdown("**Account**")
             h2.markdown("**Level (last Data)**")
             h3.markdown("**XPBar (last Data)**")
-            h4.markdown("**Level**")
-            h5.markdown("**XP Bar**")
+            h4.markdown("**-**")
+            h5.markdown("**Level**")
+            h6.markdown("**+**")
+            h7.markdown("**XP Bar**")
 
             xp_inputs: list[dict[str, object]] = []
             for row in xp_editor_rows:
                 acc = str(row["account"])
-                c1, c2, c3, c4, c5 = xp_input_col.columns(col_widths, gap="small")
+                c1, c2, c3, c4, c5, c6, c7 = xp_input_col.columns(col_widths, gap="small")
                 c1.write(acc)
                 c2.markdown(f"`{int(row['lvl_last'])}`")
                 c3.markdown(f"`{int(row['xp_bar_last']):,}`")
@@ -3394,15 +3517,34 @@ if page == "Data Input":
                     except Exception:
                         current_lvl = int(row["lvl"])
                     st.session_state[lvl_state_key] = max(1, min(100, current_lvl))
-                lvl_value = c4.number_input(
+                dec_clicked = c4.button(
+                    " ",
+                    key=f"{lvl_state_key}_dec",
+                    help="Decrease level",
+                    icon=":material/remove:",
+                    use_container_width=True,
+                )
+                if dec_clicked:
+                    st.session_state[lvl_state_key] = max(1, int(st.session_state[lvl_state_key]) - 1)
+                inc_clicked = c6.button(
+                    " ",
+                    key=f"{lvl_state_key}_inc",
+                    help="Increase level",
+                    icon=":material/add:",
+                    use_container_width=True,
+                )
+                if inc_clicked:
+                    st.session_state[lvl_state_key] = min(100, int(st.session_state[lvl_state_key]) + 1)
+                lvl_value = c5.number_input(
                     "Level",
                     min_value=1,
                     max_value=100,
                     step=1,
+                    format="%d",
                     key=lvl_state_key,
                     label_visibility="collapsed",
                 )
-                xp_bar_value = c5.text_input(
+                xp_bar_value = c7.text_input(
                     "XP Bar",
                     value=str(int(row["xp_bar"])),
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
@@ -3437,8 +3579,12 @@ if page == "Data Input":
                 if errors:
                     st.error("\n".join(errors))
                 else:
-                    written = upsert_xp_rows(xp_history_path(), rows_to_write)
-                    st.success(f"Saved XP snapshot rows: {written}")
+                    try:
+                        written = upsert_xp_rows(xp_history_path(), rows_to_write)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(f"Saved XP snapshot rows: {written}")
 
         if all_players:
             st.markdown("Input order for XP accounts")
@@ -3579,8 +3725,12 @@ if page == "Data Input":
                 if errors:
                     st.error("\n".join(errors))
                 else:
-                    written = append_medal_rows(medal_snapshots_path(), rows_to_write)
-                    st.success(f"Saved medal snapshot rows: {written} for {medal_account}")
+                    try:
+                        written = append_medal_rows(medal_snapshots_path(), rows_to_write)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(f"Saved medal snapshot rows: {written} for {medal_account}")
 
             medal_order = load_medal_input_order(goals_df, account=medal_account)
             st.markdown(f"Input order for `{medal_account}`")
