@@ -857,6 +857,55 @@ def _validate_xp_rows_non_decreasing(
     return errors
 
 
+def _validate_medal_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    if new_df.empty:
+        return errors
+
+    existing = existing_df.copy()
+    if not existing.empty:
+        existing = existing.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
+
+    rows = new_df.drop_duplicates(subset=["date", "account", "medal_id"], keep="last").copy()
+    for _, row in rows.iterrows():
+        dt = pd.to_datetime(row["date"], errors="coerce")
+        account = str(row["account"]).strip()
+        medal_id = str(row["medal_id"]).strip().lower()
+        value = pd.to_numeric(row["value"], errors="coerce")
+        if pd.isna(dt) or not account or not medal_id or pd.isna(value):
+            continue
+
+        hist = existing[(existing["account"] == account) & (existing["medal_id"] == medal_id)].copy()
+        if hist.empty:
+            continue
+        hist = hist[hist["date"] != dt].copy()
+
+        prev_rows = hist[hist["date"] < dt].sort_values("date")
+        if not prev_rows.empty:
+            prev = prev_rows.iloc[-1]
+            prev_value = float(prev["value"])
+            if float(value) < prev_value:
+                prev_date = pd.to_datetime(prev["date"], errors="coerce")
+                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
+                errors.append(
+                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is below previous "
+                    f"{prev_value:g} on {prev_date_txt}."
+                )
+
+        next_rows = hist[hist["date"] > dt].sort_values("date")
+        if not next_rows.empty:
+            nxt = next_rows.iloc[0]
+            next_value = float(nxt["value"])
+            if float(value) > next_value:
+                next_date = pd.to_datetime(nxt["date"], errors="coerce")
+                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
+                errors.append(
+                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is above next "
+                    f"{next_value:g} on {next_date_txt}."
+                )
+    return errors
+
+
 def upsert_xp_rows(path: Path, rows: list[dict[str, object]]) -> int:
     if not rows:
         return 0
@@ -922,45 +971,7 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     if new_df.empty:
         return 0
 
-    monotonic_errors: list[str] = []
-    if not existing.empty:
-        existing = existing.drop_duplicates(subset=["date", "account", "medal_id"], keep="last")
-    for _, row in new_df.iterrows():
-        dt = pd.to_datetime(row["date"], errors="coerce")
-        account = str(row["account"]).strip()
-        medal_id = str(row["medal_id"]).strip().lower()
-        value = pd.to_numeric(row["value"], errors="coerce")
-        if pd.isna(dt) or not account or not medal_id or pd.isna(value):
-            continue
-
-        hist = existing[(existing["account"] == account) & (existing["medal_id"] == medal_id)].copy()
-        if hist.empty:
-            continue
-        hist = hist[hist["date"] != dt].copy()
-
-        prev_rows = hist[hist["date"] < dt].sort_values("date")
-        if not prev_rows.empty:
-            prev = prev_rows.iloc[-1]
-            prev_value = float(prev["value"])
-            if float(value) < prev_value:
-                prev_date = pd.to_datetime(prev["date"], errors="coerce")
-                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
-                monotonic_errors.append(
-                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is below previous "
-                    f"{prev_value:g} on {prev_date_txt}."
-                )
-
-        next_rows = hist[hist["date"] > dt].sort_values("date")
-        if not next_rows.empty:
-            nxt = next_rows.iloc[0]
-            next_value = float(nxt["value"])
-            if float(value) > next_value:
-                next_date = pd.to_datetime(nxt["date"], errors="coerce")
-                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
-                monotonic_errors.append(
-                    f"{account} {medal_id} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is above next "
-                    f"{next_value:g} on {next_date_txt}."
-                )
+    monotonic_errors = _validate_medal_rows_non_decreasing(existing, new_df)
 
     if monotonic_errors:
         details = "\n".join(monotonic_errors[:12])
@@ -3490,9 +3501,9 @@ if page == "Data Input":
                     }
                 )
 
-            _, xp_input_col, _ = st.columns([0.28, 0.44, 0.28], gap="small")
-            col_widths = [1.45, 0.7, 1.0, 0.24, 0.62, 0.24, 1.2]
-            h1, h2, h3, h4, h5, h6, h7 = xp_input_col.columns(col_widths, gap="small")
+            _, xp_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
+            col_widths = [1.45, 0.7, 1.0, 0.24, 0.62, 0.24, 1.15, 2.1]
+            h1, h2, h3, h4, h5, h6, h7, h8 = xp_input_col.columns(col_widths, gap="small")
             h1.markdown("**Account**")
             h2.markdown("**Level (last Data)**")
             h3.markdown("**XPBar (last Data)**")
@@ -3500,11 +3511,16 @@ if page == "Data Input":
             h5.markdown("**Level**")
             h6.markdown("**+**")
             h7.markdown("**XP Bar**")
+            h8.markdown("**Status**")
 
             xp_inputs: list[dict[str, object]] = []
+            inline_xp_errors: list[str] = []
+            xp_existing_for_validation = xp_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy() if not xp_df.empty else pd.DataFrame(
+                columns=["Date", "Spieler", "Lvl", "XP Bar"]
+            )
             for row in xp_editor_rows:
                 acc = str(row["account"])
-                c1, c2, c3, c4, c5, c6, c7 = xp_input_col.columns(col_widths, gap="small")
+                c1, c2, c3, c4, c5, c6, c7, c8 = xp_input_col.columns(col_widths, gap="small")
                 c1.write(acc)
                 c2.markdown(f"`{int(row['lvl_last'])}`")
                 c3.markdown(f"`{int(row['xp_bar_last']):,}`")
@@ -3550,9 +3566,37 @@ if page == "Data Input":
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
+                row_errors: list[str] = []
+                xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
+                if pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
+                    row_errors.append("XP Bar must be a number >= 0.")
+                else:
+                    row_df = pd.DataFrame(
+                        [
+                            {
+                                "Date": pd.Timestamp(xp_date),
+                                "Spieler": acc,
+                                "Lvl": int(lvl_value),
+                                "XP Bar": int(xp_bar_num),
+                            }
+                        ]
+                    )
+                    monotonic_errors = _validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map)
+                    row_errors.extend(monotonic_errors)
+
+                if row_errors:
+                    inline_xp_errors.extend(row_errors)
+                    c8.markdown(
+                        f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    c8.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
                 xp_inputs.append({"account": acc, "lvl": int(lvl_value), "xp_bar": xp_bar_value})
 
-            if st.button("Save XP snapshot for selected accounts", key="xp_batch_save"):
+            if inline_xp_errors:
+                st.caption("Fix row errors to enable saving.")
+            if st.button("Save XP snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
                 rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
                 for r in xp_inputs:
@@ -3695,7 +3739,55 @@ if page == "Data Input":
                     },
                     key=f"medal_full_editor_{medal_account}",
                 )
-            if st.button("Save full medal snapshot for account", key="save_full_medal_snapshot"):
+            inline_medal_errors: list[str] = []
+            medal_existing_for_validation = (
+                medal_df[["date", "account", "medal_id", "value"]].copy()
+                if not medal_df.empty
+                else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
+            )
+            if len(edited_medals) != len(medal_order_for_account):
+                inline_medal_errors.append("Editor row count mismatch. Reload and try again.")
+            for idx, (_, r) in enumerate(edited_medals.iterrows()):
+                if idx >= len(medal_order_for_account):
+                    break
+                medal_id = str(medal_order_for_account[idx]).strip().lower()
+                display_name = str(r.get("display_name", medal_id)).strip() or medal_id
+                value = pd.to_numeric(r.get("value"), errors="coerce")
+                if not medal_id:
+                    inline_medal_errors.append("Missing medal_id.")
+                    continue
+                if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
+                    inline_medal_errors.append(f"{display_name}: derived medal cannot be saved.")
+                    continue
+                if pd.isna(value):
+                    inline_medal_errors.append(f"{display_name}: value is empty.")
+                    continue
+                row_df = pd.DataFrame(
+                    [
+                        {
+                            "date": pd.Timestamp(medal_date),
+                            "account": medal_account,
+                            "medal_id": medal_id,
+                            "value": float(value),
+                        }
+                    ]
+                )
+                row_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, row_df)
+                if row_mono_errors:
+                    inline_medal_errors.append(f"{display_name}: {row_mono_errors[0]}")
+
+            if inline_medal_errors:
+                details = "\n".join([f"- {x}" for x in inline_medal_errors[:12]])
+                extra = f"\n... and {len(inline_medal_errors) - 12} more issue(s)." if len(inline_medal_errors) > 12 else ""
+                st.error("Live validation issues:\n" + details + extra)
+            else:
+                st.caption("Live validation: OK")
+
+            if st.button(
+                "Save full medal snapshot for account",
+                key="save_full_medal_snapshot",
+                disabled=bool(inline_medal_errors),
+            ):
                 rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
                 if len(edited_medals) != len(medal_order_for_account):
