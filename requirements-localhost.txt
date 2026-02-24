@@ -1,3 +1,7 @@
+# Install in terminal:
+# python -m pip install -r requirements-localhost.txt
+# Optional (direct install without file):
+# python -m pip install streamlit==1.41.1 plotly==6.5.2 pandas==2.3.3 kaleido==1.2.0 Pillow==11.3.0
 streamlit==1.41.1
 plotly==6.5.2
 pandas==2.3.3
