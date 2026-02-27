@@ -2,7 +2,6 @@
 
 import io
 import re
-import shutil
 import subprocess
 import sys
 from datetime import date
@@ -1439,41 +1438,6 @@ def _slugify(value: str) -> str:
     return slug or "group"
 
 
-def web_exports_dir() -> Path:
-    d = output_dir() / "web_exports"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    i = 1
-    while True:
-        cand = path.with_name(f"{stem}_{i}{suffix}")
-        if not cand.exists():
-            return cand
-        i += 1
-
-
-def persist_export_file(file_name: str, payload: bytes) -> Path:
-    dest = _unique_path(web_exports_dir() / str(file_name))
-    dest.write_bytes(payload)
-    return dest
-
-
-def publish_export_to_folder(source_file: Path, target_folder: str) -> Path:
-    if not target_folder or not str(target_folder).strip():
-        raise ValueError("Target folder is empty.")
-    target = Path(str(target_folder).strip())
-    target.mkdir(parents=True, exist_ok=True)
-    dest = target / source_file.name
-    shutil.copy2(source_file, dest)
-    return dest
-
-
 def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -2628,27 +2592,6 @@ def render_dashboard_export_button(
             mime="text/html",
             key=f"{key}_html",
         )
-
-    st.caption("TU Graz Publish: Zielordner ist dein gemounteter Webspace (z. B. WebDAV oder P:\\www).")
-    publish_target = st.text_input(
-        "Publish target folder",
-        key=f"{key}_publish_target",
-        placeholder=r"P:\www\pogo-dashboard",
-    )
-    p1, p2 = st.columns(2)
-    if p1.button("Save Export Locally", key=f"{key}_save_local", disabled=export_payload is None):
-        try:
-            saved = persist_export_file(export_file_name, export_payload or b"")
-            st.success(f"Saved: {saved}")
-        except Exception as exc:
-            st.error(f"Save failed: {exc}")
-    if p2.button("Save + Publish", key=f"{key}_publish", disabled=export_payload is None):
-        try:
-            saved = persist_export_file(export_file_name, export_payload or b"")
-            published = publish_export_to_folder(saved, publish_target)
-            st.success(f"Published: {published}")
-        except Exception as exc:
-            st.error(f"Publish failed: {exc}")
 
 
 def render_dashboard_content(
