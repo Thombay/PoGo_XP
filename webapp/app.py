@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -1034,6 +1035,41 @@ def _slugify(value: str) -> str:
     return slug or "group"
 
 
+def web_exports_dir() -> Path:
+    d = output_dir() / "web_exports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    i = 1
+    while True:
+        cand = path.with_name(f"{stem}_{i}{suffix}")
+        if not cand.exists():
+            return cand
+        i += 1
+
+
+def persist_export_file(file_name: str, payload: bytes) -> Path:
+    dest = _unique_path(web_exports_dir() / str(file_name))
+    dest.write_bytes(payload)
+    return dest
+
+
+def publish_export_to_folder(source_file: Path, target_folder: str) -> Path:
+    if not target_folder or not str(target_folder).strip():
+        raise ValueError("Target folder is empty.")
+    target = Path(str(target_folder).strip())
+    target.mkdir(parents=True, exist_ok=True)
+    dest = target / source_file.name
+    shutil.copy2(source_file, dest)
+    return dest
+
+
 def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -1761,6 +1797,10 @@ def render_dashboard_export_button(
     export_format = st.selectbox("Export Format", options=["HTML", "Picture (PNG)"], index=0, key=f"{key}_format")
     stamp = pd.Timestamp.now().strftime("%Y-%m-%d")
     base_name = f"{stamp}_{_slugify(selected_group)}_{_slugify(dashboard_title)}_{_slugify(export_mode)}"
+    export_payload: bytes | None = None
+    export_file_name = f"{base_name}.html"
+    export_mime = "text/html"
+    download_label = "Export This Group (HTML)"
 
     if export_format == "Picture (PNG)":
         png_bytes, png_err = build_dashboard_export_png(
@@ -1777,35 +1817,54 @@ def render_dashboard_export_button(
         )
         if png_err:
             st.warning(png_err)
-        st.download_button(
-            "Export This Group (PNG)",
-            data=png_bytes or b"",
-            file_name=f"{base_name}_picture.png",
-            mime="image/png",
-            disabled=png_bytes is None,
-            key=f"{key}_png",
+        export_payload = png_bytes
+        export_file_name = f"{base_name}_picture.png"
+        export_mime = "image/png"
+        download_label = "Export This Group (PNG)"
+    else:
+        html = build_dashboard_export_html(
+            dashboard_title=dashboard_title,
+            selected_group=selected_group,
+            selected_accounts=selected_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            show_medals=show_medals,
+            export_mode=export_mode,
         )
-        return
+        export_payload = html.encode("utf-8")
 
-    html = build_dashboard_export_html(
-        dashboard_title=dashboard_title,
-        selected_group=selected_group,
-        selected_accounts=selected_accounts,
-        dash_xp_df=dash_xp_df,
-        dash_medal_df=dash_medal_df,
-        dash_display_medal_df=dash_display_medal_df,
-        goals_df=goals_df,
-        curve_map=curve_map,
-        show_medals=show_medals,
-        export_mode=export_mode,
-    )
     st.download_button(
-        "Export This Group (HTML)",
-        data=html.encode("utf-8"),
-        file_name=f"{base_name}.html",
-        mime="text/html",
-        key=f"{key}_html",
+        download_label,
+        data=export_payload or b"",
+        file_name=export_file_name,
+        mime=export_mime,
+        disabled=export_payload is None,
+        key=f"{key}_download",
     )
+
+    st.caption("TU Graz Publish: Zielordner ist dein gemounteter Webspace (z. B. WebDAV oder P:\\www).")
+    publish_target = st.text_input(
+        "Publish target folder",
+        key=f"{key}_publish_target",
+        placeholder=r"P:\www\pogo-dashboard",
+    )
+    p1, p2 = st.columns(2)
+    if p1.button("Save Export Locally", key=f"{key}_save_local", disabled=export_payload is None):
+        try:
+            saved = persist_export_file(export_file_name, export_payload or b"")
+            st.success(f"Saved: {saved}")
+        except Exception as exc:
+            st.error(f"Save failed: {exc}")
+    if p2.button("Save + Publish", key=f"{key}_publish", disabled=export_payload is None):
+        try:
+            saved = persist_export_file(export_file_name, export_payload or b"")
+            published = publish_export_to_folder(saved, publish_target)
+            st.success(f"Published: {published}")
+        except Exception as exc:
+            st.error(f"Publish failed: {exc}")
 
 
 def render_dashboard_content(
