@@ -21,6 +21,17 @@ from shared.paths import (
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
 DERIVED_MEDAL_ID = "platinum_medals"
 EXCLUDED_MANUAL_MEDAL_IDS = {"total_xp", DERIVED_MEDAL_ID}
+GOAL_ALIAS_BY_MEDAL_ID = {
+    "distance_walked": "jogger",
+    "pokemon_caught": "collector",
+    "pokestops_visited": "backpacker",
+    "pokestops_vistited": "backpacker",
+}
+
+
+def goal_medal_id_for(medal_id: str) -> str:
+    mid = str(medal_id).strip().lower()
+    return GOAL_ALIAS_BY_MEDAL_ID.get(mid, mid)
 
 
 def _load_csv(path: Path) -> pd.DataFrame:
@@ -155,8 +166,10 @@ def inject_derived_platinum_rows(medal_df: pd.DataFrame, cfg_df: pd.DataFrame) -
 
     goals = cfg_df[["medal_id", "goal_value"]].copy()
     goals["medal_id"] = goals["medal_id"].astype(str).str.strip().str.lower()
+    goals["goal_medal_id"] = goals["medal_id"].map(goal_medal_id_for)
     goals["goal_value"] = pd.to_numeric(goals["goal_value"], errors="coerce")
-    goals = goals.dropna(subset=["medal_id", "goal_value"]).drop_duplicates(subset=["medal_id"], keep="last")
+    goals = goals.dropna(subset=["goal_medal_id", "goal_value"]).copy()
+    goals = goals.sort_values("goal_value", ascending=False).drop_duplicates(subset=["goal_medal_id"], keep="first")
 
     source = medal_df.copy()
     source["date"] = pd.to_datetime(source["date"], errors="coerce")
@@ -168,11 +181,42 @@ def inject_derived_platinum_rows(medal_df: pd.DataFrame, cfg_df: pd.DataFrame) -
     if source.empty:
         return medal_df
 
-    source = source.merge(goals, on="medal_id", how="left")
+    source["goal_medal_id"] = source["medal_id"].map(goal_medal_id_for)
+    source = source.merge(goals[["goal_medal_id", "goal_value"]], on="goal_medal_id", how="left")
     source = source.dropna(subset=["goal_value"]).copy()
-    source = source.sort_values("date").drop_duplicates(["date", "account", "medal_id"], keep="last")
-    source["reached"] = source["value"] >= source["goal_value"]
-    platinum_counts = source.groupby(["date", "account"], as_index=False)["reached"].sum()
+    # Alias-safe de-duplication: if legacy + canonical IDs exist on the same day, count only once.
+    source = (
+        source.sort_values("date")
+        .groupby(["date", "account", "goal_medal_id"], as_index=False)
+        .agg({"value": "max", "goal_value": "max"})
+    )
+    platinum_frames: list[pd.DataFrame] = []
+    for account, grp in source.groupby("account", sort=False):
+        g = grp.sort_values("date").copy()
+        if g.empty:
+            continue
+        value_wide = g.pivot_table(index="date", columns="goal_medal_id", values="value", aggfunc="max")
+        if value_wide.empty:
+            continue
+        value_wide = value_wide.sort_index().ffill()
+        goal_by_medal = g.groupby("goal_medal_id", as_index=True)["goal_value"].max()
+        common_cols = [c for c in value_wide.columns if c in set(goal_by_medal.index)]
+        if not common_cols:
+            continue
+        reached_wide = value_wide[common_cols].ge(goal_by_medal.loc[common_cols], axis=1).fillna(False)
+        counts = reached_wide.sum(axis=1).astype(int)
+        platinum_frames.append(
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(counts.index, errors="coerce"),
+                    "account": str(account),
+                    "reached": counts.values,
+                }
+            )
+        )
+    platinum_counts = pd.concat(platinum_frames, ignore_index=True) if platinum_frames else pd.DataFrame(
+        columns=["date", "account", "reached"]
+    )
     if platinum_counts.empty:
         return medal_df
 
