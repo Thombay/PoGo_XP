@@ -100,6 +100,68 @@ def parse_groups(path: Path) -> dict[str, list[str]]:
     return groups
 
 
+def save_groups(path: Path, groups: dict[str, list[str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for group, names in groups.items():
+        group_name = str(group).strip()
+        if not group_name:
+            continue
+        unique_names: list[str] = []
+        seen: set[str] = set()
+        for raw_name in names:
+            name = str(raw_name).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            unique_names.append(name)
+        lines.append(f"{group_name}:")
+        lines.append(",".join(unique_names))
+        lines.append("")
+    content = "\n".join(lines).rstrip() + "\n"
+    path.write_text(content, encoding="utf-8-sig")
+
+
+def add_account_to_groups(path: Path, account_name: str, target_groups: list[str] | None = None) -> list[str]:
+    account = str(account_name).strip()
+    if not account:
+        return []
+
+    groups = parse_groups(path)
+    group_order = list(groups.keys())
+    if "All" not in groups:
+        groups["All"] = []
+        group_order.append("All")
+
+    requested = ["All"] + [str(g).strip() for g in (target_groups or []) if str(g).strip()]
+    selected_groups: list[str] = []
+    for group_name in requested:
+        if group_name not in selected_groups:
+            selected_groups.append(group_name)
+        if group_name not in groups:
+            groups[group_name] = []
+            group_order.append(group_name)
+        if account not in groups[group_name]:
+            groups[group_name].append(account)
+
+    ordered_groups = {group_name: groups.get(group_name, []) for group_name in group_order}
+    save_groups(path, ordered_groups)
+    return selected_groups
+
+
+def ensure_account_in_xp_order(account_name: str, known_accounts: list[str] | None = None) -> None:
+    account = str(account_name).strip()
+    if not account:
+        return
+    base_accounts = [str(a).strip() for a in (known_accounts or []) if str(a).strip()]
+    if account not in base_accounts:
+        base_accounts.append(account)
+    ordered = load_xp_input_order(base_accounts)
+    if account not in ordered:
+        ordered.append(account)
+    save_xp_input_order(ordered)
+
+
 def load_curve_map(path: Path) -> dict[int, int]:
     if not path.exists():
         return {}
@@ -529,11 +591,42 @@ def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
     ranges = df.groupby("Spieler")["Date"].agg(["min", "max"])
     if ranges.empty:
         return df.copy()
-    start = ranges["min"].max()
-    end = ranges["max"].min()
-    if pd.isna(start) or pd.isna(end) or start > end:
+
+    events: list[tuple[pd.Timestamp, int]] = []
+    for _, r in ranges.iterrows():
+        start = pd.to_datetime(r["min"], errors="coerce")
+        end = pd.to_datetime(r["max"], errors="coerce")
+        if pd.isna(start) or pd.isna(end) or start > end:
+            continue
+        events.append((pd.Timestamp(start), 1))
+        events.append((pd.Timestamp(end) + pd.Timedelta(nanoseconds=1), -1))
+    if not events:
         return df.iloc[0:0].copy()
-    out = df[(df["Date"] >= start) & (df["Date"] <= end)].copy()
+
+    events.sort(key=lambda x: x[0])
+    idx = 0
+    active = 0
+    prev_time: pd.Timestamp | None = None
+    segments: list[tuple[pd.Timestamp, pd.Timestamp, int]] = []
+    while idx < len(events):
+        current_time = events[idx][0]
+        if prev_time is not None and current_time > prev_time and active > 0:
+            segments.append((prev_time, current_time, active))
+        while idx < len(events) and events[idx][0] == current_time:
+            active += int(events[idx][1])
+            idx += 1
+        prev_time = current_time
+
+    if not segments:
+        return df.copy().sort_values(["Date", "Spieler"]).reset_index(drop=True)
+
+    max_active = max(seg[2] for seg in segments)
+    top_segments = [seg for seg in segments if seg[2] == max_active]
+    best_start, best_end_exclusive, _ = max(
+        top_segments,
+        key=lambda seg: (seg[1] - seg[0], -seg[0].value),
+    )
+    out = df[(df["Date"] >= best_start) & (df["Date"] < best_end_exclusive)].copy()
     return out.sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
 
@@ -668,7 +761,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         key=f"{key_prefix}_players",
     )
     common_interval_only = st.checkbox(
-        "Use common interval for all selected players",
+        "Use max-overlap interval (most selected players have data)",
         value=True,
         key=f"{key_prefix}_common_interval",
     )
@@ -1133,9 +1226,18 @@ def run_repo_command(args: list[str]) -> tuple[int, str]:
 def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame) -> list[str]:
     players = set(xp_df["Spieler"].dropna().astype(str).tolist())
     accounts = set(medal_df["account"].dropna().astype(str).tolist())
-    all_names = sorted(players | accounts)
+    configured_groups = parse_groups(player_groups_path())
+    group_accounts: set[str] = set()
+    for names in configured_groups.values():
+        for raw_name in names:
+            name = str(raw_name).strip()
+            if name:
+                group_accounts.add(name)
+
+    all_names = sorted(players | accounts | group_accounts | set(ACCOUNT_ORDER))
     ordered = [a for a in ACCOUNT_ORDER if a in all_names]
-    return ordered + [a for a in all_names if a not in ordered]
+    fallback_order = ordered + [a for a in all_names if a not in ordered]
+    return load_xp_input_order(fallback_order)
 
 
 def latest_xp_snapshot(xp_df: pd.DataFrame) -> pd.DataFrame:
@@ -1231,11 +1333,25 @@ def auto_default_window_days(
     fallback_window_days: int = 7,
     min_eligible_for_preferred: int = MIN_ELIGIBLE_FOR_30D_DEFAULT,
 ) -> int:
-    preferred_df = metrics_by_window.get(int(preferred_window_days), pd.DataFrame())
-    preferred_eligible = count_window_eligible(preferred_df, int(preferred_window_days), baseline=False)
-    if preferred_eligible >= int(min_eligible_for_preferred):
-        return int(preferred_window_days)
-    return int(fallback_window_days)
+    if not metrics_by_window:
+        return int(fallback_window_days)
+
+    scored_windows: list[tuple[int, int]] = []
+    for window_days in sorted(metrics_by_window.keys()):
+        eligible_count = count_window_eligible(metrics_by_window.get(int(window_days), pd.DataFrame()), int(window_days), baseline=False)
+        scored_windows.append((int(window_days), int(eligible_count)))
+    if not scored_windows:
+        return int(fallback_window_days)
+
+    max_eligible = max(score for _, score in scored_windows)
+    candidates = [window for window, score in scored_windows if score == max_eligible]
+    preferred_window = int(preferred_window_days)
+    fallback_window = int(fallback_window_days)
+    if preferred_window in candidates and max_eligible >= int(min_eligible_for_preferred):
+        return preferred_window
+    if fallback_window in candidates:
+        return fallback_window
+    return int(min(candidates))
 
 
 def xp_recent_gain(xp_df: pd.DataFrame, days: int = 30) -> pd.DataFrame:
@@ -3533,12 +3649,48 @@ if page == "Last Inputs":
 
 if page == "Data Input":
     st.subheader("Data Input")
+    with st.expander("Add New Account", expanded=False):
+        st.caption("Create a new account for XP/medal inputs and optionally add it to existing groups.")
+        new_account_name = st.text_input("Account Name", key="new_account_name")
+        group_options = [str(g).strip() for g in groups.keys() if str(g).strip()]
+        default_group_selection = [g for g in ["All"] if g in group_options]
+        selected_target_groups = st.multiselect(
+            "Add account to groups",
+            options=group_options,
+            default=default_group_selection,
+            key="new_account_target_groups",
+        )
+        add_account_clicked = st.button("Add Account", key="add_new_account")
+        if add_account_clicked:
+            account_name = str(new_account_name).strip()
+            existing_by_lower = {str(a).strip().lower(): str(a).strip() for a in all_accounts if str(a).strip()}
+            if not account_name:
+                st.error("Enter an account name.")
+            elif any(ch in account_name for ch in [",", ":", "\n", "\r"]):
+                st.error("Account name cannot include ',', ':', or line breaks.")
+            elif account_name.lower() in existing_by_lower:
+                st.info(f"Account already exists: {existing_by_lower[account_name.lower()]}")
+            else:
+                try:
+                    applied_groups = add_account_to_groups(
+                        player_groups_path(),
+                        account_name,
+                        selected_target_groups,
+                    )
+                    ensure_account_in_xp_order(account_name, known_accounts=all_accounts)
+                except Exception as exc:
+                    st.error(f"Failed to add account: {exc}")
+                else:
+                    group_label = ", ".join(applied_groups) if applied_groups else "All"
+                    st.success(f"Added account `{account_name}` (groups: {group_label}).")
+                    st.rerun()
+
     tab_xp, tab_medal = st.tabs(["XP Snapshot Input", "Medal Snapshot Input"])
 
     with tab_xp:
         st.caption("Enter one snapshot date and update multiple accounts at once.")
         xp_date = st.date_input("XP Date", value=date.today(), key="xp_batch_date")
-        raw_players = sorted(xp_df["Spieler"].unique().tolist()) if not xp_df.empty else ACCOUNT_ORDER
+        raw_players = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
         all_players = load_xp_input_order(raw_players)
         xp_on_date = set()
         if not xp_df.empty:
@@ -3755,7 +3907,7 @@ if page == "Data Input":
         st.caption("Enter one full medal snapshot per account.")
         st.caption("`Platinum Medals` is derived automatically from medals that reached their goal.")
         medal_date = st.date_input("Medal Date", value=date.today(), key="medal_full_date")
-        allowed_accounts = [a for a in ACCOUNT_ORDER]
+        allowed_accounts = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
         medal_on_date = set()
         if not medal_df.empty:
             medal_on_date = set(medal_df[medal_df["date"].dt.date == medal_date]["account"].astype(str).tolist())
