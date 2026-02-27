@@ -26,7 +26,11 @@ def main() -> int:
         f"--server.address={host}",
         f"--server.port={port}",
     ]
-    return subprocess.call(cmd, cwd=root)
+    try:
+        return subprocess.call(cmd, cwd=root)
+    except KeyboardInterrupt:
+        print("\nServer stopped.", flush=True)
+        return 130
 
 
 if __name__ == "__main__":
