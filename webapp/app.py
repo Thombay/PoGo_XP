@@ -620,11 +620,15 @@ def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
     if not segments:
         return df.copy().sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
-    max_active = max(seg[2] for seg in segments)
-    top_segments = [seg for seg in segments if seg[2] == max_active]
-    best_start, best_end_exclusive, _ = max(
-        top_segments,
-        key=lambda seg: (seg[1] - seg[0], -seg[0].value),
+    # Pick the interval that keeps the most rows ("most data"), not just most active players.
+    scored_segments: list[tuple[pd.Timestamp, pd.Timestamp, int, int]] = []
+    for start, end_exclusive, active_count in segments:
+        row_count = int(((df["Date"] >= start) & (df["Date"] < end_exclusive)).sum())
+        scored_segments.append((start, end_exclusive, active_count, row_count))
+
+    best_start, best_end_exclusive, _active, _rows = max(
+        scored_segments,
+        key=lambda seg: (seg[3], seg[2], seg[1] - seg[0], -seg[0].value),
     )
     out = df[(df["Date"] >= best_start) & (df["Date"] < best_end_exclusive)].copy()
     return out.sort_values(["Date", "Spieler"]).reset_index(drop=True)
@@ -747,6 +751,26 @@ def render_plotly_chart(fig: go.Figure, **kwargs: object) -> None:
     st.plotly_chart(fig, **kwargs)
 
 
+def select_date_range(
+    label: str,
+    min_date: date,
+    max_date: date,
+    key: str | None = None,
+) -> tuple[date, date]:
+    if min_date >= max_date:
+        st.caption(f"{label}: only one snapshot date available ({min_date.isoformat()}).")
+        return min_date, max_date
+    slider_kwargs: dict[str, object] = {
+        "label": label,
+        "min_value": min_date,
+        "max_value": max_date,
+        "value": (min_date, max_date),
+    }
+    if key:
+        slider_kwargs["key"] = key
+    return st.slider(**slider_kwargs)
+
+
 def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> None:
     st.subheader("XP Explorer")
     if xp_subset_df.empty:
@@ -761,7 +785,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         key=f"{key_prefix}_players",
     )
     common_interval_only = st.checkbox(
-        "Use max-overlap interval (most selected players have data)",
+        "Use max-data interval (most selected-player rows)",
         value=True,
         key=f"{key_prefix}_common_interval",
     )
@@ -775,11 +799,10 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
 
     min_date = df["Date"].min().date()
     max_date = df["Date"].max().date()
-    d_start, d_end = st.slider(
-        "Date range",
-        min_value=min_date,
-        max_value=max_date,
-        value=(min_date, max_date),
+    d_start, d_end = select_date_range(
+        label="Date range",
+        min_date=min_date,
+        max_date=max_date,
         key=f"{key_prefix}_date_range",
     )
     df = df[(df["Date"] >= pd.Timestamp(d_start)) & (df["Date"] <= pd.Timestamp(d_end))].copy()
@@ -3412,7 +3435,12 @@ if page == "Medal Explorer":
         else:
             min_date = df["date"].min().date()
             max_date = df["date"].max().date()
-            d_start, d_end = st.slider("Date range", min_value=min_date, max_value=max_date, value=(min_date, max_date))
+            d_start, d_end = select_date_range(
+                label="Date range",
+                min_date=min_date,
+                max_date=max_date,
+                key="medal_overview_date_range",
+            )
             df = df[(df["date"] >= pd.Timestamp(d_start)) & (df["date"] <= pd.Timestamp(d_end))].copy()
 
             goals_map: dict[str, float] = {}
@@ -3959,64 +3987,111 @@ if page == "Data Input":
                 last_input_value = latest_vals.get(medal_id, 0.0)
                 editor_rows.append(
                     {
+                        "medal_id": medal_id,
                         "display_name": row_goal.get("display_name", medal_id),
                         "goal_value": row_goal.get("goal_value", 0),
                         "last_input_value": last_input_value,
                         "value": last_input_value,
                     }
                 )
+
+            def _fmt_compact_number(value: object) -> str:
+                num = pd.to_numeric(value, errors="coerce")
+                if pd.isna(num):
+                    return "-"
+                num_float = float(num)
+                if num_float.is_integer():
+                    return f"{int(num_float):,}"
+                return f"{num_float:,.2f}".rstrip("0").rstrip(".")
+
             _, medal_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
-            with medal_input_col:
-                edited_medals = st.data_editor(
-                    pd.DataFrame(editor_rows),
-                    hide_index=True,
-                    use_container_width=True,
-                    disabled=["display_name", "goal_value", "last_input_value"],
-                    height=520,
-                    column_config={
-                        "display_name": st.column_config.TextColumn("Display Name", width="medium"),
-                        "goal_value": st.column_config.NumberColumn("Goal", width="small"),
-                        "last_input_value": st.column_config.NumberColumn("Last Input Value", width="small"),
-                        "value": st.column_config.NumberColumn("Value", step=1.0, width="small"),
-                    },
-                    key=f"medal_full_editor_{medal_account}",
-                )
+            col_widths = [2.1, 0.8, 1.0, 1.2, 2.2]
+            h1, h2, h3, h4, h5 = medal_input_col.columns(col_widths, gap="small")
+            h1.markdown("**Medal**")
+            h2.markdown("**Goal**")
+            h3.markdown("**Last**")
+            h4.markdown("**Value**")
+            h5.markdown("**Status**")
+
+            medal_inputs: list[dict[str, object]] = []
             inline_medal_errors: list[str] = []
             medal_existing_for_validation = (
                 medal_df[["date", "account", "medal_id", "value"]].copy()
                 if not medal_df.empty
                 else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
             )
-            if len(edited_medals) != len(medal_order_for_account):
-                inline_medal_errors.append("Editor row count mismatch. Reload and try again.")
-            for idx, (_, r) in enumerate(edited_medals.iterrows()):
-                if idx >= len(medal_order_for_account):
-                    break
-                medal_id = str(medal_order_for_account[idx]).strip().lower()
-                display_name = str(r.get("display_name", medal_id)).strip() or medal_id
-                value = pd.to_numeric(r.get("value"), errors="coerce")
-                if not medal_id:
-                    inline_medal_errors.append("Missing medal_id.")
-                    continue
-                if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
-                    inline_medal_errors.append(f"{display_name}: derived medal cannot be saved.")
-                    continue
-                if pd.isna(value):
-                    inline_medal_errors.append(f"{display_name}: value is empty.")
-                    continue
-                row_df = pd.DataFrame(
-                    [
-                        {
-                            "date": pd.Timestamp(medal_date),
-                            "account": medal_account,
-                            "medal_id": medal_id,
-                            "value": float(value),
-                        }
-                    ]
+            for row in editor_rows:
+                medal_id = str(row.get("medal_id", "")).strip().lower()
+                display_name = str(row.get("display_name", medal_id)).strip() or medal_id
+                goal_value = row.get("goal_value", 0)
+                last_input_raw = pd.to_numeric(row.get("last_input_value"), errors="coerce")
+                last_input_value = 0.0 if pd.isna(last_input_raw) else float(last_input_raw)
+                c1, c2, c3, c4, c5 = medal_input_col.columns(col_widths, gap="small")
+
+                name_slot = c1.empty()
+                c2.markdown(f"`{_fmt_compact_number(goal_value)}`")
+                c3.markdown(f"`{_fmt_compact_number(last_input_value)}`")
+
+                value_default = _fmt_compact_number(last_input_value).replace(",", "")
+                value_input_key = f"medal_value_input_{medal_date.isoformat()}_{medal_account}_{medal_id}"
+                if value_input_key not in st.session_state:
+                    st.session_state[value_input_key] = value_default
+                value_input = c4.text_input(
+                    "Value",
+                    key=value_input_key,
+                    label_visibility="collapsed",
                 )
-                row_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, row_df)
-                if row_mono_errors:
-                    inline_medal_errors.append(f"{display_name}: {row_mono_errors[0]}")
+                value_num = pd.to_numeric(value_input, errors="coerce")
+                if pd.isna(value_num):
+                    row_changed = str(value_input).strip() != str(value_default).strip()
+                else:
+                    row_changed = float(value_num) != float(last_input_value)
+
+                name_color = "#9ca3af" if row_changed else "inherit"
+                name_slot.markdown(
+                    f"<span style='color:{name_color}; font-weight:500'>{escape(display_name)}</span>",
+                    unsafe_allow_html=True,
+                )
+
+                value = pd.to_numeric(value_input, errors="coerce")
+                row_errors: list[str] = []
+                if not medal_id:
+                    row_errors.append("Missing medal_id.")
+                elif medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
+                    row_errors.append("Derived medal cannot be saved.")
+                elif pd.isna(value):
+                    row_errors.append("Value is empty.")
+                else:
+                    row_df = pd.DataFrame(
+                        [
+                            {
+                                "date": pd.Timestamp(medal_date),
+                                "account": medal_account,
+                                "medal_id": medal_id,
+                                "value": float(value),
+                            }
+                        ]
+                    )
+                    row_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, row_df)
+                    if row_mono_errors:
+                        row_errors.append(row_mono_errors[0])
+
+                if row_errors:
+                    inline_medal_errors.append(f"{display_name}: {row_errors[0]}")
+                    c5.markdown(
+                        f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    c5.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
+
+                medal_inputs.append(
+                    {
+                        "medal_id": medal_id,
+                        "display_name": display_name,
+                        "value": value_input,
+                    }
+                )
 
             if inline_medal_errors:
                 details = "\n".join([f"- {x}" for x in inline_medal_errors[:12]])
@@ -4032,21 +4107,18 @@ if page == "Data Input":
             ):
                 rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
-                if len(edited_medals) != len(medal_order_for_account):
-                    errors.append("Editor row count mismatch. Reload and try again.")
-                for idx, (_, r) in enumerate(edited_medals.iterrows()):
-                    if idx >= len(medal_order_for_account):
-                        break
-                    medal_id = str(medal_order_for_account[idx]).strip().lower()
+                for r in medal_inputs:
+                    medal_id = str(r.get("medal_id", "")).strip().lower()
+                    display_name = str(r.get("display_name", medal_id)).strip() or medal_id
                     value = pd.to_numeric(r.get("value"), errors="coerce")
                     if not medal_id:
                         errors.append("Missing medal_id.")
                         continue
                     if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
-                        errors.append(f"{medal_id} is derived and not allowed in medal snapshots.")
+                        errors.append(f"{display_name}: derived medal is not allowed in medal snapshots.")
                         continue
                     if pd.isna(value):
-                        errors.append(f"{medal_id}: value is empty.")
+                        errors.append(f"{display_name}: value is empty.")
                         continue
                     rows_to_write.append(
                         {
