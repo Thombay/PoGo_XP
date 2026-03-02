@@ -3752,7 +3752,7 @@ if page == "Data Input":
             for row in xp_editor_rows:
                 acc = str(row["account"])
                 c1, c2, c3, c4, c5, c6, c7, c8 = xp_input_col.columns(col_widths, gap="small")
-                c1.write(acc)
+                account_slot = c1.empty()
                 c2.markdown(f"`{int(row['lvl_last'])}`")
                 c3.markdown(f"`{int(row['xp_bar_last']):,}`")
                 lvl_state_key = f"xp_level_input_{xp_date.isoformat()}_{acc}"
@@ -3799,6 +3799,17 @@ if page == "Data Input":
                 )
                 row_errors: list[str] = []
                 xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
+                row_changed = int(lvl_value) != int(row["lvl_last"])
+                if pd.isna(xp_bar_num):
+                    row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
+                else:
+                    row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
+
+                account_color = "#9ca3af" if row_changed else "inherit"
+                account_slot.markdown(
+                    f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
+                    unsafe_allow_html=True,
+                )
                 if pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
                     row_errors.append("XP Bar must be a number >= 0.")
                 else:
@@ -4143,4 +4154,3 @@ if page == "Generated Files":
         else:
             selected_png = st.selectbox("Image", [p.name for p in pngs])
             st.image(str(folder / selected_png), caption=selected_png, use_container_width=True)
-
