@@ -645,16 +645,47 @@ def build_rank_df(df: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["_tie"]).reset_index(drop=True)
 
 
-def build_gap_change_df(df: pd.DataFrame) -> pd.DataFrame:
+def infer_default_gap_leader(df: pd.DataFrame) -> str | None:
+    if df.empty or not {"Date", "Spieler", "Total XP"}.issubset(df.columns):
+        return None
+    d = df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["Total XP"] = pd.to_numeric(d["Total XP"], errors="coerce")
+    d["Spieler"] = d["Spieler"].astype(str).str.strip()
+    d = d.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
+    if d.empty:
+        return None
+    latest_date = d["Date"].max()
+    latest = d[d["Date"] == latest_date].copy()
+    if latest.empty:
+        return None
+    latest = latest.sort_values(["Total XP", "Spieler"], ascending=[False, True])
+    return str(latest.iloc[0]["Spieler"])
+
+
+def build_gap_change_df(df: pd.DataFrame, leader: str | None = None) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     out = df.sort_values(["Date", "Spieler"]).copy()
-    out["Gap"] = out.groupby("Date")["Total XP"].transform("max") - out["Total XP"]
+    selected_leader = str(leader).strip() if leader is not None else ""
+    if selected_leader:
+        leader_rows = out[out["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
+        leader_rows = leader_rows.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
+        leader_rows = leader_rows.rename(columns={"Total XP": "Leader XP"})
+        out = out.merge(leader_rows, on="Date", how="left")
+        out = out.dropna(subset=["Leader XP"]).copy()
+        out["Gap"] = out["Leader XP"] - out["Total XP"]
+        out = out.drop(columns=["Leader XP"])
+    else:
+        out["Gap"] = out.groupby("Date")["Total XP"].transform("max") - out["Total XP"]
     out["Gap Change"] = out["Gap"] - out.groupby("Spieler")["Gap"].transform("first")
     return out
 
 
-def gap_baseline_annotation_text(gap_df: pd.DataFrame) -> str:
+def gap_baseline_annotation_text(gap_df: pd.DataFrame, leader: str | None = None) -> str:
+    selected_leader = str(leader).strip() if leader is not None else ""
+    if selected_leader:
+        return f"{selected_leader} baseline (0)"
     if gap_df.empty or not {"Date", "Spieler", "Total XP"}.issubset(gap_df.columns):
         return "Baseline (0)"
     d = gap_df.copy()
@@ -670,6 +701,139 @@ def gap_baseline_annotation_text(gap_df: pd.DataFrame) -> str:
     latest = latest.sort_values(["Total XP", "Spieler"], ascending=[False, True])
     leader = str(latest.iloc[0]["Spieler"])
     return leader
+
+
+def _clean_xp_series_for_projection(series: pd.DataFrame) -> pd.DataFrame:
+    s = series.copy()
+    s["Date"] = pd.to_datetime(s["Date"], errors="coerce")
+    s["Total XP"] = pd.to_numeric(s["Total XP"], errors="coerce")
+    s = s.dropna(subset=["Date", "Total XP"]).copy()
+    if s.empty:
+        return s
+    s = s.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
+    return s[["Date", "Total XP"]].reset_index(drop=True)
+
+
+def _fit_linear_xp_trend(series: pd.DataFrame) -> tuple[pd.DataFrame, float, float] | None:
+    s = _clean_xp_series_for_projection(series)
+    if len(s) < 2:
+        return None
+    x = s["Date"].map(pd.Timestamp.toordinal).astype(float)
+    y = s["Total XP"].astype(float)
+    x_mean = float(x.mean())
+    y_mean = float(y.mean())
+    denom = float(((x - x_mean) ** 2).sum())
+    if denom <= 0:
+        return None
+    slope = float(((x - x_mean) * (y - y_mean)).sum() / denom)
+    intercept = y_mean - slope * x_mean
+    return s, slope, intercept
+
+
+def build_xp_catchup_projection_trace(
+    player_series: pd.DataFrame,
+    leader_series: pd.DataFrame,
+    player: str,
+    leader: str,
+    color: str | None = None,
+) -> tuple[go.Scatter | None, str | None]:
+    player_fit = _fit_linear_xp_trend(player_series)
+    if player_fit is None:
+        return None, "not possible (need at least 2 valid snapshots)"
+    leader_fit = _fit_linear_xp_trend(leader_series)
+    if leader_fit is None:
+        return None, f"not possible (leader {leader} needs at least 2 valid snapshots)"
+
+    p_series, p_slope, p_intercept = player_fit
+    l_series, l_slope, l_intercept = leader_fit
+    overlap = p_series.merge(l_series, on="Date", how="inner", suffixes=("_player", "_leader"))
+    if overlap.empty:
+        return None, f"not possible (no overlapping dates with {leader})"
+
+    latest_overlap = overlap.sort_values("Date").iloc[-1]
+    current_date = pd.Timestamp(latest_overlap["Date"])
+    current_gap = float(latest_overlap["Total XP_leader"]) - float(latest_overlap["Total XP_player"])
+    if current_gap <= 0:
+        return None, f"not possible (already tied or ahead of {leader})"
+
+    rel_slope = p_slope - l_slope
+    if rel_slope <= 0:
+        return None, f"not possible (trend does not close gap to {leader})"
+
+    current_x = float(current_date.toordinal())
+    target_x = (l_intercept - p_intercept) / rel_slope
+    if target_x <= current_x:
+        return None, f"not possible (intersection is not in the future vs {leader})"
+    if (target_x - current_x) > 3650:
+        return None, f"not possible (ETA beyond 10 years vs {leader})"
+
+    eta = pd.Timestamp.fromordinal(int(round(target_x)))
+    y_start = p_intercept + p_slope * current_x
+    y_end = p_intercept + p_slope * target_x
+
+    line_style: dict[str, object] = {"dash": "dot"}
+    if color:
+        line_style["color"] = color
+
+    return (
+        go.Scatter(
+            x=[current_date, eta],
+            y=[y_start, y_end],
+            mode="lines",
+            name=f"{player} catch {leader} -> {eta.date().isoformat()}",
+            line=line_style,
+            hovertemplate=f"catch-up trend vs {leader}<extra></extra>",
+        ),
+        None,
+    )
+
+
+def build_selected_leader_trend_trace(
+    leader_series: pd.DataFrame,
+    leader: str,
+    color: str | None = None,
+    horizon_days: int = 180,
+    end_date: pd.Timestamp | None = None,
+) -> tuple[go.Scatter | None, str | None]:
+    leader_fit = _fit_linear_xp_trend(leader_series)
+    if leader_fit is None:
+        return None, f"not possible (leader {leader} needs at least 2 valid snapshots)"
+
+    s, slope, intercept = leader_fit
+    last_date = pd.Timestamp(s["Date"].iloc[-1])
+    if pd.isna(last_date):
+        return None, f"not possible (leader {leader} has no valid latest date)"
+
+    target_end = pd.to_datetime(end_date, errors="coerce") if end_date is not None else pd.NaT
+    if pd.isna(target_end) or pd.Timestamp(target_end) <= last_date:
+        horizon = max(1, int(horizon_days))
+        target_end = last_date + pd.Timedelta(days=horizon)
+    else:
+        horizon = int((pd.Timestamp(target_end) - last_date).days)
+        if horizon < 1:
+            horizon = 1
+            target_end = last_date + pd.Timedelta(days=horizon)
+
+    start_x = float(last_date.toordinal())
+    end_x = float(pd.Timestamp(target_end).toordinal())
+    y_start = intercept + slope * start_x
+    y_end = intercept + slope * end_x
+
+    line_style: dict[str, object] = {"dash": "dash"}
+    if color:
+        line_style["color"] = color
+
+    return (
+        go.Scatter(
+            x=[last_date, pd.Timestamp(target_end)],
+            y=[y_start, y_end],
+            mode="lines",
+            name=f"{leader} trend (+{horizon}d)",
+            line=line_style,
+            hovertemplate=f"{leader} trend projection<extra></extra>",
+        ),
+        None,
+    )
 
 
 def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -812,7 +976,6 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
 
     gain_df = build_xp_gain_over_time_df(df)
     pace_df = build_pace_df(df)
-    gap_df = build_gap_change_df(df)
     rank_df = build_rank_df(df)
 
     # Top row: XP gain over time | interval pace
@@ -841,24 +1004,50 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             )
             render_plotly_chart(fig_pace, use_container_width=True)
 
+    leader_options = sorted(df["Spieler"].dropna().astype(str).unique().tolist())
+    if not leader_options:
+        st.warning("No valid leader available for selected rows.")
+        return
+    default_leader = infer_default_gap_leader(df)
+    default_idx = leader_options.index(default_leader) if default_leader in leader_options else 0
+    control_left, control_right = st.columns(2)
+    with control_left:
+        selected_leader = st.selectbox(
+            "Gap/Trend Leader",
+            options=leader_options,
+            index=default_idx,
+            key=f"{key_prefix}_gap_leader",
+        )
+    with control_right:
+        show_catchup_trends = st.checkbox(
+            "Show catch-up trendlines",
+            value=True,
+            key=f"{key_prefix}_show_catchup_trends",
+        )
+
+    gap_df = build_gap_change_df(df, leader=selected_leader)
+
     # Middle row: gap change | rank over time
     mid_left, mid_right = st.columns(2)
     with mid_left:
-        fig_gap = px.line(
-            gap_df,
-            x="Date",
-            y="Gap Change",
-            color="Spieler",
-            markers=True,
-            title="Gap Change Since First Snapshot",
-        )
-        fig_gap.add_hline(
-            y=0,
-            line_dash="dash",
-            annotation_text=gap_baseline_annotation_text(gap_df),
-            annotation_position="bottom right",
-        )
-        render_plotly_chart(fig_gap, use_container_width=True)
+        if gap_df.empty:
+            st.info(f"Gap Change: not possible for selected leader {selected_leader} in this window.")
+        else:
+            fig_gap = px.line(
+                gap_df,
+                x="Date",
+                y="Gap Change",
+                color="Spieler",
+                markers=True,
+                title="Gap Change Since First Snapshot",
+            )
+            fig_gap.add_hline(
+                y=0,
+                line_dash="dash",
+                annotation_text=gap_baseline_annotation_text(gap_df, leader=selected_leader),
+                annotation_position="bottom right",
+            )
+            render_plotly_chart(fig_gap, use_container_width=True)
     with mid_right:
         fig_rank = go.Figure()
         for player, grp in rank_df.groupby("Spieler", sort=True):
@@ -894,7 +1083,51 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         markers=True,
         title="Total XP Over Time",
     )
+    trend_failures: list[str] = []
+    if show_catchup_trends:
+        color_by_player: dict[str, str | None] = {}
+        for tr in fig_total.data:
+            name = str(getattr(tr, "name", ""))
+            color = getattr(getattr(tr, "line", None), "color", None)
+            color_by_player[name] = color
+
+        leader_series = df[df["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
+        longest_trend_end: pd.Timestamp | None = None
+        for player, grp in df.groupby("Spieler", sort=True):
+            player_name = str(player)
+            if player_name == str(selected_leader):
+                continue
+            trend_trace, trend_reason = build_xp_catchup_projection_trace(
+                grp[["Date", "Total XP"]],
+                leader_series,
+                player_name,
+                str(selected_leader),
+                color_by_player.get(player_name),
+            )
+            if trend_trace is not None:
+                fig_total.add_trace(trend_trace)
+                trend_end = pd.to_datetime(trend_trace.x[-1], errors="coerce")
+                if pd.notna(trend_end):
+                    trend_end_ts = pd.Timestamp(trend_end)
+                    if longest_trend_end is None or trend_end_ts > longest_trend_end:
+                        longest_trend_end = trend_end_ts
+            elif trend_reason:
+                trend_failures.append(f"{player_name}: {trend_reason}")
+
+        leader_trend_trace, leader_trend_reason = build_selected_leader_trend_trace(
+            leader_series,
+            str(selected_leader),
+            color_by_player.get(str(selected_leader)),
+            end_date=longest_trend_end,
+        )
+        if leader_trend_trace is not None:
+            fig_total.add_trace(leader_trend_trace)
+        elif leader_trend_reason:
+            trend_failures.append(f"{selected_leader}: {leader_trend_reason}")
+
     render_plotly_chart(fig_total, use_container_width=True)
+    if show_catchup_trends and trend_failures:
+        st.caption("Catch-up trendline status: " + " | ".join(trend_failures))
 
 
 def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: int) -> None:
