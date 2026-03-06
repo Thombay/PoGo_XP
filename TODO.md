@@ -88,3 +88,5 @@ Notes:
 - [x] Medal report includes derived `total_xp` rows
 
 ---
+
+trend difference visible to last data
