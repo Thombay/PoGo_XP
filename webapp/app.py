@@ -35,6 +35,7 @@ from webapp.metrics import (
 )
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
+MEDAL_INPUT_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
 DERIVED_MEDAL_ID = "platinum_medals"
 DASHBOARD_WINDOW_OPTIONS = [7, 30]
 MIN_ELIGIBLE_FOR_30D_DEFAULT = 2
@@ -585,6 +586,175 @@ def build_xp_projection_trace(
     )
 
 
+def add_light_goal_reference(
+    fig: go.Figure,
+    goal_value: float,
+    goal_label: str,
+    *,
+    band_ratio: float = 0.002,
+    min_band_half: float = 0.5,
+) -> None:
+    goal = float(goal_value)
+    band_half = max(float(min_band_half), abs(goal) * float(band_ratio))
+    fig.add_hrect(
+        y0=goal - band_half,
+        y1=goal + band_half,
+        fillcolor="rgba(100, 116, 139, 0.10)",
+        line_width=0,
+        layer="below",
+    )
+    fig.add_hline(
+        y=goal,
+        line_dash="dot",
+        line_color="rgba(71, 85, 105, 0.70)",
+        annotation_text=goal_label,
+        annotation_position="top left",
+    )
+
+
+def _goal_days_status_for_account(
+    series: pd.DataFrame,
+    *,
+    date_col: str,
+    value_col: str,
+    goal_value: float,
+) -> tuple[str, bool]:
+    s = _filter_trend_series(series, date_col, value_col)
+    if s.empty:
+        return "n/a (insufficient trend data)", False
+
+    latest_date = pd.Timestamp(s[date_col].iloc[-1]).normalize()
+    goal = float(goal_value)
+    reached_rows = s[pd.to_numeric(s[value_col], errors="coerce") >= goal]
+    if not reached_rows.empty:
+        reached_date = pd.Timestamp(reached_rows[date_col].iloc[0]).normalize()
+        reached_txt = reached_date.date().isoformat()
+        days_ahead = int((latest_date - reached_date).days)
+        if days_ahead <= 0:
+            return f"on goal (reached {reached_txt})", False
+        return f"{days_ahead}d ahead (reached {reached_txt})", False
+
+    eta = _predict_goal_eta(
+        s.rename(columns={date_col: "date", value_col: "value"})[["date", "value"]],
+        goal,
+    )
+    if eta is None:
+        return "behind (no ETA: trend too flat/negative)", True
+    eta_txt = pd.Timestamp(eta).date().isoformat()
+    days_behind = int((pd.Timestamp(eta).normalize() - latest_date).days)
+    if days_behind <= 0:
+        return f"on goal (ETA {eta_txt})", False
+    return f"{days_behind}d behind (ETA {eta_txt})", True
+
+
+def build_goal_days_status_html(
+    line_df: pd.DataFrame,
+    *,
+    account_col: str,
+    date_col: str,
+    value_col: str,
+    goal_value: float,
+) -> str | None:
+    if line_df.empty:
+        return None
+    if not {account_col, date_col, value_col}.issubset(line_df.columns):
+        return None
+
+    account_names = line_df[account_col].dropna().astype(str).str.strip()
+    unique_accounts = [a for a in account_names.tolist() if a]
+    if not unique_accounts:
+        return None
+    unique_account_set = set(unique_accounts)
+    ordered_accounts = [a for a in ACCOUNT_ORDER if a in unique_account_set]
+    ordered_accounts += sorted([a for a in unique_account_set if a not in set(ordered_accounts)])
+
+    rows: list[str] = []
+    for account in ordered_accounts:
+        grp = line_df[line_df[account_col].astype(str).str.strip() == account][[date_col, value_col]].copy()
+        if grp.empty:
+            continue
+        status_text, is_alert = _goal_days_status_for_account(
+            grp,
+            date_col=date_col,
+            value_col=value_col,
+            goal_value=float(goal_value),
+        )
+        account_name = escape(str(account))
+        status_color = "#DC2626" if is_alert else "#64748B"
+        rows.append(f"<span style='color:{status_color}'><b>{account_name}</b>: {escape(status_text)}</span>")
+
+    if not rows:
+        return None
+
+    return (
+        "<b>Goal Pace</b><br>"
+        "<span style='color:#94A3B8'>relative to latest snapshot date</span><br>"
+        + "<br>".join(rows)
+    )
+
+
+def add_goal_days_status_annotation(
+    fig: go.Figure,
+    line_df: pd.DataFrame,
+    *,
+    account_col: str,
+    date_col: str,
+    value_col: str,
+    goal_value: float,
+    y_top: float = 0.76,
+) -> None:
+    if fig is None:
+        return
+
+    status_html = build_goal_days_status_html(
+        line_df,
+        account_col=account_col,
+        date_col=date_col,
+        value_col=value_col,
+        goal_value=float(goal_value),
+    )
+    if not status_html:
+        return
+
+    legend_items = 0
+    for tr in fig.data:
+        if getattr(tr, "showlegend", None) is False:
+            continue
+        name = str(getattr(tr, "name", "")).strip()
+        if not name or name == "_nolegend_":
+            continue
+        legend_items += 1
+
+    # Move the status block below the legend based on legend length.
+    legend_bottom_y = 1.0 - (0.07 * float(max(0, legend_items)))
+    annotation_y = min(float(y_top), legend_bottom_y - 0.04)
+    annotation_y = max(0.06, annotation_y)
+
+    current_margin = getattr(fig.layout, "margin", None)
+    margin_dict: dict[str, int] = {}
+    if current_margin is not None:
+        for key in ("l", "r", "t", "b"):
+            value = getattr(current_margin, key, None)
+            if value is not None:
+                margin_dict[key] = int(value)
+    margin_dict["r"] = max(int(margin_dict.get("r", 0)), 220)
+    fig.update_layout(
+        legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=1.01),
+        margin=margin_dict,
+    )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=1.01,
+        y=float(annotation_y),
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        showarrow=False,
+        text=status_html,
+    )
+
+
 def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -836,6 +1006,75 @@ def build_selected_leader_trend_trace(
     )
 
 
+def build_player_trend_projection_trace(
+    player_series: pd.DataFrame,
+    player: str,
+    color: str | None = None,
+    horizon_days: int = 365,
+    end_date: pd.Timestamp | None = None,
+) -> tuple[go.Scatter | None, str | None]:
+    player_fit = _fit_linear_xp_trend(player_series)
+    if player_fit is None:
+        return None, f"not possible ({player} needs at least 2 valid snapshots)"
+
+    s, slope, intercept = player_fit
+    last_date = pd.Timestamp(s["Date"].iloc[-1])
+    if pd.isna(last_date):
+        return None, f"not possible ({player} has no valid latest date)"
+
+    target_end = pd.to_datetime(end_date, errors="coerce") if end_date is not None else pd.NaT
+    if pd.isna(target_end) or pd.Timestamp(target_end) <= last_date:
+        horizon = max(1, int(horizon_days))
+        target_end = last_date + pd.Timedelta(days=horizon)
+    else:
+        horizon = int((pd.Timestamp(target_end) - last_date).days)
+        if horizon < 1:
+            horizon = 1
+            target_end = last_date + pd.Timedelta(days=horizon)
+
+    start_x = float(last_date.toordinal())
+    end_x = float(pd.Timestamp(target_end).toordinal())
+    y_start = intercept + slope * start_x
+    y_end = intercept + slope * end_x
+
+    line_style: dict[str, object] = {"dash": "dot"}
+    if color:
+        line_style["color"] = color
+
+    return (
+        go.Scatter(
+            x=[last_date, pd.Timestamp(target_end)],
+            y=[y_start, y_end],
+            mode="lines",
+            name=f"{player} trend (+{horizon}d)",
+            line=line_style,
+            hovertemplate=f"{player} trend projection<extra></extra>",
+        ),
+        None,
+    )
+
+
+def split_visibility_offset_years_months(start_date: pd.Timestamp, end_date: pd.Timestamp) -> tuple[int, int]:
+    start_ts = pd.to_datetime(start_date, errors="coerce")
+    end_ts = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_ts) or pd.isna(end_ts) or pd.Timestamp(end_ts) <= pd.Timestamp(start_ts):
+        return 0, 0
+
+    start = pd.Timestamp(start_ts)
+    end = pd.Timestamp(end_ts)
+    months_total = (end.year - start.year) * 12 + (end.month - start.month)
+    if months_total < 0:
+        months_total = 0
+
+    # Round up to include partial months so the default slider keeps the full projection visible.
+    if (start + pd.DateOffset(months=months_total)) < end:
+        months_total += 1
+
+    years = months_total // 12
+    months = months_total % 12
+    return int(years), int(months)
+
+
 def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -910,8 +1149,56 @@ def sort_legend_by_latest_y(fig: go.Figure | None) -> None:
         fig.data[idx].update(legendrank=rank)
 
 
-def render_plotly_chart(fig: go.Figure, **kwargs: object) -> None:
-    sort_legend_by_latest_y(fig)
+def apply_total_xp_legend_order(fig: go.Figure, df: pd.DataFrame) -> None:
+    if fig is None or not getattr(fig, "data", None) or df.empty:
+        return
+    if not {"Spieler", "Date", "Total XP"}.issubset(df.columns):
+        return
+
+    ranked_df = df[["Spieler", "Date", "Total XP"]].copy()
+    ranked_df["Date"] = pd.to_datetime(ranked_df["Date"], errors="coerce")
+    ranked_df["Total XP"] = pd.to_numeric(ranked_df["Total XP"], errors="coerce")
+    ranked_df["Spieler"] = ranked_df["Spieler"].astype(str).str.strip()
+    ranked_df = ranked_df.dropna(subset=["Spieler", "Date", "Total XP"]).copy()
+    if ranked_df.empty:
+        return
+    ranked_df = ranked_df.sort_values(["Spieler", "Date"])
+    ranked_df = ranked_df.groupby("Spieler", as_index=False).tail(1)
+    ranked_df = ranked_df.sort_values(["Total XP", "Spieler"], ascending=[False, True]).reset_index(drop=True)
+
+    player_rank = {str(row["Spieler"]): int(i) for i, (_, row) in enumerate(ranked_df.iterrows(), start=1)}
+    stride = 10
+    fallback_rank = (len(player_rank) + 1) * stride
+
+    for trace in fig.data:
+        if getattr(trace, "showlegend", None) is False:
+            continue
+        name = str(getattr(trace, "name", "")).strip()
+        if not name or name == "_nolegend_":
+            continue
+
+        owner: str | None = None
+        offset = 9
+        if name in player_rank:
+            owner = name
+            offset = 0
+        elif " catch " in name and " -> " in name:
+            owner = name.split(" catch ", 1)[0].strip()
+            offset = 1
+        elif " trend (" in name:
+            owner = name.split(" trend (", 1)[0].strip()
+            offset = 2
+
+        if owner and owner in player_rank:
+            trace.update(legendrank=player_rank[owner] * stride + offset)
+        else:
+            trace.update(legendrank=fallback_rank)
+            fallback_rank += 1
+
+
+def render_plotly_chart(fig: go.Figure, sort_legend: bool = True, **kwargs: object) -> None:
+    if sort_legend:
+        sort_legend_by_latest_y(fig)
     st.plotly_chart(fig, **kwargs)
 
 
@@ -1004,26 +1291,26 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             )
             render_plotly_chart(fig_pace, use_container_width=True)
 
-    leader_options = sorted(df["Spieler"].dropna().astype(str).unique().tolist())
+    leader_rank_df = df[["Spieler", "Date", "Total XP"]].copy()
+    leader_rank_df["Date"] = pd.to_datetime(leader_rank_df["Date"], errors="coerce")
+    leader_rank_df["Total XP"] = pd.to_numeric(leader_rank_df["Total XP"], errors="coerce")
+    leader_rank_df["Spieler"] = leader_rank_df["Spieler"].astype(str).str.strip()
+    leader_rank_df = leader_rank_df.dropna(subset=["Spieler", "Date", "Total XP"]).copy()
+    leader_rank_df = leader_rank_df.sort_values(["Spieler", "Date"])
+    leader_rank_df = leader_rank_df.groupby("Spieler", as_index=False).tail(1)
+    leader_rank_df = leader_rank_df.sort_values(["Total XP", "Spieler"], ascending=[False, True])
+    leader_options = leader_rank_df["Spieler"].tolist()
     if not leader_options:
         st.warning("No valid leader available for selected rows.")
         return
     default_leader = infer_default_gap_leader(df)
     default_idx = leader_options.index(default_leader) if default_leader in leader_options else 0
-    control_left, control_right = st.columns(2)
-    with control_left:
-        selected_leader = st.selectbox(
-            "Gap/Trend Leader",
-            options=leader_options,
-            index=default_idx,
-            key=f"{key_prefix}_gap_leader",
-        )
-    with control_right:
-        show_catchup_trends = st.checkbox(
-            "Show catch-up trendlines",
-            value=True,
-            key=f"{key_prefix}_show_catchup_trends",
-        )
+    selected_leader = st.selectbox(
+        "Gap/Trend Leader",
+        options=leader_options,
+        index=default_idx,
+        key=f"{key_prefix}_gap_leader",
+    )
 
     gap_df = build_gap_change_df(df, leader=selected_leader)
 
@@ -1075,6 +1362,11 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         render_plotly_chart(fig_rank, use_container_width=True)
 
     # Bottom row: total XP full width
+    show_catchup_trends = st.checkbox(
+        "Show catch-up trendlines",
+        value=True,
+        key=f"{key_prefix}_show_catchup_trends",
+    )
     fig_total = px.line(
         df,
         x="Date",
@@ -1084,6 +1376,10 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         title="Total XP Over Time",
     )
     trend_failures: list[str] = []
+    latest_total_date = pd.to_datetime(df["Date"].max(), errors="coerce")
+    if pd.isna(latest_total_date):
+        latest_total_date = pd.Timestamp(d_end)
+    auto_trend_end = pd.Timestamp(latest_total_date) + pd.DateOffset(years=1)
     if show_catchup_trends:
         color_by_player: dict[str, str | None] = {}
         for tr in fig_total.data:
@@ -1093,6 +1389,7 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
 
         leader_series = df[df["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
         longest_trend_end: pd.Timestamp | None = None
+        fallback_players: list[tuple[str, pd.DataFrame, str | None]] = []
         for player, grp in df.groupby("Spieler", sort=True):
             player_name = str(player)
             if player_name == str(selected_leader):
@@ -1106,26 +1403,94 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             )
             if trend_trace is not None:
                 fig_total.add_trace(trend_trace)
+                catch_x = pd.to_datetime(trend_trace.x[-1], errors="coerce")
+                catch_y = pd.to_numeric(pd.Series([trend_trace.y[-1]]), errors="coerce").iloc[0]
+                if pd.notna(catch_x) and pd.notna(catch_y):
+                    marker_color = getattr(getattr(trend_trace, "line", None), "color", None) or color_by_player.get(
+                        player_name
+                    )
+                    fig_total.add_trace(
+                        go.Scatter(
+                            x=[pd.Timestamp(catch_x)],
+                            y=[float(catch_y)],
+                            mode="markers",
+                            name=f"{player_name} catch point",
+                            marker={
+                                "symbol": "circle-open",
+                                "size": 12,
+                                "color": marker_color,
+                                "line": {"width": 2},
+                            },
+                            showlegend=False,
+                            hovertemplate=f"{player_name} catch point<extra></extra>",
+                        )
+                    )
                 trend_end = pd.to_datetime(trend_trace.x[-1], errors="coerce")
                 if pd.notna(trend_end):
                     trend_end_ts = pd.Timestamp(trend_end)
                     if longest_trend_end is None or trend_end_ts > longest_trend_end:
                         longest_trend_end = trend_end_ts
-            elif trend_reason:
-                trend_failures.append(f"{player_name}: {trend_reason}")
+            else:
+                fallback_players.append((player_name, grp[["Date", "Total XP"]].copy(), trend_reason))
+
+        auto_trend_end = longest_trend_end if longest_trend_end is not None else auto_trend_end
+        for player_name, player_series, catchup_reason in fallback_players:
+            fallback_trace, fallback_reason = build_player_trend_projection_trace(
+                player_series,
+                player_name,
+                color_by_player.get(player_name),
+                end_date=auto_trend_end,
+            )
+            if fallback_trace is not None:
+                fig_total.add_trace(fallback_trace)
+            else:
+                reason = fallback_reason or catchup_reason or "not possible (trendline unavailable)"
+                trend_failures.append(f"{player_name}: {reason}")
 
         leader_trend_trace, leader_trend_reason = build_selected_leader_trend_trace(
             leader_series,
             str(selected_leader),
             color_by_player.get(str(selected_leader)),
-            end_date=longest_trend_end,
+            horizon_days=365,
+            end_date=auto_trend_end,
         )
         if leader_trend_trace is not None:
             fig_total.add_trace(leader_trend_trace)
         elif leader_trend_reason:
             trend_failures.append(f"{selected_leader}: {leader_trend_reason}")
 
-    render_plotly_chart(fig_total, use_container_width=True)
+    max_visibility_years = 15
+    default_years, default_months = split_visibility_offset_years_months(pd.Timestamp(latest_total_date), auto_trend_end)
+    if default_years > max_visibility_years:
+        default_years = max_visibility_years
+        default_months = 11
+    vis_col_year, vis_col_month = st.columns(2)
+    with vis_col_year:
+        visibility_years = st.slider(
+            "Total XP visibility (years)",
+            min_value=0,
+            max_value=max_visibility_years,
+            value=int(default_years),
+            key=f"{key_prefix}_total_xp_visibility_years",
+        )
+    with vis_col_month:
+        visibility_months = st.slider(
+            "Total XP visibility (months)",
+            min_value=0,
+            max_value=11,
+            value=int(default_months),
+            key=f"{key_prefix}_total_xp_visibility_months",
+        )
+    visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(
+        years=int(visibility_years),
+        months=int(visibility_months),
+    )
+    if visibility_end <= pd.Timestamp(latest_total_date):
+        visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(months=1)
+    fig_total.update_xaxes(range=[pd.Timestamp(d_start), pd.Timestamp(visibility_end)])
+    apply_total_xp_legend_order(fig_total, df)
+
+    render_plotly_chart(fig_total, use_container_width=True, sort_legend=False)
     if show_catchup_trends and trend_failures:
         st.caption("Catch-up trendline status: " + " | ".join(trend_failures))
 
@@ -2023,6 +2388,51 @@ def _build_medal_export_tables(
     return latest_medals_view, first_achieved[
         ["achieved_date", "account", "display_name", "value_at_achievement", "goal_value"]
     ].copy()
+
+
+def render_latest_medal_status_panel(
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    title: str = "Latest Medal Status",
+) -> None:
+    st.subheader(title)
+    if dash_display_medal_df.empty or goals_df.empty:
+        st.info("No medal status data available for current selection.")
+        return
+
+    _latest_medals_view, first_achieved_view = _build_medal_export_tables(dash_medal_df, dash_display_medal_df, goals_df)
+
+    display_latest = dash_display_medal_df.copy()
+    display_latest["date"] = pd.to_datetime(display_latest.get("date"), errors="coerce")
+    display_latest["account"] = display_latest.get("account", pd.Series(dtype=str)).astype(str).str.strip()
+    display_latest["medal_id"] = display_latest.get("medal_id", pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+    display_latest["value"] = pd.to_numeric(display_latest.get("value"), errors="coerce")
+    display_latest = display_latest.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    display_latest = display_latest.sort_values("date").groupby(["account", "medal_id"], as_index=False).tail(1)
+    platinum_now = display_latest[display_latest["medal_id"] == DERIVED_MEDAL_ID][["account", "value"]].copy()
+    platinum_now = platinum_now.rename(columns={"value": "platinum_count"})
+
+    if not platinum_now.empty:
+        ordered_accounts = [a for a in ACCOUNT_ORDER if a in set(platinum_now["account"].astype(str))]
+        ordered_accounts += [a for a in sorted(platinum_now["account"].astype(str).unique().tolist()) if a not in ordered_accounts]
+        cols = st.columns(max(1, len(ordered_accounts)))
+        for idx, acc in enumerate(ordered_accounts):
+            row = platinum_now[platinum_now["account"].astype(str) == acc]
+            if row.empty:
+                cols[idx].metric(f"{acc} Platinum", "0")
+            else:
+                cols[idx].metric(f"{acc} Platinum", f"{int(float(row['platinum_count'].iloc[0]))}")
+
+    if first_achieved_view.empty:
+        st.info("No achieved platinum medals found yet.")
+        return
+
+    st.dataframe(
+        first_achieved_view[["achieved_date", "account", "display_name", "value_at_achievement", "goal_value"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def _build_dashboard_export_payload(
@@ -3393,100 +3803,6 @@ def render_dashboard_content(
                     },
                 )
 
-    if show_medals and not dash_display_medal_df.empty and not goals_df.empty:
-        st.subheader("Latest Medal Status")
-        latest_medals = dash_display_medal_df.sort_values("date").groupby(["account", "medal_id"], as_index=False).tail(1)
-        latest_medals = latest_medals.merge(goals_df, on="medal_id", how="left")
-        latest_medals["pct_goal"] = (latest_medals["value"] / latest_medals["goal_value"] * 100).round(1)
-        latest_medals["is_platinum"] = latest_medals["value"] >= latest_medals["goal_value"]
-        platinum_now = latest_medals[latest_medals["medal_id"] == DERIVED_MEDAL_ID][["account", "value"]].copy()
-        platinum_now = platinum_now.rename(columns={"value": "platinum_count"})
-        if not platinum_now.empty:
-            ordered_accounts = [a for a in ACCOUNT_ORDER if a in set(platinum_now["account"].astype(str))]
-            ordered_accounts += [
-                a for a in sorted(platinum_now["account"].astype(str).unique().tolist()) if a not in ordered_accounts
-            ]
-            cols = st.columns(max(1, len(ordered_accounts)))
-            for idx, acc in enumerate(ordered_accounts):
-                row = platinum_now[platinum_now["account"].astype(str) == acc]
-                if row.empty:
-                    cols[idx].metric(f"{acc} Platinum", "0")
-                else:
-                    cols[idx].metric(f"{acc} Platinum", f"{int(float(row['platinum_count'].iloc[0]))}")
-
-        history = dash_medal_df.copy()
-        history["date"] = pd.to_datetime(history["date"], errors="coerce")
-        history["account"] = history["account"].astype(str).str.strip()
-        history["medal_id"] = history["medal_id"].astype(str).str.strip().str.lower()
-        history["value"] = pd.to_numeric(history["value"], errors="coerce")
-        history = history.dropna(subset=["date", "account", "medal_id", "value"]).copy()
-        history = history[history["medal_id"] != DERIVED_MEDAL_ID].copy()
-
-        goals_map = goals_df[["medal_id", "display_name", "goal_value"]].copy()
-        goals_map["medal_id"] = goals_map["medal_id"].astype(str).str.strip().str.lower()
-        goals_map["goal_value"] = pd.to_numeric(goals_map["goal_value"], errors="coerce")
-        goals_map = goals_map.dropna(subset=["goal_value"]).drop_duplicates(subset=["medal_id"], keep="last")
-
-        achieved = history.merge(goals_map, on="medal_id", how="left")
-        achieved = achieved.dropna(subset=["goal_value"]).copy()
-        achieved["is_platinum"] = achieved["value"] >= achieved["goal_value"]
-        achieved = achieved[achieved["is_platinum"]].copy()
-
-        if achieved.empty:
-            st.info("No achieved platinum medals found yet.")
-        else:
-            first_achieved = (
-                achieved.sort_values("date")
-                .groupby(["account", "medal_id"], as_index=False)
-                .head(1)[["date", "account", "display_name", "medal_id", "value", "goal_value"]]
-            )
-            first_achieved = first_achieved.rename(columns={"date": "achieved_date", "value": "value_at_achievement"})
-
-            existing_pairs = set(
-                zip(
-                    first_achieved["account"].astype(str).tolist(),
-                    first_achieved["medal_id"].astype(str).tolist(),
-                )
-            )
-            special_rows: list[dict[str, object]] = []
-            for special in SPECIAL_PLATINUM_MEDALS:
-                medal_id = str(special.get("medal_id", "")).strip().lower()
-                display_name = str(special.get("display_name", medal_id)).strip() or medal_id
-                flags = special.get("account_flags", {})
-                achieved_dates = special.get("account_achieved_date", {})
-                for acc, is_true in flags.items():
-                    account = str(acc).strip()
-                    if not account or not bool(is_true):
-                        continue
-                    if (account, medal_id) in existing_pairs:
-                        continue
-                    achieved_date = pd.to_datetime(achieved_dates.get(account), errors="coerce")
-                    if pd.isna(achieved_date):
-                        continue
-                    special_rows.append(
-                        {
-                            "achieved_date": pd.to_datetime(achieved_date),
-                            "account": account,
-                            "display_name": display_name,
-                            "medal_id": medal_id,
-                            "value_at_achievement": 1.0,
-                            "goal_value": 1.0,
-                        }
-                    )
-            if special_rows:
-                first_achieved = pd.concat([first_achieved, pd.DataFrame(special_rows)], ignore_index=True)
-
-            first_achieved["_acc_order"] = first_achieved["account"].map({a: i for i, a in enumerate(ACCOUNT_ORDER)}).fillna(999)
-            first_achieved = first_achieved.sort_values(["achieved_date", "_acc_order", "account"], ascending=[False, True, True])
-            first_achieved = first_achieved.drop(columns=["_acc_order"])
-
-            st.dataframe(
-                first_achieved[["achieved_date", "account", "display_name", "value_at_achievement", "goal_value"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-
 st.set_page_config(page_title="PoGo Local Dashboard", layout="wide")
 st.title("PoGo Local Dashboard")
 st.caption("Interactive XP + medal dashboard.")
@@ -3675,6 +3991,11 @@ if page == "Medal Explorer":
                 key="medal_overview_date_range",
             )
             df = df[(df["date"] >= pd.Timestamp(d_start)) & (df["date"] <= pd.Timestamp(d_end))].copy()
+            medal_status_medal_df = selected_medal_source_df[
+                (selected_medal_source_df["date"] >= pd.Timestamp(d_start))
+                & (selected_medal_source_df["date"] <= pd.Timestamp(d_end))
+            ].copy()
+            medal_status_display_df = df.copy()
 
             goals_map: dict[str, float] = {}
             display_map: dict[str, str] = {}
@@ -3705,28 +4026,46 @@ if page == "Medal Explorer":
                 key="show_medal_goal_trends",
             )
 
-            def add_goal_and_trends(fig_medal: go.Figure, line_df: pd.DataFrame, medal_id: str) -> None:
+            def add_goal_and_trends(
+                fig_medal: go.Figure,
+                line_df: pd.DataFrame,
+                medal_id: str,
+                status_mode: str = "in_chart",
+            ) -> str | None:
                 goal_lookup_id = goal_medal_id_for(medal_id)
                 goal_val = goals_map.get(goal_lookup_id)
                 if goal_val is None or pd.isna(goal_val):
-                    return
+                    return None
                 goal_val_f = float(goal_val)
 
-                fig_medal.add_hline(
-                    y=goal_val_f,
-                    line_dash="dash",
-                    line_color="gray",
-                    annotation_text=f"Goal: {goal_val:g}",
-                    annotation_position="top left",
-                )
+                add_light_goal_reference(fig_medal, goal_val_f, f"Goal: {goal_val:g}")
                 y_max_data = pd.to_numeric(line_df.get("value"), errors="coerce").max()
                 if pd.notna(y_max_data):
                     y_top = max(float(y_max_data), goal_val_f)
                     if y_top <= 0:
                         y_top = 1.0
                     fig_medal.update_yaxes(range=[0, y_top * 1.05])
+                status_html = build_goal_days_status_html(
+                    line_df,
+                    account_col="account",
+                    date_col="date",
+                    value_col="value",
+                    goal_value=goal_val_f,
+                )
                 if not show_goal_trends:
-                    return
+                    if status_mode == "in_chart":
+                        account_count = int(line_df["account"].dropna().astype(str).nunique())
+                        status_y = max(0.22, min(0.84, 1.0 - 0.06 * max(1, account_count)))
+                        add_goal_days_status_annotation(
+                            fig_medal,
+                            line_df,
+                            account_col="account",
+                            date_col="date",
+                            value_col="value",
+                            goal_value=goal_val_f,
+                            y_top=status_y,
+                        )
+                    return status_html
                 color_by_account: dict[str, str | None] = {}
                 for tr in fig_medal.data:
                     name = str(getattr(tr, "name", ""))
@@ -3750,6 +4089,19 @@ if page == "Medal Explorer":
                         )
                     if trend_trace is not None:
                         fig_medal.add_trace(trend_trace)
+                if status_mode == "in_chart":
+                    account_count = int(line_df["account"].dropna().astype(str).nunique())
+                    status_y = max(0.22, min(0.84, 1.0 - 0.06 * max(1, account_count)))
+                    add_goal_days_status_annotation(
+                        fig_medal,
+                        line_df,
+                        account_col="account",
+                        date_col="date",
+                        value_col="value",
+                        goal_value=goal_val_f,
+                        y_top=status_y,
+                    )
+                return status_html
 
             medal_ids_available = set(df["medal_id"].astype(str).tolist())
 
@@ -3771,7 +4123,7 @@ if page == "Medal Explorer":
                         markers=True,
                         title=f"Progress: {platinum_title}",
                     )
-                    add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID)
+                    add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID, status_mode="in_chart")
                     fig_platinum.update_layout(height=520)
                     render_plotly_chart(fig_platinum, use_container_width=True)
                     st.caption(
@@ -3796,13 +4148,7 @@ if page == "Medal Explorer":
                 if curve_map:
                     xp_goal_level = 80 if 80 in curve_map else int(max(curve_map.keys()))
                     xp_goal_value = float(curve_map[xp_goal_level])
-                    fig_xp.add_hline(
-                        y=xp_goal_value,
-                        line_dash="dash",
-                        line_color="gray",
-                        annotation_text=f"Goal L{xp_goal_level}: {int(xp_goal_value):,}",
-                        annotation_position="top left",
-                    )
+                    add_light_goal_reference(fig_xp, xp_goal_value, f"Goal L{xp_goal_level}: {int(xp_goal_value):,}")
                 if show_goal_trends:
                     color_by_player: dict[str, str | None] = {}
                     for tr in fig_xp.data:
@@ -3819,6 +4165,18 @@ if page == "Medal Explorer":
                             )
                             if trend_trace is not None:
                                 fig_xp.add_trace(trend_trace)
+                if xp_goal_value is not None:
+                    account_count_xp = int(xp_line_df["Spieler"].dropna().astype(str).nunique())
+                    status_y_xp = max(0.22, min(0.84, 1.0 - 0.06 * max(1, account_count_xp)))
+                    add_goal_days_status_annotation(
+                        fig_xp,
+                        xp_line_df,
+                        account_col="Spieler",
+                        date_col="Date",
+                        value_col="Total XP",
+                        goal_value=float(xp_goal_value),
+                        y_top=status_y_xp,
+                    )
                 fig_xp.update_layout(height=460)
                 y_max_xp = pd.to_numeric(xp_line_df["Total XP"], errors="coerce").max()
                 if xp_goal_value is not None:
@@ -3829,6 +4187,12 @@ if page == "Medal Explorer":
                 else:
                     fig_xp.update_yaxes(tickformat=",.0f")
                 render_plotly_chart(fig_xp, use_container_width=True)
+
+            render_latest_medal_status_panel(
+                dash_medal_df=medal_status_medal_df,
+                dash_display_medal_df=medal_status_display_df,
+                goals_df=goals_df,
+            )
 
             medals_for_grid = {
                 m for m in medal_ids_available if m not in EXCLUDED_MEDAL_GRAPH_IDS and m != DERIVED_MEDAL_ID
@@ -3864,10 +4228,20 @@ if page == "Medal Explorer":
                             markers=True,
                             title=f"Progress: {title_label}",
                         )
-                        add_goal_and_trends(fig_medal, line_df, medal_id)
+                        status_html = add_goal_and_trends(fig_medal, line_df, medal_id, status_mode="below_chart")
                         fig_medal.update_layout(height=320)
                         with row_cols[col_idx]:
                             render_plotly_chart(fig_medal, use_container_width=True)
+                            if status_html:
+                                st.markdown(
+                                    (
+                                        "<div style='font-size:0.86rem;line-height:1.3;"
+                                        "margin-top:-0.15rem;margin-bottom:0.35rem;'>"
+                                        f"{status_html}"
+                                        "</div>"
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
 
 if page == "Last Inputs":
     st.subheader("Last Inputs")
@@ -4179,7 +4553,20 @@ if page == "Data Input":
         st.caption("Enter one full medal snapshot per account.")
         st.caption("`Platinum Medals` is derived automatically from medals that reached their goal.")
         medal_date = st.date_input("Medal Date", value=date.today(), key="medal_full_date")
-        allowed_accounts = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
+        account_scope_label = st.selectbox(
+            "Medal input account scope",
+            options=[
+                "Core only (Thombay, Cerius, Thomzay)",
+                "All accounts",
+            ],
+            index=0,
+            key="medal_input_account_scope",
+        )
+        all_input_accounts = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
+        if account_scope_label.startswith("Core only"):
+            allowed_accounts = list(dict.fromkeys([str(a).strip() for a in MEDAL_INPUT_CORE_ACCOUNTS if str(a).strip()]))
+        else:
+            allowed_accounts = all_input_accounts
         medal_on_date = set()
         if not medal_df.empty:
             medal_on_date = set(medal_df[medal_df["date"].dt.date == medal_date]["account"].astype(str).tolist())
