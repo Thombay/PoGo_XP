@@ -69,3 +69,7 @@ def medal_report_path() -> Path:
 
 def medal_explanations_path() -> Path:
     return config_dir() / "medal_explanations.csv"
+
+
+def additional_activity_path() -> Path:
+    return data_dir() / "additional_activity.csv"

@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shared.paths import (
+    additional_activity_path,
     config_dir,
     medal_explanations_path,
     medal_snapshots_path,
@@ -66,7 +67,6 @@ MEDAL_SORT_DEFAULT_DIRECTION_BY_METRIC = {
     MEDAL_SORT_INPUT: MEDAL_SORT_ASC,
 }
 XP_TAB_ACTIVITY_MEDAL_IDS = {
-    "battles_won": "battle_girl",
     "distance_walked": "jogger",
     "pokemon_caught": "collector",
 }
@@ -1417,6 +1417,42 @@ def build_medal_interval_rate_df(
     return pd.concat(frames, ignore_index=True).sort_values(["account", "period_end"]).reset_index(drop=True)
 
 
+def build_additional_activity_interval_rate_df(additional_df: pd.DataFrame, accounts: list[str]) -> pd.DataFrame:
+    cols = ["account", "period_start", "period_end", "interval_days", "delta_value", "per_day"]
+    if additional_df.empty or not accounts:
+        return pd.DataFrame(columns=cols)
+
+    d = additional_df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d["account"] = d["account"].astype(str).str.strip()
+    d["battles_won"] = pd.to_numeric(d["battles_won"], errors="coerce")
+    d = d.dropna(subset=["date", "account", "battles_won"]).copy()
+    d = d[d["account"].isin(set([str(a).strip() for a in accounts if str(a).strip()]))].copy()
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+
+    d = d.sort_values("date").drop_duplicates(["account", "date"], keep="last")
+    frames: list[pd.DataFrame] = []
+    for account, grp in d.groupby("account", sort=False):
+        series = grp[["date", "battles_won"]].copy().sort_values("date")
+        if len(series) < 2:
+            continue
+        series = series.rename(columns={"date": "period_end", "battles_won": "cum_value"})
+        series["period_start"] = series["period_end"].shift(1)
+        series["interval_days"] = (series["period_end"] - series["period_start"]).dt.total_seconds() / 86_400.0
+        series["delta_value"] = series["cum_value"].diff()
+        series = series[series["interval_days"] > 0].copy()
+        if series.empty:
+            continue
+        series["per_day"] = series["delta_value"] / series["interval_days"]
+        series["account"] = str(account)
+        frames.append(series[["account", "period_start", "period_end", "interval_days", "delta_value", "per_day"]])
+
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(frames, ignore_index=True).sort_values(["account", "period_end"]).reset_index(drop=True)
+
+
 def _trace_last_numeric_y(trace: object) -> float | None:
     y_values = getattr(trace, "y", None)
     if y_values is None:
@@ -2207,6 +2243,105 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     combined["date"] = combined["date"].dt.date.astype(str)
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False, encoding="utf-8-sig")
+    return int(len(new_df))
+
+
+def load_additional_activity(path: Path) -> pd.DataFrame:
+    cols = ["date", "account", "battles_won"]
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", sep=None, engine="python")
+    except Exception:
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig")
+        except Exception:
+            return pd.DataFrame(columns=cols)
+    if not set(cols).issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+    df = df[cols].copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["account"] = df["account"].astype(str).str.strip()
+    df["battles_won"] = pd.to_numeric(df["battles_won"], errors="coerce")
+    df = df.dropna(subset=["date", "account", "battles_won"]).copy()
+    df = df.sort_values(["date", "account"]).drop_duplicates(["date", "account"], keep="last")
+    return df.reset_index(drop=True)
+
+
+def _validate_additional_activity_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    if new_df.empty:
+        return errors
+
+    existing = existing_df.copy()
+    if not existing.empty:
+        existing = existing.drop_duplicates(subset=["date", "account"], keep="last")
+
+    rows = new_df.drop_duplicates(subset=["date", "account"], keep="last").copy()
+    for _, row in rows.iterrows():
+        dt = pd.to_datetime(row["date"], errors="coerce")
+        account = str(row["account"]).strip()
+        battles_won = pd.to_numeric(row["battles_won"], errors="coerce")
+        if pd.isna(dt) or not account or pd.isna(battles_won):
+            continue
+
+        hist = existing[existing["account"] == account].copy()
+        if hist.empty:
+            continue
+        hist = hist[hist["date"] != dt].copy()
+
+        prev_rows = hist[hist["date"] < dt].sort_values("date")
+        if not prev_rows.empty:
+            prev = prev_rows.iloc[-1]
+            prev_value = float(prev["battles_won"])
+            if float(battles_won) < prev_value:
+                prev_date = pd.to_datetime(prev["date"], errors="coerce")
+                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
+                errors.append(
+                    f"{account} battles_won {pd.Timestamp(dt).date().isoformat()}: {float(battles_won):g} is below previous "
+                    f"{prev_value:g} on {prev_date_txt}."
+                )
+
+        next_rows = hist[hist["date"] > dt].sort_values("date")
+        if not next_rows.empty:
+            nxt = next_rows.iloc[0]
+            next_value = float(nxt["battles_won"])
+            if float(battles_won) > next_value:
+                next_date = pd.to_datetime(nxt["date"], errors="coerce")
+                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
+                errors.append(
+                    f"{account} battles_won {pd.Timestamp(dt).date().isoformat()}: {float(battles_won):g} is above next "
+                    f"{next_value:g} on {next_date_txt}."
+                )
+    return errors
+
+
+def upsert_additional_activity_rows(path: Path, rows: list[dict[str, object]]) -> int:
+    if not rows:
+        return 0
+    new_df = pd.DataFrame(rows)
+    new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
+    new_df["account"] = new_df["account"].astype(str).str.strip()
+    new_df["battles_won"] = pd.to_numeric(new_df["battles_won"], errors="coerce")
+    new_df = new_df.dropna(subset=["date", "account", "battles_won"]).copy()
+    new_df = new_df.drop_duplicates(subset=["date", "account"], keep="last")
+    if new_df.empty:
+        return 0
+
+    existing = load_additional_activity(path)
+    monotonic_errors = _validate_additional_activity_rows_non_decreasing(existing, new_df)
+    if monotonic_errors:
+        details = "\n".join(monotonic_errors[:12])
+        extra = f"\n... and {len(monotonic_errors) - 12} more issue(s)." if len(monotonic_errors) > 12 else ""
+        raise ValueError("Additional activity input rejected: battles_won must be non-decreasing over time.\n" + details + extra)
+
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date", "account"], keep="last")
+    combined = combined.sort_values(["date", "account"]).reset_index(drop=True)
+    out = combined.copy()
+    out["date"] = out["date"].dt.date.astype(str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out[["date", "account", "battles_won"]].to_csv(path, index=False, encoding="utf-8-sig")
     return int(len(new_df))
 
 
@@ -3920,6 +4055,7 @@ def render_dashboard_export_button(
 def render_dashboard_content(
     dash_xp_df: pd.DataFrame,
     dash_medal_df: pd.DataFrame,
+    dash_additional_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
     goals_df: pd.DataFrame,
     curve_map: dict[int, int],
@@ -5026,6 +5162,13 @@ if page == "Data Input":
                 for _, r in latest_xp.iterrows():
                     latest_map[str(r["Spieler"])] = (int(r["Lvl"]), int(r["XP Bar"]))
 
+            additional_activity_df = load_additional_activity(additional_activity_path())
+            latest_battles_map: dict[str, float] = {}
+            if not additional_activity_df.empty:
+                latest_additional = additional_activity_df.sort_values("date").groupby("account", as_index=False).tail(1)
+                for _, r in latest_additional.iterrows():
+                    latest_battles_map[str(r["account"])] = float(r["battles_won"])
+
             latest_activity_map: dict[tuple[str, str], float] = {}
             if not medal_df.empty:
                 medal_latest = medal_df.copy()
@@ -5049,11 +5192,16 @@ if page == "Data Input":
                 if not medal_df.empty
                 else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
             )
+            additional_existing_for_validation = (
+                additional_activity_df[["date", "account", "battles_won"]].copy()
+                if not additional_activity_df.empty
+                else pd.DataFrame(columns=["date", "account", "battles_won"])
+            )
 
             xp_editor_rows = []
             for acc in selected_xp_accounts:
                 lvl_default, xp_default = latest_map.get(acc, (1, 0))
-                battles_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"]), 0.0)
+                battles_default = latest_battles_map.get(str(acc), 0.0)
                 distance_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"]), 0.0)
                 caught_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"]), 0.0)
                 xp_editor_rows.append(
@@ -5069,9 +5217,9 @@ if page == "Data Input":
                     }
                 )
 
-            _, xp_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
-            col_widths = [1.35, 0.65, 0.95, 0.2, 0.55, 0.2, 0.95, 0.95, 0.95, 0.95, 1.9]
-            h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11 = xp_input_col.columns(col_widths, gap="small")
+            xp_input_col = st.container()
+            col_widths = [1.25, 0.62, 0.92, 0.18, 0.52, 0.18, 0.9, 0.72, 0.9, 0.72, 0.95, 0.72, 0.95, 1.85]
+            h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14 = xp_input_col.columns(col_widths, gap="small")
             h1.markdown("**Account**")
             h2.markdown("**Level (last Data)**")
             h3.markdown("**XPBar (last Data)**")
@@ -5079,22 +5227,58 @@ if page == "Data Input":
             h5.markdown("**Level**")
             h6.markdown("**+**")
             h7.markdown("**XP Bar**")
-            h8.markdown("**Battles Won**")
-            h9.markdown("**Distance Walked**")
-            h10.markdown("**Pokemon Caught**")
-            h11.markdown("**Status**")
+            h8.markdown("**Battles (last)**")
+            h9.markdown("**Battles Won**")
+            h10.markdown("**Distance (last)**")
+            h11.markdown("**Distance Walked**")
+            h12.markdown("**Caught (last)**")
+            h13.markdown("**Pokemon Caught**")
+            h14.markdown("**Status**")
 
             xp_inputs: list[dict[str, object]] = []
             inline_xp_errors: list[str] = []
             xp_existing_for_validation = xp_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy() if not xp_df.empty else pd.DataFrame(
                 columns=["Date", "Spieler", "Lvl", "XP Bar"]
             )
+
+            def _fmt_input_default(val: object, decimals: int = 0) -> str:
+                num = pd.to_numeric(pd.Series([val]), errors="coerce").iloc[0]
+                if pd.isna(num):
+                    return "0" if decimals <= 0 else f"0.{''.join(['0'] * decimals)}"
+                n = float(num)
+                if decimals <= 0:
+                    return str(int(round(n)))
+                return f"{n:.{int(decimals)}f}"
+
+            def _parse_float_loose(raw: object) -> float | None:
+                s = str(raw).strip()
+                if not s:
+                    return None
+                s = s.replace(" ", "")
+                if "," in s and "." in s:
+                    if s.rfind(",") > s.rfind("."):
+                        s = s.replace(".", "").replace(",", ".")
+                    else:
+                        s = s.replace(",", "")
+                elif "," in s and "." not in s:
+                    if s.count(",") == 1:
+                        s = s.replace(",", ".")
+                    else:
+                        s = s.replace(",", "")
+                else:
+                    s = s.replace(",", "")
+                val = pd.to_numeric(pd.Series([s]), errors="coerce").iloc[0]
+                return None if pd.isna(val) else float(val)
+
             for row in xp_editor_rows:
                 acc = str(row["account"])
-                c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = xp_input_col.columns(col_widths, gap="small")
+                c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14 = xp_input_col.columns(col_widths, gap="small")
                 account_slot = c1.empty()
                 c2.markdown(f"`{int(row['lvl_last'])}`")
                 c3.markdown(f"`{int(row['xp_bar_last']):,}`")
+                c8.markdown(f"`{_fmt_input_default(row.get('battles_last', 0.0), 0)}`")
+                c10.markdown(f"`{_fmt_input_default(row.get('distance_last', 0.0), 1)}`")
+                c12.markdown(f"`{_fmt_input_default(row.get('caught_last', 0.0), 0)}`")
                 lvl_state_key = f"xp_level_input_{xp_date.isoformat()}_{acc}"
                 if lvl_state_key not in st.session_state:
                     st.session_state[lvl_state_key] = int(row["lvl"])
@@ -5137,29 +5321,32 @@ if page == "Data Input":
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
-                battles_value = c8.text_input(
+                battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
+                distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
+                caught_default = _fmt_input_default(row.get("caught_last", 0.0), 0)
+                battles_value = c9.text_input(
                     "Battles Won",
-                    value=str(int(float(row.get("battles_last", 0.0)))),
+                    value=battles_default,
                     key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
-                distance_value = c9.text_input(
+                distance_value = c11.text_input(
                     "Distance Walked",
-                    value=str(int(float(row.get("distance_last", 0.0)))),
+                    value=distance_default,
                     key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
-                caught_value = c10.text_input(
+                caught_value = c13.text_input(
                     "Pokemon Caught",
-                    value=str(int(float(row.get("caught_last", 0.0)))),
+                    value=caught_default,
                     key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
                 row_errors: list[str] = []
                 xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
-                battles_num = pd.to_numeric(battles_value, errors="coerce")
-                distance_num = pd.to_numeric(distance_value, errors="coerce")
-                caught_num = pd.to_numeric(caught_value, errors="coerce")
+                battles_num = _parse_float_loose(battles_value)
+                distance_num = _parse_float_loose(distance_value)
+                caught_num = _parse_float_loose(caught_value)
                 row_changed = int(lvl_value) != int(row["lvl_last"])
                 if pd.isna(xp_bar_num):
                     row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
@@ -5199,14 +5386,23 @@ if page == "Data Input":
                 if pd.isna(caught_num) or float(caught_num) < 0:
                     row_errors.append("Pokemon Caught must be a number >= 0.")
                 if not row_errors:
-                    medal_row_df = pd.DataFrame(
+                    additional_row_df = pd.DataFrame(
                         [
                             {
                                 "date": pd.Timestamp(xp_date),
                                 "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"],
-                                "value": float(battles_num),
-                            },
+                                "battles_won": float(battles_num),
+                            }
+                        ]
+                    )
+                    additional_mono_errors = _validate_additional_activity_rows_non_decreasing(
+                        additional_existing_for_validation,
+                        additional_row_df,
+                    )
+                    row_errors.extend(additional_mono_errors)
+                if not row_errors:
+                    medal_row_df = pd.DataFrame(
+                        [
                             {
                                 "date": pd.Timestamp(xp_date),
                                 "account": acc,
@@ -5226,12 +5422,12 @@ if page == "Data Input":
 
                 if row_errors:
                     inline_xp_errors.extend(row_errors)
-                    c11.markdown(
+                    c14.markdown(
                         f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
                         unsafe_allow_html=True,
                     )
                 else:
-                    c11.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
+                    c14.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
                 xp_inputs.append(
                     {
                         "account": acc,
@@ -5247,15 +5443,16 @@ if page == "Data Input":
                 st.caption("Fix row errors to enable saving.")
             if st.button("Save XP snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
                 rows_to_write: list[dict[str, object]] = []
+                additional_rows_to_write: list[dict[str, object]] = []
                 medal_rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
                 for r in xp_inputs:
                     acc = str(r.get("account", "")).strip()
                     lvl = pd.to_numeric(r.get("lvl"), errors="coerce")
                     xp_bar = pd.to_numeric(r.get("xp_bar"), errors="coerce")
-                    battles_won = pd.to_numeric(r.get("battles_won"), errors="coerce")
-                    distance_walked = pd.to_numeric(r.get("distance_walked"), errors="coerce")
-                    pokemon_caught = pd.to_numeric(r.get("pokemon_caught"), errors="coerce")
+                    battles_won = _parse_float_loose(r.get("battles_won"))
+                    distance_walked = _parse_float_loose(r.get("distance_walked"))
+                    pokemon_caught = _parse_float_loose(r.get("pokemon_caught"))
                     if not acc:
                         errors.append("Missing account value.")
                         continue
@@ -5282,14 +5479,15 @@ if page == "Data Input":
                             "XP Bar": int(xp_bar),
                         }
                     )
+                    additional_rows_to_write.append(
+                        {
+                            "date": xp_date.isoformat(),
+                            "account": acc,
+                            "battles_won": float(battles_won),
+                        }
+                    )
                     medal_rows_to_write.extend(
                         [
-                            {
-                                "date": xp_date.isoformat(),
-                                "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"],
-                                "value": float(battles_won),
-                            },
                             {
                                 "date": xp_date.isoformat(),
                                 "account": acc,
@@ -5309,14 +5507,16 @@ if page == "Data Input":
                 else:
                     try:
                         written = upsert_xp_rows(xp_history_path(), rows_to_write)
+                        written_additional = upsert_additional_activity_rows(additional_activity_path(), additional_rows_to_write)
                         written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
                     except ValueError as e:
                         st.error(str(e))
                     else:
                         st.success(
                             f"Saved XP snapshot rows: {written}. "
+                            f"Saved battles rows: {written_additional}. "
                             f"Saved activity medal rows: {written_medals} "
-                            "(Battles Won, Distance Walked, Pokemon Caught)."
+                            "(Distance Walked, Pokemon Caught)."
                         )
 
         if all_players:
@@ -5451,6 +5651,11 @@ if page == "Data Input":
                 medal_df[["date", "account", "medal_id", "value"]].copy()
                 if not medal_df.empty
                 else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
+            )
+            additional_existing_for_validation = (
+                additional_activity_df[["date", "account", "battles_won"]].copy()
+                if not additional_activity_df.empty
+                else pd.DataFrame(columns=["date", "account", "battles_won"])
             )
             for row in editor_rows:
                 medal_id = str(row.get("medal_id", "")).strip().lower()

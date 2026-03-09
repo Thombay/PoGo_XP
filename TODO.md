@@ -116,3 +116,4 @@ Notes:
   - [x] Battles Won
   - [x] Distance Walked
   - [x] Pokemon Caught
+- [x] Battles Won decoupled from `battle_girl` medal and stored as separate additional activity data
