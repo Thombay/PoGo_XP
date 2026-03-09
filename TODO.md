@@ -89,4 +89,26 @@ Notes:
 
 ---
 
-trend difference visible to last data
+-Data Input: move button next to the name/medal to move only 1 position up and down
+
+-Medal explorer different modi for which graphs are shown or sorted.:
+    + show all 
+    + only show medals that are not completed (Thombay, Cerius, Thomzay)
+    + show only completed (Thombay, Cerius, Thomzay)
+    + sort after completion progress ascending/descending (Thombay, Cerius, Thomzay)
+    + sort after time until completion ascending/descending (Thombay, Cerius, Thomzay)
+    + sort after Data Input Order (Thombay, Cerius, Thomzay)
+
+-Medal explorer graphs: goal pace: ahead in green, behind keep in red, completed in blue
+
+-Dashboard: over every number you can hover and it shows more detailed info how it is calcualted or show the exact calculation.
+
+-scale the whole website depending on the windowsize
+
+-make a new output version that is more suitable for smartphones
+
+-move gap/trend leader dropdown left of show catch-up trendlines
+
+-Total xp over time y axis should also react with the slider and fill the graph automatically.
+
+-Create a file in config where i can input some explanations for the medals that is shown when you hover over the medal.
