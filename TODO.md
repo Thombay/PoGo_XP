@@ -89,26 +89,30 @@ Notes:
 
 ---
 
--Data Input: move button next to the name/medal to move only 1 position up and down
+## 7) Webapp UX follow-ups
 
--Medal explorer different modi for which graphs are shown or sorted.:
-    + show all 
-    + only show medals that are not completed (Thombay, Cerius, Thomzay)
-    + show only completed (Thombay, Cerius, Thomzay)
-    + sort after completion progress ascending/descending (Thombay, Cerius, Thomzay)
-    + sort after time until completion ascending/descending (Thombay, Cerius, Thomzay)
-    + sort after Data Input Order (Thombay, Cerius, Thomzay)
-
--Medal explorer graphs: goal pace: ahead in green, behind keep in red, completed in blue
-
--Dashboard: over every number you can hover and it shows more detailed info how it is calcualted or show the exact calculation.
-
--scale the whole website depending on the windowsize
-
--make a new output version that is more suitable for smartphones
-
--move gap/trend leader dropdown left of show catch-up trendlines
-
--Total xp over time y axis should also react with the slider and fill the graph automatically.
-
--Create a file in config where i can input some explanations for the medals that is shown when you hover over the medal.
+- [x] Data Input: move buttons next to account/medal to move only 1 position up/down
+- [x] Medal Explorer modes for graph visibility/sorting:
+  - [x] show all
+  - [x] only medals not completed (Thombay, Cerius, Thomzay)
+  - [x] only completed (Thombay, Cerius, Thomzay)
+  - [x] sort by completion progress ascending/descending (Thombay, Cerius, Thomzay)
+  - [x] sort by time until completion ascending/descending (Thombay, Cerius, Thomzay)
+  - [x] sort by data input order (Thombay)
+- [x] Medal Explorer goal pace colors:
+  - [x] ahead = green
+  - [x] behind = red
+  - [x] completed = blue
+- [x] Dashboard KPI hover help includes more detailed calculation/context info
+- [x] Website scales better with window size (responsive CSS)
+- [x] New export mode suitable for smartphones
+- [x] Move gap/trend leader dropdown left of show catch-up trendlines
+- [x] Total XP over time y-axis reacts to slider x-range and auto-fits
+- [x] Config file for medal explanations + show explanation in medal hover
+  - [x] `inputs/config/medal_explanations.csv` created and prefilled with all medal IDs
+- [x] Personal dashboard: medal-based activity stats/graphs below Total XP (caught/day, raids/day, pokestops/day, km/day, intervals)
+- [x] Personal dashboard KPI summary expanded to show values for every core account
+- [x] Data Input (XP tab): added per-account activity medal inputs and save flow for:
+  - [x] Battles Won
+  - [x] Distance Walked
+  - [x] Pokemon Caught
