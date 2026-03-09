@@ -117,3 +117,14 @@ Notes:
   - [x] Distance Walked
   - [x] Pokemon Caught
 - [x] Battles Won decoupled from `battle_girl` medal and stored as separate additional activity data
+- [x] Dashboard Global: added activity KPI row below top KPIs using new data (`Battles/day`, `Pokemon Caught/day`, `Km/day`, `PokeStops/day`)
+- [x] Dashboard Global XP Explorer: added cumulative activity trend graphs directly below `Total XP Over Time` (`Battles Won`, `Pokemon Caught`, `Distance Walked`)
+- [x] Dashboard Global XP Explorer: added `Activity Performance` KPIs below Total XP (`Leader`, `Best`, `Worst`, `Improved`, `Declined`) with metric selector
+- [x] `PokeStops/day` removed from Global activity cards/analysis (kept in Personal only)
+- [x] Moved `Activity Snapshot (Latest Intervals)` KPI row below `Total XP Over Time` in Dashboard Global XP Explorer
+- [x] PokeStops over-time chart kept only in Dashboard Personal (removed from Global XP Explorer)
+- [x] Global XP Explorer `Activity Performance` now shows all metrics in one row (no selector)
+- [x] Global XP Explorer `Activity Snapshot` now uses selected window (7d/30d) for consistent values
+- [x] Global activity KPI rates decoupled from XP date-range/common-interval clipping (per-account values now stable across groups)
+- [x] Activity Performance layout switched to KPI-type columns (Leader/Best/Worst/Improved/Declined), each listing all metrics
+- [x] Activity Performance redesigned to card-style KPI rows per activity (matches Global KPI card style)
