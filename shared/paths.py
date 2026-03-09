@@ -65,3 +65,7 @@ def medal_snapshots_path() -> Path:
 
 def medal_report_path() -> Path:
     return output_dir() / "medal-tracker" / "medal_report.csv"
+
+
+def medal_explanations_path() -> Path:
+    return config_dir() / "medal_explanations.csv"

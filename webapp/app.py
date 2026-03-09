@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from shared.paths import (
     config_dir,
+    medal_explanations_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
@@ -36,6 +37,7 @@ from webapp.metrics import (
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
 MEDAL_INPUT_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
+MEDAL_EXPLORER_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
 DERIVED_MEDAL_ID = "platinum_medals"
 DASHBOARD_WINDOW_OPTIONS = [7, 30]
 MIN_ELIGIBLE_FOR_30D_DEFAULT = 2
@@ -50,6 +52,24 @@ GOAL_ALIAS_BY_MEDAL_ID = {
     "pokestops_vistited": "backpacker",
 }
 EXCLUDED_MEDAL_GRAPH_IDS = {"distance_walked", "pokemon_caught", "pokestops_visited", "pokestops_vistited"}
+MEDAL_FILTER_SHOW_ALL = "Show all"
+MEDAL_FILTER_NOT_COMPLETED = "Not completed"
+MEDAL_FILTER_COMPLETED = "Completed"
+MEDAL_SORT_COMPLETION = "Completion progress"
+MEDAL_SORT_TIME = "Time until completion"
+MEDAL_SORT_INPUT = "Data input order"
+MEDAL_SORT_ASC = "Ascending"
+MEDAL_SORT_DESC = "Descending"
+MEDAL_SORT_DEFAULT_DIRECTION_BY_METRIC = {
+    MEDAL_SORT_TIME: MEDAL_SORT_ASC,
+    MEDAL_SORT_COMPLETION: MEDAL_SORT_DESC,
+    MEDAL_SORT_INPUT: MEDAL_SORT_ASC,
+}
+XP_TAB_ACTIVITY_MEDAL_IDS = {
+    "battles_won": "battle_girl",
+    "distance_walked": "jogger",
+    "pokemon_caught": "collector",
+}
 SPECIAL_PLATINUM_MEDALS = [
     {
         "medal_id": "vivillon_collector",
@@ -342,6 +362,51 @@ def goal_medal_id_for(medal_id: str) -> str:
     return GOAL_ALIAS_BY_MEDAL_ID.get(mid, mid)
 
 
+def ensure_medal_explanations_file(path: Path, goals_df: pd.DataFrame) -> None:
+    if path.exists():
+        return
+    medal_ids: list[str] = []
+    if not goals_df.empty and "medal_id" in goals_df.columns:
+        medal_ids = [
+            goal_medal_id_for(mid)
+            for mid in goals_df["medal_id"].astype(str).str.strip().str.lower().tolist()
+            if str(mid).strip()
+        ]
+        medal_ids = [m for m in list(dict.fromkeys(medal_ids)) if m and m not in EXCLUDED_MANUAL_MEDAL_IDS]
+    out = pd.DataFrame({"medal_id": medal_ids, "explanation": [""] * len(medal_ids)})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def load_medal_explanations(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", sep=None, engine="python")
+    except Exception:
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig")
+        except Exception:
+            return {}
+    if "medal_id" not in df.columns:
+        return {}
+    if "explanation" not in df.columns:
+        df = df.copy()
+        df["explanation"] = ""
+    df = df[["medal_id", "explanation"]].copy()
+    df["medal_id"] = df["medal_id"].fillna("").astype(str).str.strip().str.lower()
+    df["medal_id"] = df["medal_id"].map(goal_medal_id_for)
+    df["explanation"] = df["explanation"].fillna("").astype(str).str.strip()
+    df["explanation_lc"] = df["explanation"].str.lower()
+    df = df[
+        (df["medal_id"] != "")
+        & (df["explanation"] != "")
+        & (~df["explanation_lc"].isin({"nan", "none", "null"}))
+    ].copy()
+    df = df.drop(columns=["explanation_lc"])
+    return dict(zip(df["medal_id"].tolist(), df["explanation"].tolist()))
+
+
 def _filter_trend_series(series: pd.DataFrame, date_col: str, value_col: str) -> pd.DataFrame:
     s = series.copy()
     s[date_col] = pd.to_datetime(s[date_col], errors="coerce")
@@ -618,10 +683,10 @@ def _goal_days_status_for_account(
     date_col: str,
     value_col: str,
     goal_value: float,
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
     s = _filter_trend_series(series, date_col, value_col)
     if s.empty:
-        return "n/a (insufficient trend data)", False
+        return "n/a (insufficient trend data)", "unknown"
 
     latest_date = pd.Timestamp(s[date_col].iloc[-1]).normalize()
     goal = float(goal_value)
@@ -631,20 +696,20 @@ def _goal_days_status_for_account(
         reached_txt = reached_date.date().isoformat()
         days_ahead = int((latest_date - reached_date).days)
         if days_ahead <= 0:
-            return f"on goal (reached {reached_txt})", False
-        return f"{days_ahead}d ahead (reached {reached_txt})", False
+            return f"completed (reached {reached_txt})", "completed"
+        return f"completed ({days_ahead}d ago, reached {reached_txt})", "completed"
 
     eta = _predict_goal_eta(
         s.rename(columns={date_col: "date", value_col: "value"})[["date", "value"]],
         goal,
     )
     if eta is None:
-        return "behind (no ETA: trend too flat/negative)", True
+        return "behind (no ETA: trend too flat/negative)", "behind"
     eta_txt = pd.Timestamp(eta).date().isoformat()
     days_behind = int((pd.Timestamp(eta).normalize() - latest_date).days)
     if days_behind <= 0:
-        return f"on goal (ETA {eta_txt})", False
-    return f"{days_behind}d behind (ETA {eta_txt})", True
+        return f"ahead (ETA {eta_txt})", "ahead"
+    return f"{days_behind}d behind (ETA {eta_txt})", "behind"
 
 
 def build_goal_days_status_html(
@@ -673,14 +738,20 @@ def build_goal_days_status_html(
         grp = line_df[line_df[account_col].astype(str).str.strip() == account][[date_col, value_col]].copy()
         if grp.empty:
             continue
-        status_text, is_alert = _goal_days_status_for_account(
+        status_text, status_kind = _goal_days_status_for_account(
             grp,
             date_col=date_col,
             value_col=value_col,
             goal_value=float(goal_value),
         )
         account_name = escape(str(account))
-        status_color = "#DC2626" if is_alert else "#64748B"
+        status_color_map = {
+            "ahead": "#16A34A",
+            "behind": "#DC2626",
+            "completed": "#2563EB",
+            "unknown": "#64748B",
+        }
+        status_color = status_color_map.get(status_kind, "#64748B")
         rows.append(f"<span style='color:{status_color}'><b>{account_name}</b>: {escape(status_text)}</span>")
 
     if not rows:
@@ -1075,6 +1146,168 @@ def split_visibility_offset_years_months(start_date: pd.Timestamp, end_date: pd.
     return int(years), int(months)
 
 
+def autoscale_y_for_visible_x(
+    fig: go.Figure,
+    x_start: pd.Timestamp,
+    x_end: pd.Timestamp,
+    *,
+    y_floor: float = 0.0,
+    padding_ratio: float = 0.05,
+) -> tuple[float, float] | None:
+    x_min = pd.to_datetime(x_start, errors="coerce")
+    x_max = pd.to_datetime(x_end, errors="coerce")
+    if pd.isna(x_min) or pd.isna(x_max):
+        return None
+    if pd.Timestamp(x_max) <= pd.Timestamp(x_min):
+        return None
+
+    y_vals: list[float] = []
+    for tr in fig.data:
+        x_raw = getattr(tr, "x", None)
+        y_raw = getattr(tr, "y", None)
+        if x_raw is None or y_raw is None:
+            continue
+        x_ser = pd.to_datetime(pd.Series(list(x_raw)), errors="coerce")
+        y_ser = pd.to_numeric(pd.Series(list(y_raw)), errors="coerce")
+        mask = x_ser.notna() & y_ser.notna()
+        if not bool(mask.any()):
+            continue
+        x_ser = x_ser[mask]
+        y_ser = y_ser[mask]
+        in_view = (x_ser >= pd.Timestamp(x_min)) & (x_ser <= pd.Timestamp(x_max))
+        if bool(in_view.any()):
+            y_vals.extend([float(v) for v in y_ser[in_view].tolist()])
+            continue
+        # Include lines fully spanning the selected window, so trend traces still influence y-range.
+        if len(x_ser) >= 2 and pd.Timestamp(x_ser.min()) < pd.Timestamp(x_min) and pd.Timestamp(x_ser.max()) > pd.Timestamp(x_max):
+            y_vals.extend([float(v) for v in y_ser.tolist()])
+
+    if not y_vals:
+        return None
+    y_max = max(y_vals)
+    top = max(float(y_floor) + 1.0, float(y_max) * (1.0 + float(padding_ratio)))
+    return float(y_floor), float(top)
+
+
+def get_medal_ids_for_view_mode(
+    medal_ids: list[str],
+    source_df: pd.DataFrame,
+    goals_map: dict[str, float],
+    selected_accounts: list[str],
+    filter_mode: str,
+    sort_metric: str,
+    sort_direction: str,
+    sort_account: str | None,
+    input_order: list[str],
+) -> list[str]:
+    if not medal_ids:
+        return []
+    default_order = [m for m in input_order if m in set(medal_ids)] + [m for m in medal_ids if m not in set(input_order)]
+    default_index = {m: i for i, m in enumerate(default_order)}
+
+    history = source_df.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    history["account"] = history["account"].astype(str).str.strip()
+    history["medal_id"] = history["medal_id"].astype(str).str.strip().str.lower().map(goal_medal_id_for)
+    history["value"] = pd.to_numeric(history["value"], errors="coerce")
+    history = history.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    history = history[history["medal_id"].isin(set(medal_ids))].copy()
+    if history.empty:
+        return default_order
+
+    selected_set = {str(a).strip() for a in selected_accounts if str(a).strip()}
+    primary_sort_account = str(sort_account or "").strip()
+    focus_accounts = [primary_sort_account] if primary_sort_account and primary_sort_account in selected_set else []
+    if not focus_accounts:
+        focus_accounts = [a for a in MEDAL_EXPLORER_CORE_ACCOUNTS if a in selected_set]
+    if not focus_accounts:
+        focus_accounts = [a for a in selected_accounts if str(a).strip()]
+    if not focus_accounts:
+        return default_order
+
+    progress_score: dict[str, float] = {}
+    eta_days_score: dict[str, float] = {}
+    completed_all: dict[str, bool] = {}
+    for medal_id in medal_ids:
+        goal = pd.to_numeric(pd.Series([goals_map.get(goal_medal_id_for(medal_id))]), errors="coerce").iloc[0]
+        if pd.isna(goal) or float(goal) <= 0:
+            progress_score[medal_id] = 0.0
+            eta_days_score[medal_id] = float("inf")
+            completed_all[medal_id] = False
+            continue
+        goal_f = float(goal)
+        per_acc_progress: list[float] = []
+        per_acc_eta_days: list[float] = []
+        per_acc_completed: list[bool] = []
+        for acc in focus_accounts:
+            grp = history[(history["account"] == str(acc)) & (history["medal_id"] == medal_id)].sort_values("date")
+            if grp.empty:
+                per_acc_progress.append(0.0)
+                per_acc_eta_days.append(float("inf"))
+                per_acc_completed.append(False)
+                continue
+            latest_value = float(pd.to_numeric(pd.Series([grp["value"].iloc[-1]]), errors="coerce").iloc[0])
+            ratio = latest_value / goal_f if goal_f > 0 else 0.0
+            per_acc_progress.append(ratio)
+            if latest_value >= goal_f:
+                per_acc_eta_days.append(0.0)
+                per_acc_completed.append(True)
+                continue
+            eta = _predict_goal_eta(grp[["date", "value"]], goal_f)
+            if eta is None:
+                per_acc_eta_days.append(float("inf"))
+                per_acc_completed.append(False)
+                continue
+            latest_date = pd.to_datetime(grp["date"].iloc[-1], errors="coerce")
+            if pd.isna(latest_date):
+                per_acc_eta_days.append(float("inf"))
+                per_acc_completed.append(False)
+                continue
+            days_until = int((pd.Timestamp(eta).normalize() - pd.Timestamp(latest_date).normalize()).days)
+            per_acc_eta_days.append(float(max(0, days_until)))
+            per_acc_completed.append(False)
+        progress_score[medal_id] = float(sum(per_acc_progress) / len(per_acc_progress)) if per_acc_progress else 0.0
+        eta_days_score[medal_id] = float(max(per_acc_eta_days)) if per_acc_eta_days else float("inf")
+        completed_all[medal_id] = bool(per_acc_completed) and all(per_acc_completed)
+
+    filtered = list(default_order)
+    if filter_mode == MEDAL_FILTER_NOT_COMPLETED:
+        filtered = [m for m in filtered if not completed_all.get(m, False)]
+    elif filter_mode == MEDAL_FILTER_COMPLETED:
+        filtered = [m for m in filtered if completed_all.get(m, False)]
+
+    if sort_metric == MEDAL_SORT_INPUT:
+        if sort_direction == MEDAL_SORT_DESC:
+            return list(reversed(filtered))
+        return filtered
+
+    if sort_metric == MEDAL_SORT_COMPLETION:
+        if sort_direction == MEDAL_SORT_DESC:
+            return sorted(filtered, key=lambda m: (-progress_score.get(m, 0.0), default_index.get(m, 9999)))
+        return sorted(filtered, key=lambda m: (progress_score.get(m, 0.0), default_index.get(m, 9999)))
+
+    if sort_metric == MEDAL_SORT_TIME:
+        if sort_direction == MEDAL_SORT_DESC:
+            return sorted(
+                filtered,
+                key=lambda m: (
+                    0 if eta_days_score.get(m, float("inf")) == float("inf") else 1,
+                    -eta_days_score.get(m, 0.0) if eta_days_score.get(m, float("inf")) != float("inf") else 0.0,
+                    default_index.get(m, 9999),
+                ),
+            )
+        return sorted(
+            filtered,
+            key=lambda m: (
+                1 if eta_days_score.get(m, float("inf")) == float("inf") else 0,
+                eta_days_score.get(m, float("inf")),
+                default_index.get(m, 9999),
+            ),
+        )
+
+    return filtered
+
+
 def build_pace_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -1092,6 +1325,96 @@ def build_xp_gain_over_time_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.sort_values(["Spieler", "Date"]).copy()
     out["XP Gain"] = out["Total XP"] - out.groupby("Spieler")["Total XP"].transform("first")
     return out
+
+
+def build_snapshot_interval_days_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["account", "period_end", "interval_days"])
+    out = df.copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Spieler"] = out["Spieler"].astype(str).str.strip()
+    out = out.dropna(subset=["Date", "Spieler"]).copy()
+    out = out.sort_values(["Spieler", "Date"]).copy()
+    out["period_start"] = out.groupby("Spieler")["Date"].shift(1)
+    out["interval_days"] = (out["Date"] - out["period_start"]).dt.total_seconds() / 86_400.0
+    out = out[out["interval_days"] > 0].copy()
+    out = out.rename(columns={"Spieler": "account", "Date": "period_end"})
+    return out[["account", "period_end", "interval_days"]].reset_index(drop=True)
+
+
+def build_medal_snapshot_interval_days_df(medal_df: pd.DataFrame, accounts: list[str]) -> pd.DataFrame:
+    if medal_df.empty or not accounts:
+        return pd.DataFrame(columns=["account", "period_end", "interval_days"])
+    d = medal_df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d["account"] = d["account"].astype(str).str.strip()
+    d = d.dropna(subset=["date", "account"]).copy()
+    d = d[d["account"].isin(set([str(a).strip() for a in accounts if str(a).strip()]))].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["account", "period_end", "interval_days"])
+    # one snapshot point per account/date regardless of medal row count
+    d = d.sort_values("date").drop_duplicates(["account", "date"], keep="last")
+    d = d.sort_values(["account", "date"]).copy()
+    d["period_start"] = d.groupby("account")["date"].shift(1)
+    d["interval_days"] = (d["date"] - d["period_start"]).dt.total_seconds() / 86_400.0
+    d = d[d["interval_days"] > 0].copy()
+    d = d.rename(columns={"date": "period_end"})
+    return d[["account", "period_end", "interval_days"]].reset_index(drop=True)
+
+
+def build_medal_interval_rate_df(
+    medal_df: pd.DataFrame,
+    accounts: list[str],
+    medal_ids: list[str],
+) -> pd.DataFrame:
+    cols = ["account", "period_start", "period_end", "interval_days", "delta_value", "per_day"]
+    if medal_df.empty or not accounts or not medal_ids:
+        return pd.DataFrame(columns=cols)
+
+    d = medal_df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d["account"] = d["account"].astype(str).str.strip()
+    d["medal_id"] = d["medal_id"].astype(str).str.strip().str.lower().map(goal_medal_id_for)
+    d["value"] = pd.to_numeric(d["value"], errors="coerce")
+    d = d.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    d = d[d["account"].isin(set([str(a).strip() for a in accounts if str(a).strip()]))].copy()
+
+    wanted = [goal_medal_id_for(m) for m in medal_ids]
+    wanted = [w for w in list(dict.fromkeys(wanted)) if w]
+    d = d[d["medal_id"].isin(set(wanted))].copy()
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+
+    d = (
+        d.sort_values("date")
+        .groupby(["account", "date", "medal_id"], as_index=False)
+        .agg({"value": "max"})
+    )
+
+    frames: list[pd.DataFrame] = []
+    for account, grp in d.groupby("account", sort=False):
+        wide = grp.pivot_table(index="date", columns="medal_id", values="value", aggfunc="max").sort_index().ffill()
+        for mid in wanted:
+            if mid not in wide.columns:
+                wide[mid] = 0.0
+        total = wide[wanted].sum(axis=1)
+        series = pd.DataFrame({"period_end": pd.to_datetime(total.index), "cum_value": pd.to_numeric(total.values, errors="coerce")})
+        series = series.dropna(subset=["period_end", "cum_value"]).sort_values("period_end")
+        if len(series) < 2:
+            continue
+        series["period_start"] = series["period_end"].shift(1)
+        series["interval_days"] = (series["period_end"] - series["period_start"]).dt.total_seconds() / 86_400.0
+        series["delta_value"] = series["cum_value"].diff()
+        series = series[series["interval_days"] > 0].copy()
+        if series.empty:
+            continue
+        series["per_day"] = series["delta_value"] / series["interval_days"]
+        series["account"] = str(account)
+        frames.append(series[["account", "period_start", "period_end", "interval_days", "delta_value", "per_day"]])
+
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(frames, ignore_index=True).sort_values(["account", "period_end"]).reset_index(drop=True)
 
 
 def _trace_last_numeric_y(trace: object) -> float | None:
@@ -1202,6 +1525,26 @@ def render_plotly_chart(fig: go.Figure, sort_legend: bool = True, **kwargs: obje
     st.plotly_chart(fig, **kwargs)
 
 
+def inject_responsive_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        :root { font-size: clamp(13px, 0.55vw + 10px, 18px); }
+        .block-container { padding-top: 1rem; padding-bottom: 1.25rem; }
+        @media (max-width: 1200px) {
+          .block-container { padding-left: 1rem; padding-right: 1rem; }
+        }
+        @media (max-width: 860px) {
+          .block-container { padding-left: 0.65rem; padding-right: 0.65rem; }
+          h1 { font-size: 1.45rem !important; }
+          h2, h3 { font-size: 1.2rem !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def select_date_range(
     label: str,
     min_date: date,
@@ -1222,7 +1565,12 @@ def select_date_range(
     return st.slider(**slider_kwargs)
 
 
-def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> None:
+def render_xp_explorer_section(
+    xp_subset_df: pd.DataFrame,
+    key_prefix: str,
+    medal_subset_df: pd.DataFrame | None = None,
+    show_personal_activity: bool = False,
+) -> None:
     st.subheader("XP Explorer")
     if xp_subset_df.empty:
         st.info("No XP history data found for this dashboard selection.")
@@ -1305,12 +1653,14 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
         return
     default_leader = infer_default_gap_leader(df)
     default_idx = leader_options.index(default_leader) if default_leader in leader_options else 0
-    selected_leader = st.selectbox(
-        "Gap/Trend Leader",
-        options=leader_options,
-        index=default_idx,
-        key=f"{key_prefix}_gap_leader",
-    )
+    leader_key = f"{key_prefix}_gap_leader"
+    catchup_key = f"{key_prefix}_show_catchup_trends"
+    if leader_key not in st.session_state or st.session_state.get(leader_key) not in leader_options:
+        st.session_state[leader_key] = leader_options[default_idx]
+    if catchup_key not in st.session_state:
+        st.session_state[catchup_key] = True
+    selected_leader = str(st.session_state.get(leader_key, leader_options[default_idx]))
+    show_catchup_trends = bool(st.session_state.get(catchup_key, True))
 
     gap_df = build_gap_change_df(df, leader=selected_leader)
 
@@ -1361,12 +1711,22 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
             )
         render_plotly_chart(fig_rank, use_container_width=True)
 
+    controls_left, controls_right = st.columns([1.35, 1.0])
+    with controls_left:
+        selected_leader = st.selectbox(
+            "Gap/Trend Leader",
+            options=leader_options,
+            index=leader_options.index(selected_leader) if selected_leader in leader_options else default_idx,
+            key=leader_key,
+        )
+    with controls_right:
+        show_catchup_trends = st.checkbox(
+            "Show catch-up trendlines",
+            value=show_catchup_trends,
+            key=catchup_key,
+        )
+
     # Bottom row: total XP full width
-    show_catchup_trends = st.checkbox(
-        "Show catch-up trendlines",
-        value=True,
-        key=f"{key_prefix}_show_catchup_trends",
-    )
     fig_total = px.line(
         df,
         x="Date",
@@ -1488,11 +1848,158 @@ def render_xp_explorer_section(xp_subset_df: pd.DataFrame, key_prefix: str) -> N
     if visibility_end <= pd.Timestamp(latest_total_date):
         visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(months=1)
     fig_total.update_xaxes(range=[pd.Timestamp(d_start), pd.Timestamp(visibility_end)])
+    y_range = autoscale_y_for_visible_x(
+        fig_total,
+        pd.Timestamp(d_start),
+        pd.Timestamp(visibility_end),
+        y_floor=0.0,
+        padding_ratio=0.06,
+    )
+    if y_range is not None:
+        fig_total.update_yaxes(range=[float(y_range[0]), float(y_range[1])], tickformat=",.0f")
+    else:
+        fig_total.update_yaxes(tickformat=",.0f")
     apply_total_xp_legend_order(fig_total, df)
 
     render_plotly_chart(fig_total, use_container_width=True, sort_legend=False)
     if show_catchup_trends and trend_failures:
         st.caption("Catch-up trendline status: " + " | ".join(trend_failures))
+
+    if not show_personal_activity:
+        return
+
+    st.subheader("Personal Activity Intervals")
+    medal_source = medal_subset_df.copy() if medal_subset_df is not None else pd.DataFrame()
+    if medal_source.empty:
+        st.info("No medal history available for personal activity stats.")
+        return
+
+    activity_accounts = [str(a).strip() for a in selected_players if str(a).strip()]
+    if not activity_accounts:
+        st.info("Select at least one account to compute personal activity stats.")
+        return
+
+    caught_df = build_medal_interval_rate_df(medal_source, activity_accounts, medal_ids=["collector"])
+    raids_df = build_medal_interval_rate_df(medal_source, activity_accounts, medal_ids=["champion", "battle_legend"])
+    stops_df = build_medal_interval_rate_df(medal_source, activity_accounts, medal_ids=["backpacker"])
+    km_df = build_medal_interval_rate_df(medal_source, activity_accounts, medal_ids=["jogger"])
+    intervals_df = build_medal_snapshot_interval_days_df(medal_source, activity_accounts)
+
+    core_accounts = [a for a in ACCOUNT_ORDER if a in set(activity_accounts)]
+    display_accounts = core_accounts if core_accounts else activity_accounts
+
+    def _latest_per_core_txt(df_rates: pd.DataFrame, value_col: str = "per_day", fmt: str = "{:,.2f}") -> str:
+        if not display_accounts:
+            return "-"
+        latest_map: dict[str, float] = {}
+        if not df_rates.empty:
+            latest = df_rates.sort_values("period_end").groupby("account", as_index=False).tail(1)
+            latest_map = {
+                str(r["account"]): float(r[value_col])
+                for _, r in latest.iterrows()
+                if pd.notna(pd.to_numeric(r.get(value_col), errors="coerce"))
+            }
+        parts: list[str] = []
+        for acc in display_accounts:
+            if acc in latest_map:
+                parts.append(f"{acc}: {fmt.format(latest_map[acc])}")
+            else:
+                parts.append(f"{acc}: -")
+        return " | ".join(parts)
+
+    def _avg_interval_txt(df_intervals: pd.DataFrame) -> str:
+        if not display_accounts:
+            return "-"
+        per_acc: list[str] = []
+        for acc in display_accounts:
+            grp = df_intervals[df_intervals["account"].astype(str) == str(acc)] if not df_intervals.empty else pd.DataFrame()
+            val = pd.to_numeric(grp.get("interval_days"), errors="coerce").mean() if not grp.empty else pd.NA
+            if pd.isna(val):
+                per_acc.append(f"{acc}: -")
+            else:
+                per_acc.append(f"{acc}: {float(val):.1f}d")
+        return " | ".join(per_acc)
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    render_kpi_card(k1, "Pokemon Caught/day", _latest_per_core_txt(caught_df), help_text="Latest interval per core account from Collector medal deltas.")
+    render_kpi_card(k2, "Raids/day", _latest_per_core_txt(raids_df), help_text="Latest interval per core account from Champion + Battle Legend deltas.")
+    render_kpi_card(k3, "PokeStops/day", _latest_per_core_txt(stops_df), help_text="Latest interval per core account from Backpacker medal deltas.")
+    render_kpi_card(k4, "Km/day", _latest_per_core_txt(km_df), help_text="Latest interval per core account from Jogger medal deltas.")
+    render_kpi_card(k5, "Interval (avg days)", _avg_interval_txt(intervals_df), help_text="Average snapshot interval from medal history.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        if caught_df.empty:
+            st.info("Pokemon caught/day: not enough medal intervals yet.")
+        else:
+            fig_caught = px.line(
+                caught_df,
+                x="period_end",
+                y="per_day",
+                color="account",
+                markers=True,
+                title="Pokemon Caught per Day (Intervals)",
+            )
+            fig_caught.update_yaxes(title="caught/day")
+            render_plotly_chart(fig_caught, use_container_width=True)
+    with g2:
+        if raids_df.empty:
+            st.info("Raids/day: not enough medal intervals yet.")
+        else:
+            fig_raids = px.line(
+                raids_df,
+                x="period_end",
+                y="per_day",
+                color="account",
+                markers=True,
+                title="Raids per Day (Intervals)",
+            )
+            fig_raids.update_yaxes(title="raids/day")
+            render_plotly_chart(fig_raids, use_container_width=True)
+
+    g3, g4 = st.columns(2)
+    with g3:
+        if stops_df.empty:
+            st.info("PokeStops/day: not enough medal intervals yet.")
+        else:
+            fig_stops = px.line(
+                stops_df,
+                x="period_end",
+                y="per_day",
+                color="account",
+                markers=True,
+                title="PokeStops Spun per Day (Intervals)",
+            )
+            fig_stops.update_yaxes(title="stops/day")
+            render_plotly_chart(fig_stops, use_container_width=True)
+    with g4:
+        if km_df.empty:
+            st.info("Km/day: not enough medal intervals yet.")
+        else:
+            fig_km = px.line(
+                km_df,
+                x="period_end",
+                y="per_day",
+                color="account",
+                markers=True,
+                title="KM per Day (Intervals)",
+            )
+            fig_km.update_yaxes(title="km/day")
+            render_plotly_chart(fig_km, use_container_width=True)
+
+    if intervals_df.empty:
+        st.info("Intervals: not enough medal snapshots yet.")
+    else:
+        fig_intervals = px.bar(
+            intervals_df,
+            x="period_end",
+            y="interval_days",
+            color="account",
+            title="Intervals (Days Between Medal Snapshots)",
+            barmode="group",
+        )
+        fig_intervals.update_yaxes(title="days")
+        render_plotly_chart(fig_intervals, use_container_width=True)
 
 
 def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: int) -> None:
@@ -1908,13 +2415,23 @@ def render_kpi_card(
     delta_color: str = "normal",
     help_text: str | None = None,
 ) -> None:
+    card_help = str(help_text).strip() if help_text is not None else ""
+    if not card_help:
+        details: list[str] = [f"Metric: {title}", f"Value: {value}"]
+        if winner is not None and str(winner).strip():
+            details.append(f"Winner: {str(winner).strip()}")
+        if context is not None and str(context).strip():
+            details.append(f"Context: {str(context).strip()}")
+        if delta is not None and str(delta).strip():
+            details.append(f"Delta: {str(delta).strip()}")
+        card_help = "\n".join(details)
     with col:
         st.metric(
             title,
             value,
             delta=delta,
             delta_color=delta_color,
-            help=help_text,
+            help=card_help,
         )
         if winner is not None and str(winner).strip():
             st.caption(str(winner))
@@ -2241,6 +2758,25 @@ def _export_theme(mode: str) -> dict[str, object]:
             "colorway": ["#0ea5a4", "#1d4ed8", "#16a34a", "#f59e0b", "#e11d48", "#7c3aed", "#0f766e", "#f97316"],
             "max_width": "980px",
             "base_font_size": "15px",
+        }
+    if m == "smartphone":
+        return {
+            "name": "Smartphone",
+            "template": "plotly_white",
+            "paper_bg": "#ffffff",
+            "plot_bg": "#ffffff",
+            "font": "#0f172a",
+            "grid": "rgba(15,23,42,0.12)",
+            "line": "rgba(15,23,42,0.30)",
+            "body_bg": "#f8fafc",
+            "muted": "#475569",
+            "card_bg": "#ffffff",
+            "border": "#d0d7de",
+            "table_bg": "#ffffff",
+            "table_head": "#eef2f7",
+            "colorway": ["#0ea5a4", "#1d4ed8", "#16a34a", "#f59e0b", "#e11d48", "#7c3aed", "#0f766e", "#f97316"],
+            "max_width": "430px",
+            "base_font_size": "16px",
         }
     return {
         "name": "Dark",
@@ -3005,6 +3541,11 @@ def build_dashboard_export_html(
     @media (max-width: 1000px) {{
       .metrics {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }}
     }}
+    @media (max-width: 520px) {{
+      body {{ margin:10px; }}
+      .metrics {{ grid-template-columns:1fr; }}
+      .window-switch, .theme-switch {{ flex-wrap:wrap; }}
+    }}
   </style>
 </head>
 <body class="theme-{default_theme_mode}">
@@ -3159,7 +3700,7 @@ def build_dashboard_export_png(
     accounts_text = str(payload["accounts_text"])
     generated_at = str(payload["generated_at"])
 
-    width = 1800
+    width = 900 if str(export_mode).strip().lower() == "smartphone" else 1800
     pad = 20
     bg = str(theme["body_bg"])
     fg = str(theme["font"])
@@ -3298,7 +3839,7 @@ def render_dashboard_export_button(
     window_days: int,
     key: str,
 ) -> None:
-    mode_options = ["Dark", "Light", "WhatsApp"]
+    mode_options = ["Dark", "Light", "WhatsApp", "Smartphone"]
     mode_col, fmt_col, action_col = st.columns([1.2, 1.3, 1.2])
     with mode_col:
         st.caption("Mode")
@@ -3804,6 +4345,7 @@ def render_dashboard_content(
                 )
 
 st.set_page_config(page_title="PoGo Local Dashboard", layout="wide")
+inject_responsive_styles()
 st.title("PoGo Local Dashboard")
 st.caption("Interactive XP + medal dashboard.")
 
@@ -3812,6 +4354,8 @@ xp_df = load_xp_history(xp_history_path(), curve_map)
 groups = parse_groups(player_groups_path())
 medal_df = load_medal_snapshots(medal_snapshots_path())
 goals_df = load_medal_goals(medals_config_path())
+ensure_medal_explanations_file(medal_explanations_path(), goals_df)
+medal_explanations_map = load_medal_explanations(medal_explanations_path())
 display_medal_df = with_derived_platinum_rows(medal_df, goals_df)
 all_accounts = account_options_from_data(xp_df, medal_df)
 latest_xp_df = latest_xp_snapshot(xp_df)
@@ -3886,7 +4430,12 @@ if page == "Dashboard Global":
             show_30d_limited_hint=show_30d_limited_hint,
         )
         st.divider()
-        render_xp_explorer_section(dash_xp_df, key_prefix="dashboard_global_xp_explorer")
+        render_xp_explorer_section(
+            dash_xp_df,
+            key_prefix="dashboard_global_xp_explorer",
+            medal_subset_df=dash_medal_df,
+            show_personal_activity=False,
+        )
 
 if page == "Dashboard Personal":
     st.subheader("Dashboard Personal")
@@ -3951,7 +4500,12 @@ if page == "Dashboard Personal":
             show_30d_limited_hint=show_30d_limited_hint,
         )
         st.divider()
-        render_xp_explorer_section(dash_xp_df, key_prefix="dashboard_personal_xp_explorer")
+        render_xp_explorer_section(
+            dash_xp_df,
+            key_prefix="dashboard_personal_xp_explorer",
+            medal_subset_df=dash_medal_df,
+            show_personal_activity=True,
+        )
 
 if page == "Medal Explorer":
     header_left, header_right = st.columns([3.6, 1.4])
@@ -4017,14 +4571,53 @@ if page == "Medal Explorer":
                     )
                 )
 
-            show_goal_trends = st.checkbox(
-                (
-                    "Show trend-to-goal lines (legend selectable; platinum uses medal-completion trends; "
-                    f"trends use data since {TREND_MIN_DATE_LABEL})"
-                ),
-                value=False,
-                key="show_medal_goal_trends",
-            )
+            filter_mode_options = [MEDAL_FILTER_SHOW_ALL, MEDAL_FILTER_NOT_COMPLETED, MEDAL_FILTER_COMPLETED]
+            sort_metric_options = [MEDAL_SORT_COMPLETION, MEDAL_SORT_TIME, MEDAL_SORT_INPUT]
+            sort_direction_options = [MEDAL_SORT_ASC, MEDAL_SORT_DESC]
+            sort_account_options = [a for a in MEDAL_EXPLORER_CORE_ACCOUNTS if a in set(selected_accounts)]
+            if not sort_account_options:
+                sort_account_options = [str(a).strip() for a in selected_accounts if str(a).strip()]
+
+            if "show_medal_goal_trends" not in st.session_state:
+                st.session_state["show_medal_goal_trends"] = True
+            if "medal_filter_mode" not in st.session_state:
+                st.session_state["medal_filter_mode"] = MEDAL_FILTER_SHOW_ALL
+            if "medal_sort_metric" not in st.session_state:
+                st.session_state["medal_sort_metric"] = MEDAL_SORT_INPUT
+            if "medal_sort_direction" not in st.session_state:
+                st.session_state["medal_sort_direction"] = MEDAL_SORT_DEFAULT_DIRECTION_BY_METRIC.get(
+                    str(st.session_state.get("medal_sort_metric", MEDAL_SORT_INPUT)),
+                    MEDAL_SORT_ASC,
+                )
+            if "medal_sort_account" not in st.session_state:
+                st.session_state["medal_sort_account"] = sort_account_options[0] if sort_account_options else ""
+
+            if str(st.session_state.get("medal_filter_mode")) not in filter_mode_options:
+                st.session_state["medal_filter_mode"] = MEDAL_FILTER_SHOW_ALL
+            if str(st.session_state.get("medal_sort_metric")) not in sort_metric_options:
+                st.session_state["medal_sort_metric"] = MEDAL_SORT_INPUT
+            if str(st.session_state.get("medal_sort_direction")) not in sort_direction_options:
+                st.session_state["medal_sort_direction"] = MEDAL_SORT_ASC
+
+            current_sort_metric = str(st.session_state.get("medal_sort_metric", MEDAL_SORT_INPUT))
+            previous_sort_metric = str(st.session_state.get("medal_sort_metric_prev", current_sort_metric))
+            if current_sort_metric != previous_sort_metric:
+                st.session_state["medal_sort_direction"] = MEDAL_SORT_DEFAULT_DIRECTION_BY_METRIC.get(
+                    current_sort_metric,
+                    MEDAL_SORT_ASC,
+                )
+            st.session_state["medal_sort_metric_prev"] = current_sort_metric
+
+            saved_sort_account = str(st.session_state.get("medal_sort_account", "")).strip()
+            if saved_sort_account not in set(sort_account_options):
+                saved_sort_account = sort_account_options[0] if sort_account_options else ""
+            st.session_state["medal_sort_account"] = saved_sort_account
+
+            show_goal_trends = bool(st.session_state.get("show_medal_goal_trends", False))
+            medal_filter_mode = str(st.session_state.get("medal_filter_mode", MEDAL_FILTER_SHOW_ALL))
+            medal_sort_metric = str(st.session_state.get("medal_sort_metric", MEDAL_SORT_INPUT))
+            medal_sort_direction = str(st.session_state.get("medal_sort_direction", MEDAL_SORT_ASC))
+            medal_sort_account = str(st.session_state.get("medal_sort_account", "")).strip()
 
             def add_goal_and_trends(
                 fig_medal: go.Figure,
@@ -4198,8 +4791,19 @@ if page == "Medal Explorer":
                 m for m in medal_ids_available if m not in EXCLUDED_MEDAL_GRAPH_IDS and m != DERIVED_MEDAL_ID
             }
             thombay_order = load_medal_input_order(goals_df, account="Thombay")
-            medal_ids = [m for m in thombay_order if m in medals_for_grid]
-            medal_ids += sorted([m for m in medals_for_grid if m not in medal_ids])
+            medal_ids_base = [m for m in thombay_order if m in medals_for_grid]
+            medal_ids_base += sorted([m for m in medals_for_grid if m not in medal_ids_base])
+            medal_ids = get_medal_ids_for_view_mode(
+                medal_ids=medal_ids_base,
+                source_df=medal_status_medal_df,
+                goals_map=goals_map,
+                selected_accounts=selected_accounts,
+                filter_mode=medal_filter_mode,
+                sort_metric=medal_sort_metric,
+                sort_direction=medal_sort_direction,
+                sort_account=medal_sort_account,
+                input_order=thombay_order,
+            )
 
             selected_medals = st.multiselect(
                 "Medals",
@@ -4208,6 +4812,42 @@ if page == "Medal Explorer":
                 help="All medals are selected by default. Click legend items in each chart to show/hide accounts.",
             )
             selected_medals = [m for m in medal_ids if m in set(selected_medals)]
+            show_goal_trends = st.checkbox(
+                (
+                    "Show trend-to-goal lines (legend selectable; platinum uses medal-completion trends; "
+                    f"trends use data since {TREND_MIN_DATE_LABEL})"
+                ),
+                key="show_medal_goal_trends",
+            )
+            f_col, d_col = st.columns([1.55, 1.0])
+            with f_col:
+                medal_filter_mode = st.radio(
+                    "Filter",
+                    options=filter_mode_options,
+                    horizontal=True,
+                    key="medal_filter_mode",
+                )
+            with d_col:
+                medal_sort_direction = st.radio(
+                    "Sort direction",
+                    options=sort_direction_options,
+                    horizontal=True,
+                    key="medal_sort_direction",
+                )
+            s_col, a_col = st.columns([1.0, 1.55])
+            with s_col:
+                medal_sort_metric = st.selectbox(
+                    "Sort metric",
+                    options=sort_metric_options,
+                    key="medal_sort_metric",
+                )
+            with a_col:
+                medal_sort_account = st.selectbox(
+                    "Sort by account",
+                    options=sort_account_options,
+                    key="medal_sort_account",
+                    help="Sorting/filtering uses this selected account.",
+                )
 
             if not selected_medals:
                 st.info("Select at least one medal.")
@@ -4226,11 +4866,43 @@ if page == "Medal Explorer":
                             y="value",
                             color="account",
                             markers=True,
-                            title=f"Progress: {title_label}",
+                            title=None,
                         )
+                        medal_info = medal_explanations_map.get(goal_medal_id_for(medal_id), "")
+                        if medal_info:
+                            info_txt = str(medal_info).strip()
+                            if info_txt:
+                                for tr in fig_medal.data:
+                                    x_raw = getattr(tr, "x", None)
+                                    x_vals = list(x_raw) if x_raw is not None else []
+                                    tr.update(
+                                        customdata=[[info_txt] for _ in x_vals],
+                                        hovertemplate=(
+                                            "Date: %{x|%Y-%m-%d}<br>"
+                                            "Account: %{fullData.name}<br>"
+                                            "Value: %{y:,}<br>"
+                                            "Info: %{customdata[0]}<extra></extra>"
+                                        ),
+                                    )
                         status_html = add_goal_and_trends(fig_medal, line_df, medal_id, status_mode="below_chart")
-                        fig_medal.update_layout(height=320)
+                        fig_medal.update_layout(height=320, margin=dict(t=20))
                         with row_cols[col_idx]:
+                            title_text = f"Progress: {title_label}"
+                            if medal_info and str(medal_info).strip():
+                                title_attr = escape(str(medal_info).strip(), quote=True)
+                                st.markdown(
+                                    (
+                                        "<div style='font-weight:600;margin-bottom:0.2rem;'>"
+                                        f"<span title=\"{title_attr}\" "
+                                        "style='border-bottom:1px dotted #94a3b8; cursor:help;'>"
+                                        f"{escape(title_text)}"
+                                        "</span>"
+                                        "</div>"
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                st.markdown(f"**{escape(title_text)}**", unsafe_allow_html=True)
                             render_plotly_chart(fig_medal, use_container_width=True)
                             if status_html:
                                 st.markdown(
@@ -4354,9 +5026,36 @@ if page == "Data Input":
                 for _, r in latest_xp.iterrows():
                     latest_map[str(r["Spieler"])] = (int(r["Lvl"]), int(r["XP Bar"]))
 
+            latest_activity_map: dict[tuple[str, str], float] = {}
+            if not medal_df.empty:
+                medal_latest = medal_df.copy()
+                medal_latest["date"] = pd.to_datetime(medal_latest["date"], errors="coerce")
+                medal_latest["account"] = medal_latest["account"].astype(str).str.strip()
+                medal_latest["medal_id"] = medal_latest["medal_id"].astype(str).str.strip().str.lower().map(goal_medal_id_for)
+                medal_latest["value"] = pd.to_numeric(medal_latest["value"], errors="coerce")
+                medal_latest = medal_latest.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+                medal_latest = medal_latest[medal_latest["medal_id"].isin(set(XP_TAB_ACTIVITY_MEDAL_IDS.values()))].copy()
+                if not medal_latest.empty:
+                    medal_latest = (
+                        medal_latest.sort_values("date")
+                        .groupby(["account", "medal_id"], as_index=False)
+                        .tail(1)
+                    )
+                    for _, r in medal_latest.iterrows():
+                        latest_activity_map[(str(r["account"]), str(r["medal_id"]))] = float(r["value"])
+
+            medal_existing_for_validation = (
+                medal_df[["date", "account", "medal_id", "value"]].copy()
+                if not medal_df.empty
+                else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
+            )
+
             xp_editor_rows = []
             for acc in selected_xp_accounts:
                 lvl_default, xp_default = latest_map.get(acc, (1, 0))
+                battles_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"]), 0.0)
+                distance_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"]), 0.0)
+                caught_default = latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"]), 0.0)
                 xp_editor_rows.append(
                     {
                         "account": acc,
@@ -4364,12 +5063,15 @@ if page == "Data Input":
                         "xp_bar_last": int(xp_default),
                         "lvl": lvl_default,
                         "xp_bar": xp_default,
+                        "battles_last": battles_default,
+                        "distance_last": distance_default,
+                        "caught_last": caught_default,
                     }
                 )
 
             _, xp_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
-            col_widths = [1.45, 0.7, 1.0, 0.24, 0.62, 0.24, 1.15, 2.1]
-            h1, h2, h3, h4, h5, h6, h7, h8 = xp_input_col.columns(col_widths, gap="small")
+            col_widths = [1.35, 0.65, 0.95, 0.2, 0.55, 0.2, 0.95, 0.95, 0.95, 0.95, 1.9]
+            h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11 = xp_input_col.columns(col_widths, gap="small")
             h1.markdown("**Account**")
             h2.markdown("**Level (last Data)**")
             h3.markdown("**XPBar (last Data)**")
@@ -4377,7 +5079,10 @@ if page == "Data Input":
             h5.markdown("**Level**")
             h6.markdown("**+**")
             h7.markdown("**XP Bar**")
-            h8.markdown("**Status**")
+            h8.markdown("**Battles Won**")
+            h9.markdown("**Distance Walked**")
+            h10.markdown("**Pokemon Caught**")
+            h11.markdown("**Status**")
 
             xp_inputs: list[dict[str, object]] = []
             inline_xp_errors: list[str] = []
@@ -4386,7 +5091,7 @@ if page == "Data Input":
             )
             for row in xp_editor_rows:
                 acc = str(row["account"])
-                c1, c2, c3, c4, c5, c6, c7, c8 = xp_input_col.columns(col_widths, gap="small")
+                c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = xp_input_col.columns(col_widths, gap="small")
                 account_slot = c1.empty()
                 c2.markdown(f"`{int(row['lvl_last'])}`")
                 c3.markdown(f"`{int(row['xp_bar_last']):,}`")
@@ -4432,13 +5137,40 @@ if page == "Data Input":
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
                 )
+                battles_value = c8.text_input(
+                    "Battles Won",
+                    value=str(int(float(row.get("battles_last", 0.0)))),
+                    key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
+                    label_visibility="collapsed",
+                )
+                distance_value = c9.text_input(
+                    "Distance Walked",
+                    value=str(int(float(row.get("distance_last", 0.0)))),
+                    key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
+                    label_visibility="collapsed",
+                )
+                caught_value = c10.text_input(
+                    "Pokemon Caught",
+                    value=str(int(float(row.get("caught_last", 0.0)))),
+                    key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
+                    label_visibility="collapsed",
+                )
                 row_errors: list[str] = []
                 xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
+                battles_num = pd.to_numeric(battles_value, errors="coerce")
+                distance_num = pd.to_numeric(distance_value, errors="coerce")
+                caught_num = pd.to_numeric(caught_value, errors="coerce")
                 row_changed = int(lvl_value) != int(row["lvl_last"])
                 if pd.isna(xp_bar_num):
                     row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
                 else:
                     row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
+                if not pd.isna(battles_num):
+                    row_changed = row_changed or (float(battles_num) != float(row.get("battles_last", 0.0)))
+                if not pd.isna(distance_num):
+                    row_changed = row_changed or (float(distance_num) != float(row.get("distance_last", 0.0)))
+                if not pd.isna(caught_num):
+                    row_changed = row_changed or (float(caught_num) != float(row.get("caught_last", 0.0)))
 
                 account_color = "#9ca3af" if row_changed else "inherit"
                 account_slot.markdown(
@@ -4460,26 +5192,70 @@ if page == "Data Input":
                     )
                     monotonic_errors = _validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map)
                     row_errors.extend(monotonic_errors)
+                if pd.isna(battles_num) or float(battles_num) < 0:
+                    row_errors.append("Battles Won must be a number >= 0.")
+                if pd.isna(distance_num) or float(distance_num) < 0:
+                    row_errors.append("Distance Walked must be a number >= 0.")
+                if pd.isna(caught_num) or float(caught_num) < 0:
+                    row_errors.append("Pokemon Caught must be a number >= 0.")
+                if not row_errors:
+                    medal_row_df = pd.DataFrame(
+                        [
+                            {
+                                "date": pd.Timestamp(xp_date),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"],
+                                "value": float(battles_num),
+                            },
+                            {
+                                "date": pd.Timestamp(xp_date),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+                                "value": float(distance_num),
+                            },
+                            {
+                                "date": pd.Timestamp(xp_date),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+                                "value": float(caught_num),
+                            },
+                        ]
+                    )
+                    medal_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, medal_row_df)
+                    row_errors.extend(medal_mono_errors)
 
                 if row_errors:
                     inline_xp_errors.extend(row_errors)
-                    c8.markdown(
+                    c11.markdown(
                         f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
                         unsafe_allow_html=True,
                     )
                 else:
-                    c8.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
-                xp_inputs.append({"account": acc, "lvl": int(lvl_value), "xp_bar": xp_bar_value})
+                    c11.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
+                xp_inputs.append(
+                    {
+                        "account": acc,
+                        "lvl": int(lvl_value),
+                        "xp_bar": xp_bar_value,
+                        "battles_won": battles_value,
+                        "distance_walked": distance_value,
+                        "pokemon_caught": caught_value,
+                    }
+                )
 
             if inline_xp_errors:
                 st.caption("Fix row errors to enable saving.")
             if st.button("Save XP snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
                 rows_to_write: list[dict[str, object]] = []
+                medal_rows_to_write: list[dict[str, object]] = []
                 errors: list[str] = []
                 for r in xp_inputs:
                     acc = str(r.get("account", "")).strip()
                     lvl = pd.to_numeric(r.get("lvl"), errors="coerce")
                     xp_bar = pd.to_numeric(r.get("xp_bar"), errors="coerce")
+                    battles_won = pd.to_numeric(r.get("battles_won"), errors="coerce")
+                    distance_walked = pd.to_numeric(r.get("distance_walked"), errors="coerce")
+                    pokemon_caught = pd.to_numeric(r.get("pokemon_caught"), errors="coerce")
                     if not acc:
                         errors.append("Missing account value.")
                         continue
@@ -4489,6 +5265,15 @@ if page == "Data Input":
                     if pd.isna(xp_bar) or int(xp_bar) < 0:
                         errors.append(f"{acc}: invalid XP Bar.")
                         continue
+                    if pd.isna(battles_won) or float(battles_won) < 0:
+                        errors.append(f"{acc}: invalid Battles Won.")
+                        continue
+                    if pd.isna(distance_walked) or float(distance_walked) < 0:
+                        errors.append(f"{acc}: invalid Distance Walked.")
+                        continue
+                    if pd.isna(pokemon_caught) or float(pokemon_caught) < 0:
+                        errors.append(f"{acc}: invalid Pokemon Caught.")
+                        continue
                     rows_to_write.append(
                         {
                             "Date": xp_date.isoformat(),
@@ -4497,57 +5282,84 @@ if page == "Data Input":
                             "XP Bar": int(xp_bar),
                         }
                     )
+                    medal_rows_to_write.extend(
+                        [
+                            {
+                                "date": xp_date.isoformat(),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["battles_won"],
+                                "value": float(battles_won),
+                            },
+                            {
+                                "date": xp_date.isoformat(),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+                                "value": float(distance_walked),
+                            },
+                            {
+                                "date": xp_date.isoformat(),
+                                "account": acc,
+                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+                                "value": float(pokemon_caught),
+                            },
+                        ]
+                    )
                 if errors:
                     st.error("\n".join(errors))
                 else:
                     try:
                         written = upsert_xp_rows(xp_history_path(), rows_to_write)
+                        written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
                     except ValueError as e:
                         st.error(str(e))
                     else:
-                        st.success(f"Saved XP snapshot rows: {written}")
+                        st.success(
+                            f"Saved XP snapshot rows: {written}. "
+                            f"Saved activity medal rows: {written_medals} "
+                            "(Battles Won, Distance Walked, Pokemon Caught)."
+                        )
 
         if all_players:
             st.markdown("Input order for XP accounts")
-            st.caption("Move one account to a target position; all others are shifted automatically.")
+            st.caption("Use up/down for one-step moves, or enter an exact target position and press Go.")
             xp_order = load_xp_input_order(all_players)
-
-            xp_order_labels: list[str] = []
-            xp_label_to_account: dict[str, str] = {}
-            for i, account_name in enumerate(xp_order, start=1):
-                label = f"{i}. {account_name}"
-                xp_order_labels.append(label)
-                xp_label_to_account[label] = account_name
-
-            c_xp_move_1, c_xp_move_2, c_xp_move_3 = st.columns([2, 1, 1])
-            with c_xp_move_1:
-                xp_move_label = st.selectbox("Account to move", options=xp_order_labels, key="xp_move_label")
-            with c_xp_move_2:
-                xp_move_to = st.number_input(
-                    "Move to position",
-                    min_value=1,
-                    max_value=max(1, len(xp_order)),
-                    value=1,
-                    step=1,
-                    key="xp_move_to",
+            for idx, account_name in enumerate(xp_order):
+                pos_col, name_col, target_col, go_col, up_col, down_col = st.columns([0.45, 2.0, 0.9, 0.65, 0.65, 0.65])
+                pos_col.markdown(f"`{idx + 1}`")
+                name_col.markdown(f"**{escape(str(account_name))}**", unsafe_allow_html=True)
+                target_pos = int(
+                    target_col.number_input(
+                        "Target Pos",
+                        min_value=1,
+                        max_value=max(1, len(xp_order)),
+                        value=int(idx + 1),
+                        step=1,
+                        key=f"xp_order_target_{account_name}",
+                        label_visibility="collapsed",
+                    )
                 )
-            with c_xp_move_3:
-                st.write("")
-                st.write("")
-                xp_apply_move = st.button("Apply Move", key="xp_apply_move")
-
-            if xp_apply_move and xp_order:
-                moving_account = xp_label_to_account.get(xp_move_label, "")
-                if moving_account in xp_order:
-                    new_order = [a for a in xp_order if a != moving_account]
-                    insert_idx = int(xp_move_to) - 1
-                    new_order.insert(insert_idx, moving_account)
+                if go_col.button("Go", key=f"xp_order_go_{idx}_{account_name}", use_container_width=True):
+                    if 1 <= int(target_pos) <= len(xp_order):
+                        new_order = [a for a in xp_order if a != account_name]
+                        insert_idx = int(target_pos) - 1
+                        new_order.insert(insert_idx, account_name)
+                        save_xp_input_order(new_order)
+                        st.rerun()
+                if up_col.button("Up", key=f"xp_order_up_{idx}_{account_name}", disabled=idx == 0, use_container_width=True):
+                    new_order = xp_order.copy()
+                    new_order[idx - 1], new_order[idx] = new_order[idx], new_order[idx - 1]
                     save_xp_input_order(new_order)
-                    st.success("Updated XP input order.")
                     st.rerun()
-
-            xp_order_preview = [{"position": i, "account": acc} for i, acc in enumerate(xp_order, start=1)]
-            st.dataframe(pd.DataFrame(xp_order_preview), use_container_width=True, hide_index=True)
+                if down_col.button(
+                    "Down",
+                    key=f"xp_order_down_{idx}_{account_name}",
+                    disabled=idx >= (len(xp_order) - 1),
+                    use_container_width=True,
+                ):
+                    new_order = xp_order.copy()
+                    new_order[idx], new_order[idx + 1] = new_order[idx + 1], new_order[idx]
+                    save_xp_input_order(new_order)
+                    st.rerun()
 
     with tab_medal:
         st.caption("Enter one full medal snapshot per account.")
@@ -4760,48 +5572,54 @@ if page == "Data Input":
 
             medal_order = load_medal_input_order(goals_df, account=medal_account)
             st.markdown(f"Input order for `{medal_account}`")
-            st.caption("Move one medal to a target position; all others are shifted automatically.")
-
-            order_labels: list[str] = []
-            label_to_medal: dict[str, str] = {}
-            for i, medal_id in enumerate(medal_order, start=1):
+            st.caption("Use up/down for one-step moves, or enter an exact target position and press Go.")
+            for idx, medal_id in enumerate(medal_order):
                 display_name = goals_map.get(medal_id, {}).get("display_name", medal_id)
-                label = f"{i}. {display_name}"
-                order_labels.append(label)
-                label_to_medal[label] = medal_id
-
-            c_move_1, c_move_2, c_move_3 = st.columns([2, 1, 1])
-            with c_move_1:
-                move_label = st.selectbox("Medal to move", options=order_labels, key=f"move_label_{medal_account}")
-            with c_move_2:
-                move_to = st.number_input(
-                    "Move to position",
-                    min_value=1,
-                    max_value=max(1, len(medal_order)),
-                    value=1,
-                    step=1,
-                    key=f"move_to_{medal_account}",
+                pos_col, name_col, target_col, go_col, up_col, down_col = st.columns([0.45, 2.0, 0.9, 0.65, 0.65, 0.65])
+                pos_col.markdown(f"`{idx + 1}`")
+                name_col.markdown(f"**{escape(str(display_name))}**", unsafe_allow_html=True)
+                target_pos = int(
+                    target_col.number_input(
+                        "Target Pos",
+                        min_value=1,
+                        max_value=max(1, len(medal_order)),
+                        value=int(idx + 1),
+                        step=1,
+                        key=f"medal_order_target_{medal_account}_{medal_id}",
+                        label_visibility="collapsed",
+                    )
                 )
-            with c_move_3:
-                st.write("")
-                st.write("")
-                apply_move = st.button("Apply Move", key=f"apply_move_{medal_account}")
-
-            if apply_move and medal_order:
-                moving_medal_id = label_to_medal.get(move_label, "")
-                if moving_medal_id in medal_order:
-                    new_order = [m for m in medal_order if m != moving_medal_id]
-                    insert_idx = int(move_to) - 1
-                    new_order.insert(insert_idx, moving_medal_id)
+                if go_col.button(
+                    "Go",
+                    key=f"medal_order_go_{medal_account}_{idx}_{medal_id}",
+                    use_container_width=True,
+                ):
+                    if 1 <= int(target_pos) <= len(medal_order):
+                        new_order = [m for m in medal_order if m != medal_id]
+                        insert_idx = int(target_pos) - 1
+                        new_order.insert(insert_idx, medal_id)
+                        save_medal_input_order(medal_account, new_order)
+                        st.rerun()
+                if up_col.button(
+                    "Up",
+                    key=f"medal_order_up_{medal_account}_{idx}_{medal_id}",
+                    disabled=idx == 0,
+                    use_container_width=True,
+                ):
+                    new_order = medal_order.copy()
+                    new_order[idx - 1], new_order[idx] = new_order[idx], new_order[idx - 1]
                     save_medal_input_order(medal_account, new_order)
-                    st.success(f"Updated order for {medal_account}.")
                     st.rerun()
-
-            order_preview_rows = []
-            for i, medal_id in enumerate(medal_order, start=1):
-                display_name = goals_map.get(medal_id, {}).get("display_name", medal_id)
-                order_preview_rows.append({"position": i, "display_name": display_name})
-            st.dataframe(pd.DataFrame(order_preview_rows), use_container_width=True, hide_index=True)
+                if down_col.button(
+                    "Down",
+                    key=f"medal_order_down_{medal_account}_{idx}_{medal_id}",
+                    disabled=idx >= (len(medal_order) - 1),
+                    use_container_width=True,
+                ):
+                    new_order = medal_order.copy()
+                    new_order[idx], new_order[idx + 1] = new_order[idx + 1], new_order[idx]
+                    save_medal_input_order(medal_account, new_order)
+                    st.rerun()
 
 if page == "Pipelines":
     st.subheader("Pipelines")
