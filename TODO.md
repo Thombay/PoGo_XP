@@ -128,3 +128,6 @@ Notes:
 - [x] Global activity KPI rates decoupled from XP date-range/common-interval clipping (per-account values now stable across groups)
 - [x] Activity Performance layout switched to KPI-type columns (Leader/Best/Worst/Improved/Declined), each listing all metrics
 - [x] Activity Performance redesigned to card-style KPI rows per activity (matches Global KPI card style)
+
+
+show catch up trendlines deselect reset graph to full scaling

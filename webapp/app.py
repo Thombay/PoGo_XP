@@ -13,6 +13,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -1566,7 +1567,73 @@ def inject_responsive_styles() -> None:
         """
         <style>
         :root { font-size: clamp(13px, 0.55vw + 10px, 18px); }
-        .block-container { padding-top: 1rem; padding-bottom: 1.25rem; }
+        .block-container { padding-top: 0.65rem; padding-bottom: 1.1rem; }
+        h1 { margin-top: 0.05rem !important; margin-bottom: 0.3rem !important; line-height: 1.08 !important; }
+        div[class*="st-key-pogo_controls_bar"],
+        .pogo-controls-bar-target {
+          position: sticky !important;
+          top: 2.8rem;
+          z-index: 1150;
+          padding: 0.36rem 0.48rem 0.54rem 0.48rem;
+          border-radius: 0.7rem;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(15, 23, 42, 0.9);
+          backdrop-filter: blur(8px);
+          box-shadow: 0 10px 22px rgba(2, 8, 23, 0.32);
+          transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.32s ease, opacity 0.32s ease, top 0.32s ease;
+          opacity: 0.96;
+        }
+        div[class*="st-key-pogo_export_header_"] {
+          max-width: 24rem;
+          margin-left: auto;
+          margin-right: auto;
+        }
+        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"],
+        body.pogo-controls-compact .pogo-controls-bar-target {
+          position: fixed !important;
+          top: 2.1rem;
+          left: 50%;
+          width: min(76rem, calc(100vw - 1rem));
+          padding-left: 0.78rem;
+          padding-right: 0.78rem;
+          transform: translateX(-50%) scale(0.965);
+          transform-origin: top center;
+          box-shadow: 0 8px 16px rgba(2, 8, 23, 0.28);
+          z-index: 1300;
+          pointer-events: auto;
+        }
+        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"] p,
+        body.pogo-controls-compact .pogo-controls-bar-target p {
+          font-size: 0.72rem !important;
+          margin-bottom: 0.16rem;
+        }
+        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"] button,
+        body.pogo-controls-compact .pogo-controls-bar-target button {
+          min-height: 1.8rem !important;
+          font-size: 0.8rem !important;
+          padding-top: 0.1rem !important;
+          padding-bottom: 0.1rem !important;
+        }
+        div[class*="st-key-pogo_ranking_table"] [data-testid="stDataFrame"] [role="columnheader"] {
+          font-size: 0.78rem !important;
+          white-space: nowrap !important;
+        }
+        div[class*="st-key-pogo_ranking_table"] [data-testid="stDataFrame"] [role="gridcell"] {
+          font-size: 0.88rem !important;
+        }
+        div[data-testid="stMetricLabel"] p,
+        div[data-testid="stMetricDelta"] > div {
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+        }
+        div[data-testid="stMetricValue"] > div {
+          white-space: normal !important;
+          overflow: visible !important;
+          text-overflow: clip !important;
+          overflow-wrap: anywhere;
+          line-height: 1.02 !important;
+          font-size: clamp(1.55rem, 1.9vw, 2.1rem) !important;
+        }
         @media (max-width: 1200px) {
           .block-container { padding-left: 1rem; padding-right: 1rem; }
         }
@@ -1574,10 +1641,131 @@ def inject_responsive_styles() -> None:
           .block-container { padding-left: 0.65rem; padding-right: 0.65rem; }
           h1 { font-size: 1.45rem !important; }
           h2, h3 { font-size: 1.2rem !important; }
+          div[class*="st-key-pogo_controls_bar"],
+          .pogo-controls-bar-target { top: 2.2rem; }
+          body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"],
+          body.pogo-controls-compact .pogo-controls-bar-target {
+            top: 1.45rem;
+            width: calc(100vw - 0.45rem);
+            padding-left: 0.62rem;
+            padding-right: 0.62rem;
+            transform: translateX(-50%) scale(0.985);
+          }
+          div[class*="st-key-pogo_export_header_"] {
+            max-width: none;
+          }
+          div[data-testid="stMetricValue"] > div {
+            font-size: clamp(1.35rem, 6vw, 1.9rem) !important;
+          }
         }
         </style>
         """,
         unsafe_allow_html=True,
+    )
+    components.html(
+        """
+        <script>
+        (() => {
+          const parentWindow = window.parent;
+          const parentDoc = parentWindow?.document;
+          if (!parentWindow || !parentDoc) return;
+          const className = "pogo-controls-compact";
+          const barClass = "pogo-controls-bar-target";
+          const threshold = 26;
+          const normalize = (s) => String(s || "").replace(/\\s+/g, " ").trim().toLowerCase();
+          const findRadioByLabel = (root, labels) => {
+            const labelSet = new Set(labels.map((x) => normalize(x)));
+            const radios = Array.from(root.querySelectorAll('div[data-testid="stRadio"]'));
+            return radios.find((radio) => labelSet.has(normalize(radio.querySelector("label p")?.textContent))) || null;
+          };
+          const hasWindowControl = (root) => {
+            const groups = Array.from(
+              root.querySelectorAll('div[data-testid="stSegmentedControl"], div[data-baseweb="button-group"], div[role="radiogroup"]')
+            );
+            return groups.some((g) => {
+              const labels = Array.from(g.querySelectorAll("button, label, p")).map((x) => normalize(x.textContent));
+              return labels.includes("7d") && labels.includes("30d");
+            });
+          };
+          const findControlsBarNode = () => {
+            const keyed = parentDoc.querySelector('div[class*="st-key-pogo_controls_bar"]');
+            if (keyed) return keyed;
+            const pageRadio = findRadioByLabel(parentDoc, ["Page"]);
+            if (!pageRadio) return null;
+            const candidates = [];
+            let node = pageRadio;
+            while (node) {
+              if (node.matches('div[data-testid="stVerticalBlock"], div[data-testid="stElementContainer"]')) {
+                candidates.push(node);
+              }
+              node = node.parentElement;
+            }
+            for (const candidate of candidates) {
+              if (findRadioByLabel(candidate, ["Global Group", "Personal Group", "Group"]) || hasWindowControl(candidate)) {
+                return candidate;
+              }
+            }
+            return pageRadio.closest('div[data-testid="stElementContainer"]') || candidates[0] || null;
+          };
+          const bindControlsBarClass = () => {
+            parentDoc.querySelectorAll(`.${barClass}`).forEach((el) => el.classList.remove(barClass));
+            const target = findControlsBarNode();
+            if (target) target.classList.add(barClass);
+          };
+          const scrollHostCandidates = () => {
+            const nodes = [
+              parentDoc.querySelector('section.main'),
+              parentDoc.querySelector('[data-testid="stAppViewContainer"]'),
+              parentDoc.querySelector('[data-testid="stMain"]'),
+              parentDoc.scrollingElement,
+              parentDoc.documentElement,
+              parentDoc.body,
+            ];
+            return nodes.filter(Boolean);
+          };
+          const getScrollY = () => {
+            const tops = scrollHostCandidates().map((n) => Number(n?.scrollTop || 0));
+            tops.push(Number(parentWindow.scrollY || 0));
+            tops.push(Number(parentWindow.pageYOffset || 0));
+            return Math.max(0, ...tops);
+          };
+          const applyCompactClass = () => {
+            bindControlsBarClass();
+            const compact = getScrollY() > threshold;
+            parentDoc.body.classList.toggle(className, compact);
+          };
+          let scrollRaf = 0;
+          const onScroll = () => {
+            if (scrollRaf) return;
+            scrollRaf = parentWindow.requestAnimationFrame(() => {
+              scrollRaf = 0;
+              applyCompactClass();
+            });
+          };
+          const onResize = () => applyCompactClass();
+          if (!parentWindow.__pogoCompactWindowListenerInstalled) {
+            scrollHostCandidates().forEach((host) => {
+              if (host && host.addEventListener) {
+                host.addEventListener("scroll", onScroll, { passive: true });
+              }
+            });
+            parentWindow.addEventListener("scroll", onScroll, { passive: true });
+            parentDoc.addEventListener("scroll", onScroll, { passive: true, capture: true });
+            parentWindow.addEventListener("resize", onResize, { passive: true });
+            parentWindow.__pogoCompactWindowListenerInstalled = true;
+          }
+          if (!parentWindow.__pogoCompactWindowObserverInstalled) {
+            const observer = new MutationObserver(() => applyCompactClass());
+            observer.observe(parentDoc.body, { childList: true, subtree: true });
+            parentWindow.__pogoCompactWindowObserverInstalled = true;
+          }
+          parentWindow.setTimeout(applyCompactClass, 120);
+          applyCompactClass();
+        })();
+        </script>
+        """,
+        height=1,
+        width=1,
     )
 
 
@@ -1699,7 +1887,6 @@ def render_xp_explorer_section(
     if catchup_key not in st.session_state:
         st.session_state[catchup_key] = True
     selected_leader = str(st.session_state.get(leader_key, leader_options[default_idx]))
-    show_catchup_trends = bool(st.session_state.get(catchup_key, True))
 
     gap_df = build_gap_change_df(df, leader=selected_leader)
 
@@ -1761,7 +1948,6 @@ def render_xp_explorer_section(
     with controls_right:
         show_catchup_trends = st.checkbox(
             "Show catch-up trendlines",
-            value=show_catchup_trends,
             key=catchup_key,
         )
 
@@ -1858,34 +2044,38 @@ def render_xp_explorer_section(
         elif leader_trend_reason:
             trend_failures.append(f"{selected_leader}: {leader_trend_reason}")
 
-    max_visibility_years = 15
-    default_years, default_months = split_visibility_offset_years_months(pd.Timestamp(latest_total_date), auto_trend_end)
-    if default_years > max_visibility_years:
-        default_years = max_visibility_years
-        default_months = 11
-    vis_col_year, vis_col_month = st.columns(2)
-    with vis_col_year:
-        visibility_years = st.slider(
-            "Total XP visibility (years)",
-            min_value=0,
-            max_value=max_visibility_years,
-            value=int(default_years),
-            key=f"{key_prefix}_total_xp_visibility_years",
+    if show_catchup_trends:
+        max_visibility_years = 15
+        default_years, default_months = split_visibility_offset_years_months(pd.Timestamp(latest_total_date), auto_trend_end)
+        if default_years > max_visibility_years:
+            default_years = max_visibility_years
+            default_months = 11
+        vis_col_year, vis_col_month = st.columns(2)
+        with vis_col_year:
+            visibility_years = st.slider(
+                "Total XP visibility (years)",
+                min_value=0,
+                max_value=max_visibility_years,
+                value=int(default_years),
+                key=f"{key_prefix}_total_xp_visibility_years",
+            )
+        with vis_col_month:
+            visibility_months = st.slider(
+                "Total XP visibility (months)",
+                min_value=0,
+                max_value=11,
+                value=int(default_months),
+                key=f"{key_prefix}_total_xp_visibility_months",
+            )
+        visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(
+            years=int(visibility_years),
+            months=int(visibility_months),
         )
-    with vis_col_month:
-        visibility_months = st.slider(
-            "Total XP visibility (months)",
-            min_value=0,
-            max_value=11,
-            value=int(default_months),
-            key=f"{key_prefix}_total_xp_visibility_months",
-        )
-    visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(
-        years=int(visibility_years),
-        months=int(visibility_months),
-    )
-    if visibility_end <= pd.Timestamp(latest_total_date):
-        visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(months=1)
+        if visibility_end <= pd.Timestamp(latest_total_date):
+            visibility_end = pd.Timestamp(latest_total_date) + pd.DateOffset(months=1)
+    else:
+        visibility_end = pd.Timestamp(latest_total_date)
+
     fig_total.update_xaxes(range=[pd.Timestamp(d_start), pd.Timestamp(visibility_end)])
     y_range = autoscale_y_for_visible_x(
         fig_total,
@@ -3175,20 +3365,78 @@ def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
             dt = pd.to_datetime(out[col], errors="coerce")
             out[col] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out[col].astype(str))
             continue
-        if pd.api.types.is_numeric_dtype(out[col]):
-            vals = pd.to_numeric(out[col], errors="coerce")
-            if col_l == "pct_goal":
-                out[col] = vals.map(lambda v: "" if pd.isna(v) else f"{float(v):.1f}")
+        vals = pd.to_numeric(out[col], errors="coerce")
+        is_pct_goal = col_l == "pct_goal"
+        is_baseline_pct = "pct_vs_baseline" in col_l or col_l.startswith("% vs baseline")
+        is_baseline_delta = "delta_vs_baseline" in col_l or "delta vs baseline" in col_l
+        if is_pct_goal or is_baseline_pct or is_baseline_delta:
+            if is_pct_goal:
+                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{float(v):.1f}")
+            elif is_baseline_pct:
+                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{float(v):+,.1%}")
             else:
-                out[col] = vals.map(lambda v: "" if pd.isna(v) else f"{int(round(float(v))):,}")
+                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):+,}")
+            continue
+
+        is_numeric_col = pd.api.types.is_numeric_dtype(out[col])
+        if not is_numeric_col:
+            non_empty = int(out[col].notna().sum())
+            numeric_like = int(vals.notna().sum())
+            is_numeric_col = non_empty > 0 and (numeric_like / non_empty) >= 0.6
+        if is_numeric_col:
+            out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):,}")
     return out
+
+
+def _export_value_indicator_class(column_name: object, raw_value: object) -> str:
+    col_l = str(column_name).strip().lower()
+    num = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
+    if "delta_vs_baseline" in col_l or "delta vs baseline" in col_l or "pct_vs_baseline" in col_l or "% vs baseline" in col_l:
+        if pd.isna(num):
+            return ""
+        if float(num) > 0:
+            return "cell-pos"
+        if float(num) < 0:
+            return "cell-neg"
+        return "cell-neutral"
+    return ""
+
+
+def _export_delta_class(delta_text: object) -> str:
+    txt = str(delta_text or "").strip()
+    if not txt:
+        return "delta-neutral"
+    if "↑" in txt or re.search(r"(^|[^0-9])\+", txt):
+        return "delta-pos"
+    if "↓" in txt or re.search(r"(^|[^0-9])-", txt):
+        return "delta-neg"
+    return "delta-neutral"
 
 
 def _df_section_html(title: str, df: pd.DataFrame) -> str:
     if df.empty:
         return f"<section><h2>{escape(title)}</h2><p>No data.</p></section>"
-    out = _format_export_df(df)
-    table_html = out.to_html(index=False, border=0, classes="report-table", escape=True)
+    raw = df.reset_index(drop=True).copy()
+    out = _format_export_df(raw)
+    cols = [str(c) for c in out.columns]
+    header_html = "".join([f"<th>{escape(c)}</th>" for c in cols])
+    row_html_parts: list[str] = []
+    for i in range(len(out)):
+        cells: list[str] = []
+        for col in cols:
+            display_val = out.iloc[i][col] if col in out.columns else "--"
+            raw_val = raw.iloc[i][col] if col in raw.columns else display_val
+            cell_cls = _export_value_indicator_class(col, raw_val)
+            cls_attr = f" class='{cell_cls}'" if cell_cls else ""
+            text = "--" if pd.isna(display_val) else str(display_val)
+            cells.append(f"<td{cls_attr}>{escape(text)}</td>")
+        row_html_parts.append(f"<tr>{''.join(cells)}</tr>")
+    table_html = (
+        "<table class='report-table report-table-enhanced'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(row_html_parts)}</tbody>"
+        "</table>"
+    )
     return f"<section><h2>{escape(title)}</h2>{table_html}</section>"
 
 
@@ -3712,7 +3960,15 @@ def _build_dashboard_export_payload(
                 delta_col,
                 pct_col,
             ]
-        ].copy()
+        ].copy().rename(
+            columns={
+                "rank": "Rank",
+                "gap_to_leader": "Gap to Leader",
+                xp_per_day_col: f"XP/day ({w_label})",
+                delta_col: f"Delta vs Baseline ({w_label})",
+                pct_col: f"% vs Baseline ({w_label})",
+            }
+        )
         fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df)
 
         if not dash_recent_gain_df.empty:
@@ -3729,7 +3985,9 @@ def _build_dashboard_export_payload(
             fig_gain.update_layout(height=gain_height, margin=dict(l=150, r=30, t=45, b=35))
             fig_gain.update_xaxes(tickformat=",")
             fig_gain.update_yaxes(automargin=True)
-            gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy()
+            gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
+                columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
+            )
 
     xp_explorer_df = dash_xp_df.copy()
     if not xp_explorer_df.empty:
@@ -3880,18 +4138,19 @@ def build_dashboard_export_html(
             chart_blocks.append("</section>")
             include_plotly = False
 
-        cards_html = "".join(
-            [
+        cards_html_parts: list[str] = []
+        for (lbl, val, delta) in metric_cards:
+            delta_cls = _export_delta_class(delta)
+            cards_html_parts.append(
                 (
                     "<div class='metric-card'>"
                     f"<div class='metric-label'>{escape(lbl)}</div>"
                     f"<div class='metric-value'>{escape(val)}</div>"
-                    f"<div class='metric-delta'>{escape(delta)}</div>"
+                    f"<div class='metric-delta {delta_cls}'>{escape(delta)}</div>"
                     "</div>"
                 )
-                for (lbl, val, delta) in metric_cards
-            ]
-        )
+            )
+        cards_html = "".join(cards_html_parts)
         sections_html = "".join([_df_section_html(str(title), df) for (title, df) in sections_data])
         block_html = f"<div class='metrics'>{cards_html}</div>{''.join(chart_blocks)}{sections_html}"
         return block_html, include_plotly
@@ -4007,10 +4266,16 @@ def build_dashboard_export_html(
     .metric-label {{ color:var(--muted); font-size:12px; }}
     .metric-value {{ font-size:30px; margin:8px 0 6px 0; }}
     .metric-delta {{ color:var(--font); opacity:0.9; font-size:13px; min-height:16px; }}
+    .metric-delta.delta-pos {{ color:#22c55e; font-weight:600; }}
+    .metric-delta.delta-neg {{ color:#ef4444; font-weight:600; }}
+    .metric-delta.delta-neutral {{ color:var(--font); opacity:0.9; }}
     section {{ margin-bottom:18px; }}
     .report-table {{ width:100%; border-collapse:collapse; background:var(--table-bg); border:1px solid var(--border); }}
     .report-table th, .report-table td {{ border:1px solid var(--border); padding:6px 8px; text-align:left; }}
     .report-table th {{ background:var(--table-head); }}
+    .report-table td.cell-pos {{ background:rgba(34, 197, 94, 0.18); color:var(--font); font-weight:600; }}
+    .report-table td.cell-neg {{ background:rgba(239, 68, 68, 0.18); color:var(--font); font-weight:600; }}
+    .report-table td.cell-neutral {{ background:rgba(148, 163, 184, 0.10); color:var(--font); }}
     @media (max-width: 1000px) {{
       .metrics {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }}
     }}
@@ -4474,13 +4739,11 @@ def render_dashboard_content(
         st.session_state[window_state_key] = int(w)
 
     if show_medals:
-        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1, 0.9])
-        last_snapshot_col = c5
-        window_control_col = c6
+        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1, 0.95])
+        last_snapshot_col = c6
     else:
-        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1, 1, 1, 1, 1, 1, 1, 0.9])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 0.95])
         last_snapshot_col = c7
-        window_control_col = c8
     if not dash_latest_xp_df.empty:
         leader_row = dash_latest_xp_df.sort_values("Total XP", ascending=False).iloc[0]
         render_kpi_card(
@@ -4701,24 +4964,14 @@ def render_dashboard_content(
     else:
         render_kpi_card(last_snapshot_col, "Last XP Snapshot", "-", context="no data")
 
-    with window_control_col:
-        st.caption("Window")
-        st.segmented_control(
-            "Window",
-            options=[7, 30],
-            key=window_state_key,
-            format_func=lambda x: f"{int(x)}d",
-            label_visibility="collapsed",
-        )
-        if show_30d_limited_hint:
-            st.caption("30d limited coverage")
-
     st.caption(
         f"Eligible for {w_label} stats: {eligible_window}/{total_players} | "
         f"Eligible for baseline comparisons: {eligible_baseline_window}/{total_players} "
         f"(baseline requires >= {BASELINE_MIN_WINDOWS_DEFAULT} prior {w_label} windows) | "
         f"Active in {w_label} window ({xp_gain_col} > 0): {active_kpi_count}/{total_players}"
     )
+    if show_30d_limited_hint:
+        st.caption("30d limited coverage")
 
     if not dash_latest_xp_df.empty:
         ranking_df = dash_latest_xp_df.sort_values("Total XP", ascending=False).reset_index(drop=True).copy()
@@ -4752,6 +5005,9 @@ def render_dashboard_content(
         d_left, d_right = st.columns([1.05, 1.0])
         with d_left:
             st.subheader("Current XP Ranking")
+            xp_per_day_label = f"XP/day ({w_label})"
+            delta_label = f"Delta vs Baseline ({w_label})"
+            pct_label = f"% vs Baseline ({w_label})"
             ranking_view = ranking_df[
                 [
                     "rank",
@@ -4763,17 +5019,25 @@ def render_dashboard_content(
                     delta_col,
                     pct_col,
                 ]
-            ].copy()
+            ].copy().rename(
+                columns={
+                    "rank": "Rank",
+                    "gap_to_leader": "Gap to Leader",
+                    xp_per_day_col: xp_per_day_label,
+                    delta_col: delta_label,
+                    pct_col: pct_label,
+                }
+            )
             ranking_styler = (
                 ranking_view.style.format(
                     {
-                        "rank": "{:.0f}",
+                        "Rank": "{:.0f}",
                         "Lvl": "{:.0f}",
                         "Total XP": "{:,.0f}",
-                        "gap_to_leader": "{:,.0f}",
-                        xp_per_day_col: "{:,.0f}",
-                        delta_col: "{:+,.0f}",
-                        pct_col: "{:+.1%}",
+                        "Gap to Leader": "{:,.0f}",
+                        xp_per_day_label: "{:,.0f}",
+                        delta_label: "{:+,.0f}",
+                        pct_label: "{:+.1%}",
                     },
                     na_rep="--",
                 )
@@ -4781,15 +5045,16 @@ def render_dashboard_content(
                     lambda v: "background-color: rgba(16, 185, 129, 0.20);"
                     if pd.notna(v) and float(v) > 0
                     else ("background-color: rgba(239, 68, 68, 0.20);" if pd.notna(v) and float(v) < 0 else ""),
-                    subset=[delta_col, pct_col],
+                    subset=[delta_label, pct_label],
                 )
             )
-            st.dataframe(
-                ranking_styler,
-                use_container_width=True,
-                hide_index=True,
-                height=380,
-            )
+            with st.container(key="pogo_ranking_table"):
+                st.dataframe(
+                    ranking_styler,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=380,
+                )
         with d_right:
             st.subheader(f"XP Gain (Last {w} Days)")
             if dash_recent_gain_df.empty:
@@ -4806,17 +5071,20 @@ def render_dashboard_content(
                 )
                 fig_gain.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
                 render_plotly_chart(fig_gain, use_container_width=True)
-                gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy()
-                st.dataframe(
-                    gain_view,
-                    use_container_width=True,
-                    hide_index=True,
-                    height=210,
-                    column_config={
-                        "xp_gain": st.column_config.NumberColumn("XP Gain", format="%d"),
-                        "xp_per_day": st.column_config.NumberColumn("XP/Day", format="%.0f"),
-                    },
+                gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
+                    columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
                 )
+                gain_styler = gain_view.style.format(
+                    {"XP Gain": "{:,.0f}", "XP/Day": "{:,.0f}"},
+                    na_rep="--",
+                )
+                with st.container(key="pogo_ranking_table_gain"):
+                    st.dataframe(
+                        gain_styler,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=210,
+                    )
 
 st.set_page_config(page_title="PoGo Local Dashboard", layout="wide")
 inject_responsive_styles()
@@ -4844,26 +5112,38 @@ pages = [
     "Pipelines",
     "Generated Files",
 ]
-page = st.radio("Page", pages, horizontal=True)
+all_dashboard_accounts = sorted(
+    set(xp_df["Spieler"].dropna().astype(str).tolist()) | set(display_medal_df["account"].dropna().astype(str).tolist())
+)
+personal_group_names = {g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
+global_dashboard_group_options = ["All"] + [g for g in groups.keys() if g and g != "All" and g not in personal_group_names]
+personal_groups_by_key = {str(g).strip().lower(): g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
+personal_dashboard_group_options = [personal_groups_by_key[k] for k in ["ownaccounts", "ich"] if k in personal_groups_by_key]
+
+with st.container(key="pogo_controls_bar"):
+    page_col, group_col, window_ctrl_col = st.columns([3.4, 2.8, 1.0], gap="small")
+    with page_col:
+        page = st.radio("Page", pages, horizontal=True)
+    with group_col:
+        group_slot = st.empty()
+    with window_ctrl_col:
+        window_slot = st.empty()
 
 if page == "Dashboard Global":
-    st.subheader("Dashboard Global")
-    all_dashboard_accounts = sorted(
-        set(xp_df["Spieler"].dropna().astype(str).tolist()) | set(display_medal_df["account"].dropna().astype(str).tolist())
-    )
-    personal_group_names = {g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
-    dashboard_group_options = ["All"] + [g for g in groups.keys() if g and g != "All" and g not in personal_group_names]
-    top_left, top_right = st.columns([3.6, 1.4])
-    with top_left:
+    with group_slot.container():
         selected_dashboard_group = st.radio(
             "Global Group",
-            dashboard_group_options,
+            global_dashboard_group_options,
             index=0,
             horizontal=True,
             key="dashboard_global_group",
         )
     dashboard_accounts = accounts_for_selected_group(selected_dashboard_group, groups, all_dashboard_accounts)
     if not dashboard_accounts:
+        with window_slot.container():
+            st.caption("Window")
+            st.caption("-")
+        st.subheader("Dashboard Global")
         st.info("No accounts found for the selected global group.")
     else:
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
@@ -4879,21 +5159,36 @@ if page == "Dashboard Global":
             st.session_state[window_key] = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
         eligible_30d_count = count_window_eligible(metrics_by_window.get(30, pd.DataFrame()), 30, baseline=False)
         show_30d_limited_hint = eligible_30d_count < MIN_ELIGIBLE_FOR_30D_DEFAULT
-        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
-        with top_right:
-            render_dashboard_export_button(
-                dashboard_title="Dashboard Global",
-                selected_group=selected_dashboard_group,
-                selected_accounts=dashboard_accounts,
-                dash_xp_df=dash_xp_df,
-                dash_medal_df=dash_medal_df,
-                dash_display_medal_df=dash_display_medal_df,
-                goals_df=goals_df,
-                curve_map=curve_map,
-                show_medals=False,
-                window_days=selected_window_days,
-                key="export_dashboard_global",
+        with window_slot.container():
+            st.caption("Window")
+            st.segmented_control(
+                "Window",
+                options=[7, 30],
+                key=window_key,
+                format_func=lambda x: f"{int(x)}d",
+                label_visibility="collapsed",
             )
+            if show_30d_limited_hint:
+                st.caption("30d limited")
+        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+        header_left, header_right = st.columns([4.0, 1.65], gap="small")
+        with header_left:
+            st.subheader("Dashboard Global")
+        with header_right:
+            with st.container(key="pogo_export_header_global"):
+                render_dashboard_export_button(
+                    dashboard_title="Dashboard Global",
+                    selected_group=selected_dashboard_group,
+                    selected_accounts=dashboard_accounts,
+                    dash_xp_df=dash_xp_df,
+                    dash_medal_df=dash_medal_df,
+                    dash_display_medal_df=dash_display_medal_df,
+                    goals_df=goals_df,
+                    curve_map=curve_map,
+                    show_medals=False,
+                    window_days=selected_window_days,
+                    key="export_dashboard_global",
+                )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -4918,27 +5213,31 @@ if page == "Dashboard Global":
         )
 
 if page == "Dashboard Personal":
-    st.subheader("Dashboard Personal")
-    all_dashboard_accounts = sorted(
-        set(xp_df["Spieler"].dropna().astype(str).tolist()) | set(display_medal_df["account"].dropna().astype(str).tolist())
-    )
-    personal_groups_by_key = {str(g).strip().lower(): g for g in groups.keys() if str(g).strip().lower() in {"ich", "ownaccounts"}}
-    dashboard_group_options = [personal_groups_by_key[k] for k in ["ownaccounts", "ich"] if k in personal_groups_by_key]
-    if not dashboard_group_options:
+    if not personal_dashboard_group_options:
+        with group_slot.container():
+            st.caption("Personal Group")
+            st.caption("No groups configured")
+        with window_slot.container():
+            st.caption("Window")
+            st.caption("-")
+        st.subheader("Dashboard Personal")
         st.info("No personal groups found. Add `Ich:` and/or `OwnAccounts:` to `inputs/config/player_groups.csv`.")
         st.stop()
 
-    top_left, top_right = st.columns([3.6, 1.4])
-    with top_left:
+    with group_slot.container():
         selected_dashboard_group = st.radio(
             "Personal Group",
-            dashboard_group_options,
+            personal_dashboard_group_options,
             index=0,
             horizontal=True,
             key="dashboard_personal_group",
         )
     dashboard_accounts = accounts_for_selected_group(selected_dashboard_group, groups, all_dashboard_accounts)
     if not dashboard_accounts:
+        with window_slot.container():
+            st.caption("Window")
+            st.caption("-")
+        st.subheader("Dashboard Personal")
         st.info("No accounts found for the selected personal group.")
     else:
         dash_xp_df = xp_df[xp_df["Spieler"].isin(dashboard_accounts)].copy()
@@ -4954,21 +5253,36 @@ if page == "Dashboard Personal":
             st.session_state[window_key] = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
         eligible_30d_count = count_window_eligible(metrics_by_window.get(30, pd.DataFrame()), 30, baseline=False)
         show_30d_limited_hint = eligible_30d_count < MIN_ELIGIBLE_FOR_30D_DEFAULT
-        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
-        with top_right:
-            render_dashboard_export_button(
-                dashboard_title="Dashboard Personal",
-                selected_group=selected_dashboard_group,
-                selected_accounts=dashboard_accounts,
-                dash_xp_df=dash_xp_df,
-                dash_medal_df=dash_medal_df,
-                dash_display_medal_df=dash_display_medal_df,
-                goals_df=goals_df,
-                curve_map=curve_map,
-                show_medals=True,
-                window_days=selected_window_days,
-                key="export_dashboard_personal",
+        with window_slot.container():
+            st.caption("Window")
+            st.segmented_control(
+                "Window",
+                options=[7, 30],
+                key=window_key,
+                format_func=lambda x: f"{int(x)}d",
+                label_visibility="collapsed",
             )
+            if show_30d_limited_hint:
+                st.caption("30d limited")
+        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+        header_left, header_right = st.columns([4.0, 1.65], gap="small")
+        with header_left:
+            st.subheader("Dashboard Personal")
+        with header_right:
+            with st.container(key="pogo_export_header_personal"):
+                render_dashboard_export_button(
+                    dashboard_title="Dashboard Personal",
+                    selected_group=selected_dashboard_group,
+                    selected_accounts=dashboard_accounts,
+                    dash_xp_df=dash_xp_df,
+                    dash_medal_df=dash_medal_df,
+                    dash_display_medal_df=dash_display_medal_df,
+                    goals_df=goals_df,
+                    curve_map=curve_map,
+                    show_medals=True,
+                    window_days=selected_window_days,
+                    key="export_dashboard_personal",
+                )
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -4991,6 +5305,13 @@ if page == "Dashboard Personal":
             show_global_activity_trends=False,
             activity_window_days=selected_window_days,
         )
+if page not in {"Dashboard Global", "Dashboard Personal"}:
+    with group_slot.container():
+        st.caption("Group")
+        st.caption("-")
+    with window_slot.container():
+        st.caption("Window")
+        st.caption("-")
 
 if page == "Medal Explorer":
     header_left, header_right = st.columns([3.6, 1.4])
