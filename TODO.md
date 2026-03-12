@@ -130,4 +130,21 @@ Notes:
 - [x] Activity Performance redesigned to card-style KPI rows per activity (matches Global KPI card style)
 
 
-show catch up trendlines deselect reset graph to full scaling
+
+## 8) Code Structure + Cleanup (2026-03-12)
+
+- [x] Current XP Ranking regression fixed (dashboard table formatting + stable labels)
+- [x] Export logic split out of `webapp/app.py` into `webapp/exporting.py`
+- [~] View split started under `webapp/views/`
+  - [x] Dashboard rendering moved to `webapp/views/dashboard.py`
+  - [~] XP Explorer routed via `webapp/views/xp_explorer.py` wrapper (full body extraction pending)
+- [x] Removed unused/generated folders:
+  - [x] `.mypy_cache/`
+  - [x] `.pytest_cache/`
+  - [x] all `__pycache__/`
+  - [x] `_Archiv/`
+- [x] Script cleanup scan done (`run_xp.py`, `run_medals.py`, `update_all.py`, `run_server.py` are referenced and kept)
+
+
+export infos missing and functions
+trendline differences (sabine vs. stefan in all and bekannte)

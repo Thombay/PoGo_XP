@@ -1,6 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import io
 import re
 import subprocess
 import sys
@@ -13,7 +12,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-import streamlit.components.v1 as components
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -36,6 +34,22 @@ from webapp.metrics import (
     compute_player_kpis_window,
     recent_gain_table_from_metrics,
 )
+from webapp.data_files import (
+    add_account_to_groups,
+    load_curve_map,
+    load_medal_goals,
+    load_medal_snapshots,
+    load_xp_history,
+    parse_groups,
+    to_int_series,
+)
+from webapp.exporting import (
+    build_dashboard_export_html as build_dashboard_export_html_impl,
+    build_dashboard_export_png as build_dashboard_export_png_impl,
+)
+from webapp.ui_styles import inject_responsive_styles
+from webapp.views.dashboard import render_dashboard_content_view
+from webapp.views.xp_explorer import render_xp_explorer_section_view
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
 MEDAL_INPUT_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
@@ -87,90 +101,6 @@ SPECIAL_PLATINUM_MEDALS = [
 ]
 
 
-def to_int_series(series: pd.Series) -> pd.Series:
-    cleaned = series.astype(str).str.replace(r"[^0-9\-]", "", regex=True)
-    cleaned = cleaned.replace("", pd.NA)
-    return pd.to_numeric(cleaned, errors="coerce")
-
-
-def parse_groups(path: Path) -> dict[str, list[str]]:
-    groups: dict[str, list[str]] = {}
-    if not path.exists():
-        return groups
-
-    current: str | None = None
-    with open(path, "r", encoding="utf-8-sig") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            if line.endswith(":"):
-                current = line[:-1].strip()
-                groups.setdefault(current, [])
-                continue
-            if current is None:
-                continue
-            names = [x.strip() for x in line.split(",")]
-            for name in names:
-                if name and name != "...":
-                    groups[current].append(name)
-
-    for group, names in list(groups.items()):
-        groups[group] = list(dict.fromkeys(names))
-        if not groups[group]:
-            groups.pop(group, None)
-    return groups
-
-
-def save_groups(path: Path, groups: dict[str, list[str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    for group, names in groups.items():
-        group_name = str(group).strip()
-        if not group_name:
-            continue
-        unique_names: list[str] = []
-        seen: set[str] = set()
-        for raw_name in names:
-            name = str(raw_name).strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            unique_names.append(name)
-        lines.append(f"{group_name}:")
-        lines.append(",".join(unique_names))
-        lines.append("")
-    content = "\n".join(lines).rstrip() + "\n"
-    path.write_text(content, encoding="utf-8-sig")
-
-
-def add_account_to_groups(path: Path, account_name: str, target_groups: list[str] | None = None) -> list[str]:
-    account = str(account_name).strip()
-    if not account:
-        return []
-
-    groups = parse_groups(path)
-    group_order = list(groups.keys())
-    if "All" not in groups:
-        groups["All"] = []
-        group_order.append("All")
-
-    requested = ["All"] + [str(g).strip() for g in (target_groups or []) if str(g).strip()]
-    selected_groups: list[str] = []
-    for group_name in requested:
-        if group_name not in selected_groups:
-            selected_groups.append(group_name)
-        if group_name not in groups:
-            groups[group_name] = []
-            group_order.append(group_name)
-        if account not in groups[group_name]:
-            groups[group_name].append(account)
-
-    ordered_groups = {group_name: groups.get(group_name, []) for group_name in group_order}
-    save_groups(path, ordered_groups)
-    return selected_groups
-
-
 def ensure_account_in_xp_order(account_name: str, known_accounts: list[str] | None = None) -> None:
     account = str(account_name).strip()
     if not account:
@@ -182,84 +112,6 @@ def ensure_account_in_xp_order(account_name: str, known_accounts: list[str] | No
     if account not in ordered:
         ordered.append(account)
     save_xp_input_order(ordered)
-
-
-def load_curve_map(path: Path) -> dict[int, int]:
-    if not path.exists():
-        return {}
-    curve = pd.read_csv(path, sep=";", engine="python", encoding="utf-8-sig")
-    if not {"Level", "Total XP"}.issubset(curve.columns):
-        return {}
-    curve["Level"] = to_int_series(curve["Level"])
-    curve["Total XP"] = to_int_series(curve["Total XP"])
-    curve = curve.dropna(subset=["Level", "Total XP"]).copy()
-    curve["Level"] = curve["Level"].astype(int)
-    curve["Total XP"] = curve["Total XP"].astype(int)
-    return dict(zip(curve["Level"], curve["Total XP"]))
-
-
-def load_xp_history(path: Path, curve_map: dict[int, int]) -> pd.DataFrame:
-    cols = ["Date", "Spieler", "Lvl", "XP Bar", "Total XP"]
-    if not path.exists():
-        return pd.DataFrame(columns=cols)
-
-    hist = pd.read_csv(path, sep=";", engine="python", encoding="utf-8-sig")
-    if not {"Date", "Spieler", "Lvl", "XP Bar"}.issubset(hist.columns):
-        return pd.DataFrame(columns=cols)
-
-    hist = hist.copy()
-    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
-    hist["Spieler"] = hist["Spieler"].astype(str).str.strip()
-    hist["Lvl"] = to_int_series(hist["Lvl"])
-    hist["XP Bar"] = to_int_series(hist["XP Bar"])
-    hist = hist.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
-    hist["Lvl"] = hist["Lvl"].astype(int)
-    hist["XP Bar"] = hist["XP Bar"].astype(int)
-    hist["base_xp"] = hist["Lvl"].map(curve_map)
-    hist = hist.dropna(subset=["base_xp"]).copy()
-    hist["Total XP"] = hist["base_xp"].astype(int) + hist["XP Bar"]
-    return hist[cols].sort_values(["Date", "Spieler"]).reset_index(drop=True)
-
-
-def load_medal_snapshots(path: Path) -> pd.DataFrame:
-    cols = ["date", "account", "medal_id", "value"]
-    if not path.exists():
-        return pd.DataFrame(columns=cols)
-
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if not set(cols).issubset(df.columns):
-        return pd.DataFrame(columns=cols)
-
-    df = df.copy()
-    df["date"] = df["date"].replace("", pd.NA).ffill()
-    df["account"] = df["account"].replace("", pd.NA).ffill()
-    df = df[df["date"].astype(str).str.upper() != "YYYY-MM-DD"].copy()
-    df["medal_id"] = df["medal_id"].astype(str).str.strip().str.lower()
-    df = df[~df["medal_id"].isin(EXCLUDED_MANUAL_MEDAL_IDS)].copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["account"] = df["account"].astype(str).str.strip()
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna(subset=["date", "account", "medal_id", "value"]).copy()
-    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
-    df["_acc_order"] = df["account"].map(order_map).fillna(999)
-    df = df.sort_values(["date", "_acc_order", "account", "medal_id"]).drop(columns=["_acc_order"])
-    return df.reset_index(drop=True)
-
-
-def load_medal_goals(path: Path) -> pd.DataFrame:
-    cols = ["medal_id", "display_name", "goal_value"]
-    if not path.exists():
-        return pd.DataFrame(columns=cols)
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if not set(cols).issubset(df.columns):
-        return pd.DataFrame(columns=cols)
-    df = df.copy()
-    df["medal_id"] = df["medal_id"].astype(str).str.strip().str.lower()
-    df["goal_value"] = pd.to_numeric(df["goal_value"], errors="coerce")
-    df = df.dropna(subset=["medal_id", "display_name", "goal_value"]).copy()
-    return df[cols].drop_duplicates(subset=["medal_id"]).sort_values(["display_name", "medal_id"]).reset_index(
-        drop=True
-    )
 
 
 def with_derived_platinum_rows(medal_df: pd.DataFrame, goals_df: pd.DataFrame) -> pd.DataFrame:
@@ -1562,213 +1414,6 @@ def render_plotly_chart(fig: go.Figure, sort_legend: bool = True, **kwargs: obje
     st.plotly_chart(fig, **kwargs)
 
 
-def inject_responsive_styles() -> None:
-    st.markdown(
-        """
-        <style>
-        :root { font-size: clamp(13px, 0.55vw + 10px, 18px); }
-        .block-container { padding-top: 0.65rem; padding-bottom: 1.1rem; }
-        h1 { margin-top: 0.05rem !important; margin-bottom: 0.3rem !important; line-height: 1.08 !important; }
-        div[class*="st-key-pogo_controls_bar"],
-        .pogo-controls-bar-target {
-          position: sticky !important;
-          top: 2.8rem;
-          z-index: 1150;
-          padding: 0.36rem 0.48rem 0.54rem 0.48rem;
-          border-radius: 0.7rem;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(15, 23, 42, 0.9);
-          backdrop-filter: blur(8px);
-          box-shadow: 0 10px 22px rgba(2, 8, 23, 0.32);
-          transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.32s ease, opacity 0.32s ease, top 0.32s ease;
-          opacity: 0.96;
-        }
-        div[class*="st-key-pogo_export_header_"] {
-          max-width: 24rem;
-          margin-left: auto;
-          margin-right: auto;
-        }
-        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"],
-        body.pogo-controls-compact .pogo-controls-bar-target {
-          position: fixed !important;
-          top: 2.1rem;
-          left: 50%;
-          width: min(76rem, calc(100vw - 1rem));
-          padding-left: 0.78rem;
-          padding-right: 0.78rem;
-          transform: translateX(-50%) scale(0.965);
-          transform-origin: top center;
-          box-shadow: 0 8px 16px rgba(2, 8, 23, 0.28);
-          z-index: 1300;
-          pointer-events: auto;
-        }
-        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"] p,
-        body.pogo-controls-compact .pogo-controls-bar-target p {
-          font-size: 0.72rem !important;
-          margin-bottom: 0.16rem;
-        }
-        body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"] button,
-        body.pogo-controls-compact .pogo-controls-bar-target button {
-          min-height: 1.8rem !important;
-          font-size: 0.8rem !important;
-          padding-top: 0.1rem !important;
-          padding-bottom: 0.1rem !important;
-        }
-        div[class*="st-key-pogo_ranking_table"] [data-testid="stDataFrame"] [role="columnheader"] {
-          font-size: 0.78rem !important;
-          white-space: nowrap !important;
-        }
-        div[class*="st-key-pogo_ranking_table"] [data-testid="stDataFrame"] [role="gridcell"] {
-          font-size: 0.88rem !important;
-        }
-        div[data-testid="stMetricLabel"] p,
-        div[data-testid="stMetricDelta"] > div {
-          white-space: normal !important;
-          overflow-wrap: anywhere;
-        }
-        div[data-testid="stMetricValue"] > div {
-          white-space: normal !important;
-          overflow: visible !important;
-          text-overflow: clip !important;
-          overflow-wrap: anywhere;
-          line-height: 1.02 !important;
-          font-size: clamp(1.55rem, 1.9vw, 2.1rem) !important;
-        }
-        @media (max-width: 1200px) {
-          .block-container { padding-left: 1rem; padding-right: 1rem; }
-        }
-        @media (max-width: 860px) {
-          .block-container { padding-left: 0.65rem; padding-right: 0.65rem; }
-          h1 { font-size: 1.45rem !important; }
-          h2, h3 { font-size: 1.2rem !important; }
-          div[class*="st-key-pogo_controls_bar"],
-          .pogo-controls-bar-target { top: 2.2rem; }
-          body.pogo-controls-compact div[class*="st-key-pogo_controls_bar"],
-          body.pogo-controls-compact .pogo-controls-bar-target {
-            top: 1.45rem;
-            width: calc(100vw - 0.45rem);
-            padding-left: 0.62rem;
-            padding-right: 0.62rem;
-            transform: translateX(-50%) scale(0.985);
-          }
-          div[class*="st-key-pogo_export_header_"] {
-            max-width: none;
-          }
-          div[data-testid="stMetricValue"] > div {
-            font-size: clamp(1.35rem, 6vw, 1.9rem) !important;
-          }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    components.html(
-        """
-        <script>
-        (() => {
-          const parentWindow = window.parent;
-          const parentDoc = parentWindow?.document;
-          if (!parentWindow || !parentDoc) return;
-          const className = "pogo-controls-compact";
-          const barClass = "pogo-controls-bar-target";
-          const threshold = 26;
-          const normalize = (s) => String(s || "").replace(/\\s+/g, " ").trim().toLowerCase();
-          const findRadioByLabel = (root, labels) => {
-            const labelSet = new Set(labels.map((x) => normalize(x)));
-            const radios = Array.from(root.querySelectorAll('div[data-testid="stRadio"]'));
-            return radios.find((radio) => labelSet.has(normalize(radio.querySelector("label p")?.textContent))) || null;
-          };
-          const hasWindowControl = (root) => {
-            const groups = Array.from(
-              root.querySelectorAll('div[data-testid="stSegmentedControl"], div[data-baseweb="button-group"], div[role="radiogroup"]')
-            );
-            return groups.some((g) => {
-              const labels = Array.from(g.querySelectorAll("button, label, p")).map((x) => normalize(x.textContent));
-              return labels.includes("7d") && labels.includes("30d");
-            });
-          };
-          const findControlsBarNode = () => {
-            const keyed = parentDoc.querySelector('div[class*="st-key-pogo_controls_bar"]');
-            if (keyed) return keyed;
-            const pageRadio = findRadioByLabel(parentDoc, ["Page"]);
-            if (!pageRadio) return null;
-            const candidates = [];
-            let node = pageRadio;
-            while (node) {
-              if (node.matches('div[data-testid="stVerticalBlock"], div[data-testid="stElementContainer"]')) {
-                candidates.push(node);
-              }
-              node = node.parentElement;
-            }
-            for (const candidate of candidates) {
-              if (findRadioByLabel(candidate, ["Global Group", "Personal Group", "Group"]) || hasWindowControl(candidate)) {
-                return candidate;
-              }
-            }
-            return pageRadio.closest('div[data-testid="stElementContainer"]') || candidates[0] || null;
-          };
-          const bindControlsBarClass = () => {
-            parentDoc.querySelectorAll(`.${barClass}`).forEach((el) => el.classList.remove(barClass));
-            const target = findControlsBarNode();
-            if (target) target.classList.add(barClass);
-          };
-          const scrollHostCandidates = () => {
-            const nodes = [
-              parentDoc.querySelector('section.main'),
-              parentDoc.querySelector('[data-testid="stAppViewContainer"]'),
-              parentDoc.querySelector('[data-testid="stMain"]'),
-              parentDoc.scrollingElement,
-              parentDoc.documentElement,
-              parentDoc.body,
-            ];
-            return nodes.filter(Boolean);
-          };
-          const getScrollY = () => {
-            const tops = scrollHostCandidates().map((n) => Number(n?.scrollTop || 0));
-            tops.push(Number(parentWindow.scrollY || 0));
-            tops.push(Number(parentWindow.pageYOffset || 0));
-            return Math.max(0, ...tops);
-          };
-          const applyCompactClass = () => {
-            bindControlsBarClass();
-            const compact = getScrollY() > threshold;
-            parentDoc.body.classList.toggle(className, compact);
-          };
-          let scrollRaf = 0;
-          const onScroll = () => {
-            if (scrollRaf) return;
-            scrollRaf = parentWindow.requestAnimationFrame(() => {
-              scrollRaf = 0;
-              applyCompactClass();
-            });
-          };
-          const onResize = () => applyCompactClass();
-          if (!parentWindow.__pogoCompactWindowListenerInstalled) {
-            scrollHostCandidates().forEach((host) => {
-              if (host && host.addEventListener) {
-                host.addEventListener("scroll", onScroll, { passive: true });
-              }
-            });
-            parentWindow.addEventListener("scroll", onScroll, { passive: true });
-            parentDoc.addEventListener("scroll", onScroll, { passive: true, capture: true });
-            parentWindow.addEventListener("resize", onResize, { passive: true });
-            parentWindow.__pogoCompactWindowListenerInstalled = true;
-          }
-          if (!parentWindow.__pogoCompactWindowObserverInstalled) {
-            const observer = new MutationObserver(() => applyCompactClass());
-            observer.observe(parentDoc.body, { childList: true, subtree: true });
-            parentWindow.__pogoCompactWindowObserverInstalled = true;
-          }
-          parentWindow.setTimeout(applyCompactClass, 120);
-          applyCompactClass();
-        })();
-        </script>
-        """,
-        height=1,
-        width=1,
-    )
-
-
 def select_date_range(
     label: str,
     min_date: date,
@@ -1790,6 +1435,27 @@ def select_date_range(
 
 
 def render_xp_explorer_section(
+    xp_subset_df: pd.DataFrame,
+    key_prefix: str,
+    medal_subset_df: pd.DataFrame | None = None,
+    show_personal_activity: bool = False,
+    additional_subset_df: pd.DataFrame | None = None,
+    show_global_activity_trends: bool = False,
+    activity_window_days: int = 7,
+) -> None:
+    render_xp_explorer_section_view(
+        render_impl=_render_xp_explorer_section_impl,
+        xp_subset_df=xp_subset_df,
+        key_prefix=key_prefix,
+        medal_subset_df=medal_subset_df,
+        show_personal_activity=show_personal_activity,
+        additional_subset_df=additional_subset_df,
+        show_global_activity_trends=show_global_activity_trends,
+        activity_window_days=activity_window_days,
+    )
+
+
+def _render_xp_explorer_section_impl(
     xp_subset_df: pd.DataFrame,
     key_prefix: str,
     medal_subset_df: pd.DataFrame | None = None,
@@ -2744,7 +2410,11 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     if not rows:
         return 0
 
-    existing = load_medal_snapshots(path)
+    existing = load_medal_snapshots(
+        path,
+        account_order=ACCOUNT_ORDER,
+        excluded_manual_medal_ids=EXCLUDED_MANUAL_MEDAL_IDS,
+    )
     new_df = pd.DataFrame(rows)
     new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
     new_df["account"] = new_df["account"].astype(str).str.strip()
@@ -3355,213 +3025,6 @@ def _slugify(value: str) -> str:
     return slug or "group"
 
 
-def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    out = df.copy()
-    for col in out.columns:
-        col_l = str(col).lower()
-        if "date" in col_l:
-            dt = pd.to_datetime(out[col], errors="coerce")
-            out[col] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out[col].astype(str))
-            continue
-        vals = pd.to_numeric(out[col], errors="coerce")
-        is_pct_goal = col_l == "pct_goal"
-        is_baseline_pct = "pct_vs_baseline" in col_l or col_l.startswith("% vs baseline")
-        is_baseline_delta = "delta_vs_baseline" in col_l or "delta vs baseline" in col_l
-        if is_pct_goal or is_baseline_pct or is_baseline_delta:
-            if is_pct_goal:
-                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{float(v):.1f}")
-            elif is_baseline_pct:
-                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{float(v):+,.1%}")
-            else:
-                out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):+,}")
-            continue
-
-        is_numeric_col = pd.api.types.is_numeric_dtype(out[col])
-        if not is_numeric_col:
-            non_empty = int(out[col].notna().sum())
-            numeric_like = int(vals.notna().sum())
-            is_numeric_col = non_empty > 0 and (numeric_like / non_empty) >= 0.6
-        if is_numeric_col:
-            out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):,}")
-    return out
-
-
-def _export_value_indicator_class(column_name: object, raw_value: object) -> str:
-    col_l = str(column_name).strip().lower()
-    num = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
-    if "delta_vs_baseline" in col_l or "delta vs baseline" in col_l or "pct_vs_baseline" in col_l or "% vs baseline" in col_l:
-        if pd.isna(num):
-            return ""
-        if float(num) > 0:
-            return "cell-pos"
-        if float(num) < 0:
-            return "cell-neg"
-        return "cell-neutral"
-    return ""
-
-
-def _export_delta_class(delta_text: object) -> str:
-    txt = str(delta_text or "").strip()
-    if not txt:
-        return "delta-neutral"
-    if "↑" in txt or re.search(r"(^|[^0-9])\+", txt):
-        return "delta-pos"
-    if "↓" in txt or re.search(r"(^|[^0-9])-", txt):
-        return "delta-neg"
-    return "delta-neutral"
-
-
-def _df_section_html(title: str, df: pd.DataFrame) -> str:
-    if df.empty:
-        return f"<section><h2>{escape(title)}</h2><p>No data.</p></section>"
-    raw = df.reset_index(drop=True).copy()
-    out = _format_export_df(raw)
-    cols = [str(c) for c in out.columns]
-    header_html = "".join([f"<th>{escape(c)}</th>" for c in cols])
-    row_html_parts: list[str] = []
-    for i in range(len(out)):
-        cells: list[str] = []
-        for col in cols:
-            display_val = out.iloc[i][col] if col in out.columns else "--"
-            raw_val = raw.iloc[i][col] if col in raw.columns else display_val
-            cell_cls = _export_value_indicator_class(col, raw_val)
-            cls_attr = f" class='{cell_cls}'" if cell_cls else ""
-            text = "--" if pd.isna(display_val) else str(display_val)
-            cells.append(f"<td{cls_attr}>{escape(text)}</td>")
-        row_html_parts.append(f"<tr>{''.join(cells)}</tr>")
-    table_html = (
-        "<table class='report-table report-table-enhanced'>"
-        f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{''.join(row_html_parts)}</tbody>"
-        "</table>"
-    )
-    return f"<section><h2>{escape(title)}</h2>{table_html}</section>"
-
-
-def _export_theme(mode: str) -> dict[str, object]:
-    m = str(mode).strip().lower()
-    if m == "light":
-        return {
-            "name": "Light",
-            "template": "plotly_white",
-            "paper_bg": "#ffffff",
-            "plot_bg": "#ffffff",
-            "font": "#0f172a",
-            "grid": "rgba(15,23,42,0.12)",
-            "line": "rgba(15,23,42,0.35)",
-            "body_bg": "#f8fafc",
-            "muted": "#475569",
-            "card_bg": "#ffffff",
-            "border": "#d0d7de",
-            "table_bg": "#ffffff",
-            "table_head": "#eef2f7",
-            "colorway": ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#17becf", "#bcbd22", "#8c564b"],
-            "max_width": "1400px",
-            "base_font_size": "14px",
-        }
-    if m == "whatsapp":
-        return {
-            "name": "WhatsApp",
-            "template": "plotly_white",
-            "paper_bg": "#ffffff",
-            "plot_bg": "#ffffff",
-            "font": "#0b1f16",
-            "grid": "rgba(11,31,22,0.10)",
-            "line": "rgba(11,31,22,0.25)",
-            "body_bg": "#ecfdf5",
-            "muted": "#36524a",
-            "card_bg": "#ffffff",
-            "border": "#a7f3d0",
-            "table_bg": "#ffffff",
-            "table_head": "#d1fae5",
-            "colorway": ["#0ea5a4", "#1d4ed8", "#16a34a", "#f59e0b", "#e11d48", "#7c3aed", "#0f766e", "#f97316"],
-            "max_width": "980px",
-            "base_font_size": "15px",
-        }
-    if m == "smartphone":
-        return {
-            "name": "Smartphone",
-            "template": "plotly_white",
-            "paper_bg": "#ffffff",
-            "plot_bg": "#ffffff",
-            "font": "#0f172a",
-            "grid": "rgba(15,23,42,0.12)",
-            "line": "rgba(15,23,42,0.30)",
-            "body_bg": "#f8fafc",
-            "muted": "#475569",
-            "card_bg": "#ffffff",
-            "border": "#d0d7de",
-            "table_bg": "#ffffff",
-            "table_head": "#eef2f7",
-            "colorway": ["#0ea5a4", "#1d4ed8", "#16a34a", "#f59e0b", "#e11d48", "#7c3aed", "#0f766e", "#f97316"],
-            "max_width": "430px",
-            "base_font_size": "16px",
-        }
-    return {
-        "name": "Dark",
-        "template": "plotly_dark",
-        "paper_bg": "#0b1220",
-        "plot_bg": "#0f172a",
-        "font": "#e5e7eb",
-        "grid": "rgba(148,163,184,0.15)",
-        "line": "rgba(148,163,184,0.35)",
-        "body_bg": "#0b1220",
-        "muted": "#b8c0cc",
-        "card_bg": "#111827",
-        "border": "#1f2937",
-        "table_bg": "#0f172a",
-        "table_head": "#1f2937",
-        "colorway": ["#4fa3ff", "#22c55e", "#f59e0b", "#ef4444", "#a78bfa", "#14b8a6", "#f97316", "#eab308"],
-        "max_width": "1400px",
-        "base_font_size": "14px",
-    }
-
-
-def _style_export_figure(fig: go.Figure, mode: str) -> None:
-    theme = _export_theme(mode)
-    palette = [str(c) for c in theme["colorway"]]
-    fig.update_layout(
-        template=str(theme["template"]),
-        paper_bgcolor=str(theme["paper_bg"]),
-        plot_bgcolor=str(theme["plot_bg"]),
-        font=dict(color=str(theme["font"])),
-        colorway=list(theme["colorway"]),  # keep trace colors readable in exported HTML
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
-    )
-    fig.update_xaxes(
-        gridcolor=str(theme["grid"]),
-        zerolinecolor=str(theme["grid"]),
-        linecolor=str(theme["line"]),
-        automargin=True,
-    )
-
-    # Force readable trace colors in exported HTML across browsers/viewers.
-    name_to_color: dict[str, str] = {}
-    next_idx = 0
-    for tr in fig.data:
-        trace_name = str(getattr(tr, "name", "")).strip() or f"trace_{next_idx}"
-        if trace_name not in name_to_color:
-            name_to_color[trace_name] = palette[next_idx % len(palette)]
-            next_idx += 1
-        color = name_to_color[trace_name]
-        trace_type = str(getattr(tr, "type", ""))
-        if trace_type in {"scatter", "scattergl"}:
-            tr.update(
-                line=dict(color=color),
-                marker=dict(color=color),
-            )
-        elif trace_type == "bar":
-            tr.update(marker=dict(color=color))
-    fig.update_yaxes(
-        gridcolor=str(theme["grid"]),
-        zerolinecolor=str(theme["grid"]),
-        linecolor=str(theme["line"]),
-        automargin=True,
-    )
-
-
 def _build_medal_export_tables(
     dash_medal_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
@@ -4116,59 +3579,8 @@ def build_dashboard_export_html(
     export_mode: str,
     window_days: int,
 ) -> str:
-    def _render_payload_block(payload: dict[str, object], include_js: bool, mode: str) -> tuple[str, bool]:
-        metric_cards = payload["metric_cards"]
-        chart_items = payload["chart_items"]
-        sections_data = payload["sections"]
-        chart_blocks: list[str] = []
-        include_plotly = include_js
-        for chart_title, fig in chart_items:
-            if fig is None:
-                continue
-            sort_legend_by_latest_y(fig)
-            _style_export_figure(fig, mode)
-            chart_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
-            chart_blocks.append(
-                fig.to_html(
-                    full_html=False,
-                    include_plotlyjs="inline" if include_plotly else False,
-                    config={"displaylogo": False},
-                )
-            )
-            chart_blocks.append("</section>")
-            include_plotly = False
-
-        cards_html_parts: list[str] = []
-        for (lbl, val, delta) in metric_cards:
-            delta_cls = _export_delta_class(delta)
-            cards_html_parts.append(
-                (
-                    "<div class='metric-card'>"
-                    f"<div class='metric-label'>{escape(lbl)}</div>"
-                    f"<div class='metric-value'>{escape(val)}</div>"
-                    f"<div class='metric-delta {delta_cls}'>{escape(delta)}</div>"
-                    "</div>"
-                )
-            )
-        cards_html = "".join(cards_html_parts)
-        sections_html = "".join([_df_section_html(str(title), df) for (title, df) in sections_data])
-        block_html = f"<div class='metrics'>{cards_html}</div>{''.join(chart_blocks)}{sections_html}"
-        return block_html, include_plotly
-
-    layout_theme = _export_theme(export_mode)
-    dark_theme = _export_theme("dark")
-    light_theme = _export_theme("light")
-    default_theme_mode = "dark" if str(export_mode).strip().lower() == "dark" else "light"
-    default_theme_label = "Dark" if default_theme_mode == "dark" else "Light"
-
-    default_window = int(window_days)
-    export_windows = [int(w) for w in DASHBOARD_WINDOW_OPTIONS]
-    if default_window not in export_windows:
-        export_windows = sorted(set(export_windows + [default_window]))
-
-    payloads_by_window: dict[int, dict[str, object]] = {}
-    for w in export_windows:
-        payloads_by_window[w] = _build_dashboard_export_payload(
+    def _build_payload_for_window(window_days_inner: int) -> dict[str, object]:
+        return _build_dashboard_export_payload(
             selected_accounts=selected_accounts,
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -4176,231 +3588,18 @@ def build_dashboard_export_html(
             goals_df=goals_df,
             curve_map=curve_map,
             show_medals=show_medals,
-            window_days=w,
+            window_days=int(window_days_inner),
         )
 
-    base_payload = payloads_by_window.get(default_window) or payloads_by_window[export_windows[0]]
-    accounts_text = str(base_payload["accounts_text"])
-    generated_at = str(base_payload["generated_at"])
-
-    include_js = True
-    window_panes: list[str] = []
-    for w in export_windows:
-        for theme_mode in ["dark", "light"]:
-            block_html, include_js = _render_payload_block(payloads_by_window[w], include_js=include_js, mode=theme_mode)
-            display_mode = "block" if int(w) == int(default_window) and theme_mode == default_theme_mode else "none"
-            window_panes.append(
-                (
-                    f"<div class='window-pane theme-pane' "
-                    f"id='window-pane-{int(w)}-{theme_mode}' "
-                    f"data-window='{int(w)}' data-theme='{theme_mode}' "
-                    f"style='display:{display_mode};'>{block_html}</div>"
-                )
-            )
-
-    window_buttons = "".join(
-        [
-            (
-                f"<button type='button' class='window-btn' id='window-btn-{int(w)}' "
-                f"onclick='setWindow({int(w)})'>{int(w)}d</button>"
-            )
-            for w in export_windows
-        ]
+    return build_dashboard_export_html_impl(
+        dashboard_title=dashboard_title,
+        selected_group=selected_group,
+        export_mode=export_mode,
+        window_days=int(window_days),
+        dashboard_window_options=DASHBOARD_WINDOW_OPTIONS,
+        build_payload_for_window=_build_payload_for_window,
+        sort_legend_by_latest_y=sort_legend_by_latest_y,
     )
-    theme_buttons = "".join(
-        [
-            "<button type='button' class='theme-btn' id='theme-btn-dark' onclick=\"setTheme('dark')\">Dark</button>",
-            "<button type='button' class='theme-btn' id='theme-btn-light' onclick=\"setTheme('light')\">Light</button>",
-        ]
-    )
-
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>{escape(dashboard_title)} - {escape(selected_group)}</title>
-  <style>
-    :root {{
-      --body-bg: {dark_theme["body_bg"]};
-      --font: {dark_theme["font"]};
-      --muted: {dark_theme["muted"]};
-      --card-bg: {dark_theme["card_bg"]};
-      --border: {dark_theme["border"]};
-      --table-bg: {dark_theme["table_bg"]};
-      --table-head: {dark_theme["table_head"]};
-      --line: {dark_theme["line"]};
-    }}
-    body.theme-dark {{
-      --body-bg: {dark_theme["body_bg"]};
-      --font: {dark_theme["font"]};
-      --muted: {dark_theme["muted"]};
-      --card-bg: {dark_theme["card_bg"]};
-      --border: {dark_theme["border"]};
-      --table-bg: {dark_theme["table_bg"]};
-      --table-head: {dark_theme["table_head"]};
-      --line: {dark_theme["line"]};
-    }}
-    body.theme-light {{
-      --body-bg: {light_theme["body_bg"]};
-      --font: {light_theme["font"]};
-      --muted: {light_theme["muted"]};
-      --card-bg: {light_theme["card_bg"]};
-      --border: {light_theme["border"]};
-      --table-bg: {light_theme["table_bg"]};
-      --table-head: {light_theme["table_head"]};
-      --line: {light_theme["line"]};
-    }}
-    body {{ background:var(--body-bg); color:var(--font); font-family:Segoe UI, Arial, sans-serif; margin:20px; font-size:{layout_theme["base_font_size"]}; }}
-    .container {{ max-width:{layout_theme["max_width"]}; margin:0 auto; }}
-    h1, h2 {{ margin:0 0 10px 0; }}
-    p {{ color:var(--muted); }}
-    .meta {{ margin-bottom:12px; }}
-    .switch-row {{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }}
-    .switch-label {{ color:var(--muted); font-size:13px; }}
-    .window-switch, .theme-switch {{ display:flex; gap:8px; }}
-    .window-btn, .theme-btn {{ background:var(--card-bg); color:var(--font); border:1px solid var(--border); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px; }}
-    .window-btn.active, .theme-btn.active {{ background:var(--table-head); border-color:var(--line); font-weight:600; }}
-    .metrics {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin:14px 0 18px 0; }}
-    .window-pane {{ width:100%; }}
-    .metric-card {{ background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:12px; }}
-    .metric-label {{ color:var(--muted); font-size:12px; }}
-    .metric-value {{ font-size:30px; margin:8px 0 6px 0; }}
-    .metric-delta {{ color:var(--font); opacity:0.9; font-size:13px; min-height:16px; }}
-    .metric-delta.delta-pos {{ color:#22c55e; font-weight:600; }}
-    .metric-delta.delta-neg {{ color:#ef4444; font-weight:600; }}
-    .metric-delta.delta-neutral {{ color:var(--font); opacity:0.9; }}
-    section {{ margin-bottom:18px; }}
-    .report-table {{ width:100%; border-collapse:collapse; background:var(--table-bg); border:1px solid var(--border); }}
-    .report-table th, .report-table td {{ border:1px solid var(--border); padding:6px 8px; text-align:left; }}
-    .report-table th {{ background:var(--table-head); }}
-    .report-table td.cell-pos {{ background:rgba(34, 197, 94, 0.18); color:var(--font); font-weight:600; }}
-    .report-table td.cell-neg {{ background:rgba(239, 68, 68, 0.18); color:var(--font); font-weight:600; }}
-    .report-table td.cell-neutral {{ background:rgba(148, 163, 184, 0.10); color:var(--font); }}
-    @media (max-width: 1000px) {{
-      .metrics {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }}
-    }}
-    @media (max-width: 520px) {{
-      body {{ margin:10px; }}
-      .metrics {{ grid-template-columns:1fr; }}
-      .window-switch, .theme-switch {{ flex-wrap:wrap; }}
-    }}
-  </style>
-</head>
-<body class="theme-{default_theme_mode}">
-  <div class="container">
-  <h1>{escape(dashboard_title)}</h1>
-  <div class="meta">
-    <p><strong>Group:</strong> {escape(selected_group)}</p>
-    <p><strong>Window:</strong> <span id="window-value">{int(default_window)}d</span></p>
-    <p><strong>Theme:</strong> <span id="theme-value">{default_theme_label}</span></p>
-    <p><strong>Accounts:</strong> {escape(accounts_text)}</p>
-    <p><strong>Generated:</strong> {escape(generated_at)}</p>
-  </div>
-  <div class="switch-row">
-    <span class="switch-label"><strong>Window:</strong></span>
-    <div class="window-switch">{window_buttons}</div>
-  </div>
-  <div class="switch-row">
-    <span class="switch-label"><strong>Theme:</strong></span>
-    <div class="theme-switch">{theme_buttons}</div>
-  </div>
-  {''.join(window_panes)}
-  </div>
-  <script>
-    const exportWindows = [{", ".join(str(int(w)) for w in export_windows)}];
-    const exportThemes = ["dark", "light"];
-    let activeWindow = {int(default_window)};
-    let activeTheme = "{default_theme_mode}";
-    function paneId(windowDays, themeMode) {{
-      return `window-pane-${{windowDays}}-${{themeMode}}`;
-    }}
-    function resizePlotsInPane(windowDays, themeMode) {{
-      const pane = document.getElementById(paneId(windowDays, themeMode));
-      if (!pane || !window.Plotly || !window.Plotly.Plots) return;
-      const plotEls = pane.querySelectorAll(".js-plotly-plot, .plotly-graph-div");
-      plotEls.forEach((el) => {{
-        try {{
-          window.Plotly.Plots.resize(el);
-        }} catch (_err) {{
-          // no-op: keep export HTML resilient if one chart cannot be resized
-        }}
-      }});
-    }}
-    function applyThemeClass(themeMode) {{
-      document.body.classList.toggle("theme-dark", themeMode === "dark");
-      document.body.classList.toggle("theme-light", themeMode === "light");
-    }}
-    function renderState() {{
-      exportWindows.forEach((w) => {{
-        const winBtn = document.getElementById(`window-btn-${{w}}`);
-        if (winBtn) winBtn.classList.toggle("active", Number(w) === Number(activeWindow));
-        exportThemes.forEach((t) => {{
-          const pane = document.getElementById(paneId(w, t));
-          const active = Number(w) === Number(activeWindow) && t === activeTheme;
-          if (pane) pane.style.display = active ? "block" : "none";
-        }});
-      }});
-      exportThemes.forEach((t) => {{
-        const themeBtn = document.getElementById(`theme-btn-${{t}}`);
-        if (themeBtn) themeBtn.classList.toggle("active", t === activeTheme);
-      }});
-      const windowLabel = document.getElementById("window-value");
-      if (windowLabel) windowLabel.textContent = `${{activeWindow}}d`;
-      const themeLabel = document.getElementById("theme-value");
-      if (themeLabel) themeLabel.textContent = activeTheme === "dark" ? "Dark" : "Light";
-      if (window.requestAnimationFrame) {{
-        window.requestAnimationFrame(() => resizePlotsInPane(activeWindow, activeTheme));
-      }} else {{
-        resizePlotsInPane(activeWindow, activeTheme);
-      }}
-      window.setTimeout(() => resizePlotsInPane(activeWindow, activeTheme), 60);
-    }}
-    function setWindow(windowDays) {{
-      activeWindow = Number(windowDays);
-      renderState();
-    }}
-    function setTheme(themeMode) {{
-      activeTheme = themeMode === "dark" ? "dark" : "light";
-      applyThemeClass(activeTheme);
-      renderState();
-    }}
-    applyThemeClass(activeTheme);
-    renderState();
-  </script>
-</body>
-</html>
-"""
-    return html
-
-
-def _figure_to_png_via_subprocess(fig: go.Figure, width: int, height: int, scale: int = 2) -> tuple[bytes | None, str | None]:
-    script = r"""
-import json
-import sys
-import plotly.graph_objects as go
-
-w = int(sys.argv[1])
-h = int(sys.argv[2])
-s = int(sys.argv[3])
-raw = sys.stdin.buffer.read().decode("utf-8")
-fig = go.Figure(json.loads(raw))
-out = fig.to_image(format="png", width=w, height=h, scale=s)
-sys.stdout.buffer.write(out)
-"""
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script, str(int(width)), str(int(height)), str(int(scale))],
-            input=fig.to_json().encode("utf-8"),
-            capture_output=True,
-            check=False,
-            timeout=120,
-        )
-    except Exception as e:
-        return None, str(e)
-    if proc.returncode != 0:
-        err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
-        return None, err or f"subprocess exited with code {proc.returncode}"
-    return bytes(proc.stdout or b""), None
 
 
 def build_dashboard_export_png(
@@ -4416,152 +3615,26 @@ def build_dashboard_export_png(
     export_mode: str,
     window_days: int,
 ) -> tuple[bytes | None, str | None]:
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except Exception:
-        return None, "Picture export requires `Pillow`. Install dependencies and retry."
+    def _build_payload_for_window(window_days_inner: int) -> dict[str, object]:
+        return _build_dashboard_export_payload(
+            selected_accounts=selected_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            show_medals=show_medals,
+            window_days=int(window_days_inner),
+        )
 
-    payload = _build_dashboard_export_payload(
-        selected_accounts=selected_accounts,
-        dash_xp_df=dash_xp_df,
-        dash_medal_df=dash_medal_df,
-        dash_display_medal_df=dash_display_medal_df,
-        goals_df=goals_df,
-        curve_map=curve_map,
-        show_medals=show_medals,
-        window_days=window_days,
+    return build_dashboard_export_png_impl(
+        dashboard_title=dashboard_title,
+        selected_group=selected_group,
+        export_mode=export_mode,
+        window_days=int(window_days),
+        build_payload_for_window=_build_payload_for_window,
+        sort_legend_by_latest_y=sort_legend_by_latest_y,
     )
-    theme = _export_theme(export_mode)
-    chart_items: list[tuple[str, go.Figure | None]] = payload["chart_items"]
-    sections_data: list[tuple[str, pd.DataFrame]] = payload["sections"]
-    metric_cards: list[tuple[str, str, str]] = payload["metric_cards"]
-    accounts_text = str(payload["accounts_text"])
-    generated_at = str(payload["generated_at"])
-
-    width = 900 if str(export_mode).strip().lower() == "smartphone" else 1800
-    pad = 20
-    bg = str(theme["body_bg"])
-    fg = str(theme["font"])
-    card_bg = str(theme["card_bg"])
-    border = str(theme["border"])
-    muted = str(theme["muted"])
-
-    def _load_font(candidates: list[str], size: int) -> "ImageFont.ImageFont":
-        for fp in candidates:
-            try:
-                p = Path(fp)
-                if p.exists():
-                    return ImageFont.truetype(str(p), size=size)
-            except Exception:
-                continue
-        return ImageFont.load_default()
-
-    font_title = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 36)
-    font_section = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 24)
-    font_body = _load_font(["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"], 18)
-    font_mono = _load_font(["C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/cour.ttf"], 16)
-
-    def _line_height(font_obj: "ImageFont.ImageFont") -> int:
-        try:
-            box = font_obj.getbbox("Ag")
-            return max(16, (box[3] - box[1]) + 6)
-        except Exception:
-            return 22
-
-    def text_block(
-        title: str,
-        lines: list[str],
-        title_color: str | None = None,
-        title_font: "ImageFont.ImageFont | None" = None,
-        body_font: "ImageFont.ImageFont | None" = None,
-    ) -> "Image.Image":
-        tcol = title_color or fg
-        tf = title_font or font_section
-        bf = body_font or font_body
-        title_h = _line_height(tf)
-        line_h = _line_height(bf)
-        body_rows = len(lines)
-        block_h = pad * 2 + title_h + (body_rows * line_h if body_rows else 0)
-        img = Image.new("RGB", (width, block_h), card_bg)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([(0, 0), (width - 1, block_h - 1)], outline=border, width=1)
-        draw.text((pad, pad), title, fill=tcol, font=tf)
-        y = pad + title_h
-        for ln in lines:
-            draw.text((pad, y), ln, fill=fg, font=bf)
-            y += line_h
-        return img
-
-    blocks: list["Image.Image"] = []
-    header_lines = [
-        f"Group: {selected_group}",
-        f"Window: {int(window_days)}d",
-        f"Export Mode: {theme['name']}",
-        f"Accounts: {accounts_text}",
-        f"Generated: {generated_at}",
-    ]
-    blocks.append(text_block(dashboard_title, header_lines, title_color=fg, title_font=font_title, body_font=font_body))
-    metric_lines = [f"{lbl}: {val} ({delta})" for (lbl, val, delta) in metric_cards]
-    blocks.append(text_block("Metrics", metric_lines, title_color=muted, title_font=font_section, body_font=font_body))
-
-    for chart_title, fig in chart_items:
-        if fig is None:
-            continue
-        sort_legend_by_latest_y(fig)
-        _style_export_figure(fig, export_mode)
-        try:
-            h = int(fig.layout.height) if getattr(fig.layout, "height", None) else 520
-            png_bytes = fig.to_image(format="png", width=width, height=max(320, h), scale=2)
-        except Exception as e:
-            msg = str(e).strip()
-            if "broadcast_args_to_dicts" in msg or "plotly.io._utils" in msg:
-                png_bytes, sub_err = _figure_to_png_via_subprocess(fig, width=width, height=max(320, h), scale=2)
-                if png_bytes:
-                    pass
-                else:
-                    detail = f" ({sub_err})" if sub_err else ""
-                    return None, (
-                        "Picture export failed due to mixed Plotly/Kaleido runtime. "
-                        f"Restart Streamlit after dependency updates (`python run_server.py`).{detail}"
-                    )
-            if "Chrome" in msg or "chrom" in msg.lower():
-                return None, (
-                    "Picture export needs Chrome for Kaleido v1. "
-                    "Install Chrome and retry."
-                )
-            if msg:
-                return None, f"Picture export failed: {msg}"
-            return None, "Picture export failed while rendering Plotly images."
-        chart_img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-        if chart_img.width != width:
-            new_h = int(chart_img.height * (width / chart_img.width))
-            chart_img = chart_img.resize((width, new_h))
-        blocks.append(chart_img)
-
-    for sec_title, sec_df in sections_data:
-        if sec_df.empty:
-            blocks.append(text_block(sec_title, ["No data."], title_color=muted, title_font=font_section, body_font=font_body))
-            continue
-        formatted = _format_export_df(sec_df)
-        preview_rows = min(len(formatted), 40)
-        table_text = formatted.head(preview_rows).to_string(index=False).splitlines()
-        lines = table_text
-        if len(formatted) > preview_rows:
-            lines += [f"... ({len(formatted) - preview_rows} more rows)"]
-        blocks.append(text_block(sec_title, lines, title_color=muted, title_font=font_section, body_font=font_mono))
-
-    total_h = pad
-    for b in blocks:
-        total_h += b.height + pad
-    canvas = Image.new("RGB", (width + (pad * 2), total_h), bg)
-    y = pad
-    for b in blocks:
-        canvas.paste(b, (pad, y))
-        y += b.height + pad
-
-    out = io.BytesIO()
-    canvas.save(out, format="PNG")
-    return out.getvalue(), None
 
 
 def render_dashboard_export_button(
@@ -4667,424 +3740,28 @@ def render_dashboard_content(
     window_state_key: str,
     show_30d_limited_hint: bool,
 ) -> None:
-    w = int(window_days)
-    w_label = f"{w}d"
-    eligible_col = window_col("eligible", w)
-    eligible_baseline_col = window_col("eligible_baseline", w)
-    window_end_col = window_col("window_end", w)
-    xp_gain_col = window_col("xp_gain", w)
-    xp_per_day_col = window_col("xp_per_day", w)
-    delta_col = window_col("delta_vs_baseline", w)
-    pct_col = window_col("pct_vs_baseline", w)
-
-    dash_latest_xp_df = latest_xp_snapshot(dash_xp_df)
-    metrics_window_df = compute_player_kpis_window(
-        dash_xp_df,
-        window_days=w,
-        baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
-    )
-    dash_recent_gain_df = recent_gain_table_from_metrics(metrics_window_df, window_days=w)
-    total_players = int(metrics_window_df["Spieler"].nunique()) if not metrics_window_df.empty else 0
-    eligible_window = (
-        int(metrics_window_df[eligible_col].fillna(False).astype(bool).sum())
-        if not metrics_window_df.empty and eligible_col in metrics_window_df.columns
-        else 0
-    )
-    eligible_baseline_window = (
-        int(metrics_window_df[eligible_baseline_col].fillna(False).astype(bool).sum())
-        if not metrics_window_df.empty and eligible_baseline_col in metrics_window_df.columns
-        else 0
-    )
-    latest_level_map: dict[str, int] = {}
-    if not dash_latest_xp_df.empty:
-        latest_level_map = (
-            dash_latest_xp_df[["Spieler", "Lvl"]]
-            .dropna(subset=["Spieler", "Lvl"])
-            .drop_duplicates(subset=["Spieler"], keep="last")
-            .set_index("Spieler")["Lvl"]
-            .astype(int)
-            .to_dict()
-        )
-
-    def winner_with_level(player_name: object) -> str:
-        p = str(player_name)
-        lvl = latest_level_map.get(p)
-        if lvl is None:
-            return p
-        return f"{p} (Lvl {int(lvl)})"
-
-    eligible_gain_pool = (
-        metrics_window_df[metrics_window_df[eligible_col] == True].copy()  # noqa: E712
-        if not metrics_window_df.empty and eligible_col in metrics_window_df.columns
-        else pd.DataFrame()
-    )
-    active_kpi_pool = (
-        eligible_gain_pool[pd.to_numeric(eligible_gain_pool[xp_gain_col], errors="coerce") > 0].copy()
-        if not eligible_gain_pool.empty
-        else pd.DataFrame()
-    )
-    active_kpi_count = int(len(active_kpi_pool))
-    eligible_baseline_pool = (
-        metrics_window_df[metrics_window_df[eligible_baseline_col] == True].copy()  # noqa: E712
-        if not metrics_window_df.empty and eligible_baseline_col in metrics_window_df.columns
-        else pd.DataFrame()
-    )
-    baseline_headline_pool = (
-        eligible_baseline_pool[pd.to_numeric(eligible_baseline_pool[xp_gain_col], errors="coerce") > 0].copy()
-        if not eligible_baseline_pool.empty
-        else pd.DataFrame()
+    render_dashboard_content_view(
+        dash_xp_df=dash_xp_df,
+        dash_medal_df=dash_medal_df,
+        dash_additional_df=dash_additional_df,
+        dash_display_medal_df=dash_display_medal_df,
+        goals_df=goals_df,
+        curve_map=curve_map,
+        show_medals=show_medals,
+        window_days=window_days,
+        window_state_key=window_state_key,
+        show_30d_limited_hint=show_30d_limited_hint,
+        account_order=ACCOUNT_ORDER,
+        derived_medal_id=DERIVED_MEDAL_ID,
+        baseline_min_windows_default=BASELINE_MIN_WINDOWS_DEFAULT,
+        window_col_fn=window_col,
+        latest_xp_snapshot_fn=latest_xp_snapshot,
+        render_kpi_card_fn=render_kpi_card,
+        format_kpi_number_fn=format_kpi_number,
+        build_xp_growth_figure_fn=build_xp_growth_figure,
+        render_plotly_chart_fn=render_plotly_chart,
     )
 
-    if window_state_key not in st.session_state:
-        st.session_state[window_state_key] = int(w)
-
-    if show_medals:
-        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1, 0.95])
-        last_snapshot_col = c6
-    else:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 0.95])
-        last_snapshot_col = c7
-    if not dash_latest_xp_df.empty:
-        leader_row = dash_latest_xp_df.sort_values("Total XP", ascending=False).iloc[0]
-        render_kpi_card(
-            c1,
-            "XP Leader",
-            format_kpi_number(leader_row["Total XP"], "XP"),
-            winner=winner_with_level(leader_row["Spieler"]),
-            context=f"Level {int(leader_row['Lvl'])}",
-            help_text="Latest total XP snapshot per player.",
-        )
-    else:
-        render_kpi_card(c1, "XP Leader", "-", context="no data")
-
-    if not active_kpi_pool.empty:
-        gain_leader = active_kpi_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[False, False]).iloc[0]
-        gain_to_date = pd.to_datetime(gain_leader[window_end_col], errors="coerce")
-        render_kpi_card(
-            c2,
-            f"Top XP Gain ({w_label})",
-            format_kpi_number(gain_leader[xp_gain_col], "XP"),
-            winner=winner_with_level(gain_leader["Spieler"]),
-            context=f"{format_kpi_number(gain_leader[xp_per_day_col], 'XP/day')} pace",
-            help_text=(
-                f"{w}-day rolling XP gain (xp_at(now) - xp_at(now-{w}d)).\n"
-                f"Window end: {gain_to_date.strftime('%Y-%m-%d') if pd.notna(gain_to_date) else '-'}"
-            ),
-        )
-    elif not eligible_gain_pool.empty:
-        render_kpi_card(
-            c2,
-            f"Top XP Gain ({w_label})",
-            f"No active players ({w_label})",
-            context=f"all {xp_gain_col} = 0",
-            delta_color="off",
-        )
-    else:
-        render_kpi_card(c2, f"Top XP Gain ({w_label})", "-", context="no data")
-
-    if not active_kpi_pool.empty:
-        gain_trailer = active_kpi_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[True, True]).iloc[0]
-        gain_trailer_to_date = pd.to_datetime(gain_trailer[window_end_col], errors="coerce")
-        render_kpi_card(
-            c3,
-            f"Least XP Gain ({w_label})",
-            format_kpi_number(gain_trailer[xp_gain_col], "XP"),
-            winner=winner_with_level(gain_trailer["Spieler"]),
-            context=f"{format_kpi_number(gain_trailer[xp_per_day_col], 'XP/day')} pace",
-            help_text=(
-                f"{w}-day rolling XP gain (xp_at(now) - xp_at(now-{w}d)).\n"
-                f"Window end: {gain_trailer_to_date.strftime('%Y-%m-%d') if pd.notna(gain_trailer_to_date) else '-'}"
-            ),
-        )
-    elif not eligible_gain_pool.empty:
-        render_kpi_card(
-            c3,
-            f"Least XP Gain ({w_label})",
-            f"No active players ({w_label})",
-            context=f"all {xp_gain_col} = 0",
-            delta_color="off",
-        )
-    else:
-        render_kpi_card(c3, f"Least XP Gain ({w_label})", "-", context="no data")
-
-    if show_medals:
-        platinum_latest = dash_display_medal_df[dash_display_medal_df["medal_id"] == DERIVED_MEDAL_ID].copy()
-        if not platinum_latest.empty:
-            platinum_latest = platinum_latest.sort_values("date").groupby("account", as_index=False).tail(1)
-            team_platinum_total = int(pd.to_numeric(platinum_latest["value"], errors="coerce").fillna(0).sum())
-            breakdown = []
-            for acc in ACCOUNT_ORDER:
-                row = platinum_latest[platinum_latest["account"].astype(str) == acc]
-                if not row.empty:
-                    breakdown.append(f"{acc}:{int(float(row['value'].iloc[0]))}")
-            render_kpi_card(
-                c4,
-                "Team Platinum Total",
-                format_kpi_number(team_platinum_total),
-                context=" | ".join(breakdown) if breakdown else None,
-            )
-        else:
-            render_kpi_card(c4, "Team Platinum Total", "-", context="no data")
-    else:
-        if active_kpi_pool.empty:
-            if not eligible_gain_pool.empty:
-                render_kpi_card(
-                    c4,
-                    f"Fastest {w_label} Pace",
-                    f"No active players ({w_label})",
-                    context=f"all {xp_gain_col} = 0",
-                    delta_color="off",
-                )
-            else:
-                render_kpi_card(c4, f"Fastest {w_label} Pace", "-", context="no data")
-        else:
-            fastest = active_kpi_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
-            as_of = pd.to_datetime(fastest[window_end_col], errors="coerce")
-            render_kpi_card(
-                c4,
-                f"Fastest {w_label} Pace",
-                format_kpi_number(fastest[xp_per_day_col], "XP/day"),
-                winner=winner_with_level(fastest["Spieler"]),
-                context=f"{format_kpi_number(fastest[xp_gain_col], 'XP')} gained in {w_label}",
-                help_text=(
-                    f"{w}-day rolling pace.\n"
-                    f"Window end: {as_of.strftime('%Y-%m-%d') if pd.notna(as_of) else '-'}"
-                ),
-            )
-
-        if eligible_baseline_pool.empty:
-            render_kpi_card(
-                c5,
-                f"Most Improved vs Baseline ({w_label})",
-                "-",
-                context="no baseline-eligible data",
-                help_text=(
-                    f"delta vs baseline where baseline is median of previous rolling {w_label} windows.\n"
-                    f"Requires at least {BASELINE_MIN_WINDOWS_DEFAULT} prior windows."
-                ),
-            )
-            render_kpi_card(
-                c6,
-                f"Most Declined vs Baseline ({w_label})",
-                "-",
-                context="no baseline-eligible data",
-                help_text=(
-                    "Shows a declined winner only if delta vs baseline is negative.\n"
-                    f"Requires at least {BASELINE_MIN_WINDOWS_DEFAULT} prior windows."
-                ),
-            )
-        elif baseline_headline_pool.empty:
-            render_kpi_card(
-                c5,
-                f"Most Improved vs Baseline ({w_label})",
-                "No improvements",
-                context=f"all {xp_gain_col} = 0 for baseline-eligible players",
-                delta_color="off",
-            )
-            render_kpi_card(
-                c6,
-                f"Most Declined vs Baseline ({w_label})",
-                "No decline",
-                context=f"all {xp_gain_col} = 0 for baseline-eligible players",
-                delta_color="off",
-            )
-        else:
-            baseline_as_of = pd.to_datetime(baseline_headline_pool[window_end_col], errors="coerce").max()
-            improved_pool = baseline_headline_pool[baseline_headline_pool[delta_col] > 0].copy()
-            if improved_pool.empty:
-                render_kpi_card(
-                    c5,
-                    f"Most Improved vs Baseline ({w_label})",
-                    "No improvements",
-                    context="all deltas <= 0",
-                    delta_color="off",
-                    help_text=(
-                        f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
-                        f"Window end: {baseline_as_of.strftime('%Y-%m-%d') if pd.notna(baseline_as_of) else '-'}"
-                    ),
-                )
-            else:
-                improved = improved_pool.sort_values(delta_col, ascending=False).iloc[0]
-                improved_delta = float(improved[delta_col])
-                improved_as_of = pd.to_datetime(improved[window_end_col], errors="coerce")
-                render_kpi_card(
-                    c5,
-                    f"Most Improved vs Baseline ({w_label})",
-                    format_kpi_number(improved[xp_per_day_col], "XP/day"),
-                    winner=winner_with_level(improved["Spieler"]),
-                    delta=f"{int(round(improved_delta)):+,} XP/day vs baseline",
-                    help_text=(
-                        f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
-                        f"Window end: {improved_as_of.strftime('%Y-%m-%d') if pd.notna(improved_as_of) else '-'}"
-                    ),
-                )
-
-            declined_pool = baseline_headline_pool[baseline_headline_pool[delta_col] < 0].copy()
-            if declined_pool.empty:
-                render_kpi_card(
-                    c6,
-                    f"Most Declined vs Baseline ({w_label})",
-                    "No decline",
-                    context="all deltas >= 0",
-                    delta_color="off",
-                    help_text=(
-                        f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
-                        f"Window end: {baseline_as_of.strftime('%Y-%m-%d') if pd.notna(baseline_as_of) else '-'}"
-                    ),
-                )
-            else:
-                declined = declined_pool.sort_values(delta_col, ascending=True).iloc[0]
-                declined_delta = float(declined[delta_col])
-                declined_as_of = pd.to_datetime(declined[window_end_col], errors="coerce")
-                render_kpi_card(
-                    c6,
-                    f"Most Declined vs Baseline ({w_label})",
-                    format_kpi_number(declined[xp_per_day_col], "XP/day"),
-                    winner=winner_with_level(declined["Spieler"]),
-                    delta=f"{int(round(declined_delta)):+,} XP/day vs baseline",
-                    help_text=(
-                        f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
-                        f"Window end: {declined_as_of.strftime('%Y-%m-%d') if pd.notna(declined_as_of) else '-'}"
-                    ),
-                )
-
-    if not dash_latest_xp_df.empty:
-        latest_xp_date = pd.to_datetime(dash_latest_xp_df["Date"], errors="coerce").max()
-        if pd.notna(latest_xp_date):
-            days_ago = (pd.Timestamp.today().normalize() - latest_xp_date.normalize()).days
-            render_kpi_card(
-                last_snapshot_col,
-                "Last XP Snapshot",
-                latest_xp_date.strftime("%Y-%m-%d"),
-                delta=f"{int(days_ago)} day(s) ago",
-                help_text="Latest snapshot date used in this dashboard selection.",
-            )
-        else:
-            render_kpi_card(last_snapshot_col, "Last XP Snapshot", "-", context="no data")
-    else:
-        render_kpi_card(last_snapshot_col, "Last XP Snapshot", "-", context="no data")
-
-    st.caption(
-        f"Eligible for {w_label} stats: {eligible_window}/{total_players} | "
-        f"Eligible for baseline comparisons: {eligible_baseline_window}/{total_players} "
-        f"(baseline requires >= {BASELINE_MIN_WINDOWS_DEFAULT} prior {w_label} windows) | "
-        f"Active in {w_label} window ({xp_gain_col} > 0): {active_kpi_count}/{total_players}"
-    )
-    if show_30d_limited_hint:
-        st.caption("30d limited coverage")
-
-    if not dash_latest_xp_df.empty:
-        ranking_df = dash_latest_xp_df.sort_values("Total XP", ascending=False).reset_index(drop=True).copy()
-        ranking_df["rank"] = range(1, len(ranking_df) + 1)
-        leader_xp = float(ranking_df["Total XP"].iloc[0]) if not ranking_df.empty else 0.0
-        ranking_df["gap_to_leader"] = leader_xp - ranking_df["Total XP"]
-        if not metrics_window_df.empty:
-            metric_cols = metrics_window_df[
-                [
-                    "Spieler",
-                    xp_per_day_col,
-                    delta_col,
-                    pct_col,
-                    eligible_col,
-                    eligible_baseline_col,
-                ]
-            ].copy()
-            ranking_df = ranking_df.merge(metric_cols, on="Spieler", how="left")
-            ranking_df.loc[~ranking_df[eligible_col].fillna(False), xp_per_day_col] = pd.NA
-            ranking_df.loc[~ranking_df[eligible_baseline_col].fillna(False), delta_col] = pd.NA
-            ranking_df.loc[~ranking_df[eligible_baseline_col].fillna(False), pct_col] = pd.NA
-        else:
-            ranking_df[xp_per_day_col] = pd.NA
-            ranking_df[delta_col] = pd.NA
-            ranking_df[pct_col] = pd.NA
-
-        fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df)
-        if fig_growth is not None:
-            render_plotly_chart(fig_growth, use_container_width=True)
-
-        d_left, d_right = st.columns([1.05, 1.0])
-        with d_left:
-            st.subheader("Current XP Ranking")
-            xp_per_day_label = f"XP/day ({w_label})"
-            delta_label = f"Delta vs Baseline ({w_label})"
-            pct_label = f"% vs Baseline ({w_label})"
-            ranking_view = ranking_df[
-                [
-                    "rank",
-                    "Spieler",
-                    "Lvl",
-                    "Total XP",
-                    "gap_to_leader",
-                    xp_per_day_col,
-                    delta_col,
-                    pct_col,
-                ]
-            ].copy().rename(
-                columns={
-                    "rank": "Rank",
-                    "gap_to_leader": "Gap to Leader",
-                    xp_per_day_col: xp_per_day_label,
-                    delta_col: delta_label,
-                    pct_col: pct_label,
-                }
-            )
-            ranking_styler = (
-                ranking_view.style.format(
-                    {
-                        "Rank": "{:.0f}",
-                        "Lvl": "{:.0f}",
-                        "Total XP": "{:,.0f}",
-                        "Gap to Leader": "{:,.0f}",
-                        xp_per_day_label: "{:,.0f}",
-                        delta_label: "{:+,.0f}",
-                        pct_label: "{:+.1%}",
-                    },
-                    na_rep="--",
-                )
-                .map(
-                    lambda v: "background-color: rgba(16, 185, 129, 0.20);"
-                    if pd.notna(v) and float(v) > 0
-                    else ("background-color: rgba(239, 68, 68, 0.20);" if pd.notna(v) and float(v) < 0 else ""),
-                    subset=[delta_label, pct_label],
-                )
-            )
-            with st.container(key="pogo_ranking_table"):
-                st.dataframe(
-                    ranking_styler,
-                    use_container_width=True,
-                    hide_index=True,
-                    height=380,
-                )
-        with d_right:
-            st.subheader(f"XP Gain (Last {w} Days)")
-            if dash_recent_gain_df.empty:
-                st.info(f"Not enough history yet for {w}-day gain view.")
-            else:
-                gain_top = dash_recent_gain_df.sort_values("xp_gain", ascending=False).head(10).copy()
-                fig_gain = px.bar(
-                    gain_top.sort_values("xp_gain", ascending=True),
-                    x="xp_gain",
-                    y="Spieler",
-                    orientation="h",
-                    title=f"Top XP Gain ({w_label})",
-                    labels={"xp_gain": "XP Gain", "Spieler": "Account"},
-                )
-                fig_gain.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
-                render_plotly_chart(fig_gain, use_container_width=True)
-                gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
-                    columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
-                )
-                gain_styler = gain_view.style.format(
-                    {"XP Gain": "{:,.0f}", "XP/Day": "{:,.0f}"},
-                    na_rep="--",
-                )
-                with st.container(key="pogo_ranking_table_gain"):
-                    st.dataframe(
-                        gain_styler,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=210,
-                    )
 
 st.set_page_config(page_title="PoGo Local Dashboard", layout="wide")
 inject_responsive_styles()
@@ -5095,7 +3772,11 @@ curve_map = load_curve_map(total_xp_curve_path())
 xp_df = load_xp_history(xp_history_path(), curve_map)
 additional_activity_df = load_additional_activity(additional_activity_path())
 groups = parse_groups(player_groups_path())
-medal_df = load_medal_snapshots(medal_snapshots_path())
+medal_df = load_medal_snapshots(
+    medal_snapshots_path(),
+    account_order=ACCOUNT_ORDER,
+    excluded_manual_medal_ids=EXCLUDED_MANUAL_MEDAL_IDS,
+)
 goals_df = load_medal_goals(medals_config_path())
 ensure_medal_explanations_file(medal_explanations_path(), goals_df)
 medal_explanations_map = load_medal_explanations(medal_explanations_path())
@@ -6539,3 +5220,10 @@ if page == "Generated Files":
         else:
             selected_png = st.selectbox("Image", [p.name for p in pngs])
             st.image(str(folder / selected_png), caption=selected_png, use_container_width=True)
+
+
+
+
+
+
+
