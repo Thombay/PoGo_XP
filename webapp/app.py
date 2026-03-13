@@ -1482,25 +1482,53 @@ def _render_xp_explorer_section_impl(
         key=f"{key_prefix}_common_interval",
     )
 
-    df = xp_subset_df[xp_subset_df["Spieler"].isin(selected_players)].copy()
-    if common_interval_only:
-        df = restrict_to_common_interval(df)
-    if df.empty:
+    df_source = xp_subset_df[xp_subset_df["Spieler"].isin(selected_players)].copy()
+    if df_source.empty:
         st.warning("No rows for selected filters.")
         return
 
-    min_date = df["Date"].min().date()
-    max_date = df["Date"].max().date()
+    min_date = df_source["Date"].min().date()
+    max_date = df_source["Date"].max().date()
     d_start, d_end = select_date_range(
         label="Date range",
         min_date=min_date,
         max_date=max_date,
         key=f"{key_prefix}_date_range",
     )
-    df = df[(df["Date"] >= pd.Timestamp(d_start)) & (df["Date"] <= pd.Timestamp(d_end))].copy()
-    if df.empty:
+    df_range = df_source[(df_source["Date"] >= pd.Timestamp(d_start)) & (df_source["Date"] <= pd.Timestamp(d_end))].copy()
+    if df_range.empty:
         st.warning("No rows in selected date range.")
         return
+
+    df = restrict_to_common_interval(df_range) if common_interval_only else df_range.copy()
+    if df.empty:
+        st.warning("No rows in selected date range after interval filtering.")
+        return
+
+    # Recalculate trend projection defaults whenever the date range/player scope changes.
+    trend_scope_sig = "|".join(
+        [
+            pd.Timestamp(d_start).date().isoformat(),
+            pd.Timestamp(d_end).date().isoformat(),
+            "common" if bool(common_interval_only) else "full",
+            ",".join(sorted([str(p).strip() for p in selected_players if str(p).strip()])),
+        ]
+    )
+    trend_scope_key = f"{key_prefix}_trend_scope_sig"
+    prior_scope_sig = str(st.session_state.get(trend_scope_key, ""))
+    if trend_scope_sig != prior_scope_sig:
+        for k in [f"{key_prefix}_total_xp_visibility_years", f"{key_prefix}_total_xp_visibility_months"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.session_state[trend_scope_key] = trend_scope_sig
+
+    # Trendline source uses selected date range before common-interval clipping.
+    # Pairwise fitting (player vs selected leader) keeps results stable across groups.
+    trend_source_df = df_range.copy()
+    trend_source_df["Date"] = pd.to_datetime(trend_source_df["Date"], errors="coerce")
+    trend_source_df["Total XP"] = pd.to_numeric(trend_source_df["Total XP"], errors="coerce")
+    trend_source_df["Spieler"] = trend_source_df["Spieler"].astype(str).str.strip()
+    trend_source_df = trend_source_df.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
 
     gain_df = build_xp_gain_over_time_df(df)
     pace_df = build_pace_df(df)
@@ -1638,16 +1666,27 @@ def _render_xp_explorer_section_impl(
             color = getattr(getattr(tr, "line", None), "color", None)
             color_by_player[name] = color
 
-        leader_series = df[df["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
+        leader_series_all = trend_source_df[trend_source_df["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
         longest_trend_end: pd.Timestamp | None = None
         fallback_players: list[tuple[str, pd.DataFrame, str | None]] = []
-        for player, grp in df.groupby("Spieler", sort=True):
+        for player, grp in trend_source_df.groupby("Spieler", sort=True):
             player_name = str(player)
             if player_name == str(selected_leader):
                 continue
+            # Pairwise fit window: independent from unrelated players in the current group.
+            # This keeps the same player-vs-leader trendline stable across groups.
+            player_start = pd.to_datetime(grp["Date"].min(), errors="coerce")
+            leader_start = pd.to_datetime(leader_series_all["Date"].min(), errors="coerce")
+            pair_fit_start = pd.Timestamp(TREND_MIN_DATE)
+            if pd.notna(player_start):
+                pair_fit_start = max(pair_fit_start, pd.Timestamp(player_start))
+            if pd.notna(leader_start):
+                pair_fit_start = max(pair_fit_start, pd.Timestamp(leader_start))
+            player_fit_series = grp[grp["Date"] >= pair_fit_start][["Date", "Total XP"]].copy()
+            leader_fit_series = leader_series_all[leader_series_all["Date"] >= pair_fit_start][["Date", "Total XP"]].copy()
             trend_trace, trend_reason = build_xp_catchup_projection_trace(
-                grp[["Date", "Total XP"]],
-                leader_series,
+                player_fit_series,
+                leader_fit_series,
                 player_name,
                 str(selected_leader),
                 color_by_player.get(player_name),
@@ -1682,7 +1721,7 @@ def _render_xp_explorer_section_impl(
                     if longest_trend_end is None or trend_end_ts > longest_trend_end:
                         longest_trend_end = trend_end_ts
             else:
-                fallback_players.append((player_name, grp[["Date", "Total XP"]].copy(), trend_reason))
+                fallback_players.append((player_name, player_fit_series.copy(), trend_reason))
 
         auto_trend_end = longest_trend_end if longest_trend_end is not None else auto_trend_end
         for player_name, player_series, catchup_reason in fallback_players:
@@ -1698,8 +1737,9 @@ def _render_xp_explorer_section_impl(
                 reason = fallback_reason or catchup_reason or "not possible (trendline unavailable)"
                 trend_failures.append(f"{player_name}: {reason}")
 
+        leader_trend_base = leader_series_all[leader_series_all["Date"] >= pd.Timestamp(TREND_MIN_DATE)].copy()
         leader_trend_trace, leader_trend_reason = build_selected_leader_trend_trace(
-            leader_series,
+            leader_trend_base if len(selected_players) > 1 else leader_series_all,
             str(selected_leader),
             color_by_player.get(str(selected_leader)),
             horizon_days=365,
@@ -1742,10 +1782,13 @@ def _render_xp_explorer_section_impl(
     else:
         visibility_end = pd.Timestamp(latest_total_date)
 
-    fig_total.update_xaxes(range=[pd.Timestamp(d_start), pd.Timestamp(visibility_end)])
+    visible_start = pd.to_datetime(df["Date"].min(), errors="coerce")
+    if pd.isna(visible_start):
+        visible_start = pd.Timestamp(d_start)
+    fig_total.update_xaxes(range=[pd.Timestamp(visible_start), pd.Timestamp(visibility_end)])
     y_range = autoscale_y_for_visible_x(
         fig_total,
-        pd.Timestamp(d_start),
+        pd.Timestamp(visible_start),
         pd.Timestamp(visibility_end),
         y_floor=0.0,
         padding_ratio=0.06,
@@ -1759,6 +1802,11 @@ def _render_xp_explorer_section_impl(
     render_plotly_chart(fig_total, use_container_width=True, sort_legend=False)
     if show_catchup_trends and trend_failures:
         st.caption("Catch-up trendline status: " + " | ".join(trend_failures))
+    if show_catchup_trends and len(selected_players) > 1:
+        st.caption(
+            "Trendline fit window: pairwise per player vs selected leader "
+            f"(start = max(player start, leader start, {TREND_MIN_DATE_LABEL}))."
+        )
 
     if not show_personal_activity:
         if show_global_activity_trends:
