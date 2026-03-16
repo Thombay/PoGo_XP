@@ -61,6 +61,8 @@ def build_cumulative_gain_df(
     group_col: str,
     value_col: str,
     gain_col: str,
+    anchor_date: pd.Timestamp | None = None,
+    include_anchor_row: bool = False,
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -77,8 +79,45 @@ def build_cumulative_gain_df(
         return out
 
     out = out.sort_values([group_col, date_col]).reset_index(drop=True)
-    out[gain_col] = out[value_col] - out.groupby(group_col)[value_col].transform("first")
-    return out
+    if anchor_date is None:
+        out[gain_col] = out[value_col] - out.groupby(group_col)[value_col].transform("first")
+        return out
+
+    anchor_ts = pd.to_datetime(anchor_date, errors="coerce")
+    if pd.isna(anchor_ts):
+        out[gain_col] = out[value_col] - out.groupby(group_col)[value_col].transform("first")
+        return out
+
+    frames: list[pd.DataFrame] = []
+    anchor_rows: list[dict[str, object]] = []
+    for account, grp in out.groupby(group_col, sort=False):
+        g = grp.sort_values(date_col).copy()
+        before = g[g[date_col] <= anchor_ts]
+        after = g[g[date_col] >= anchor_ts]
+        if before.empty and after.empty:
+            continue
+        baseline_row = before.iloc[-1] if not before.empty else after.iloc[0]
+        baseline_value = float(baseline_row[value_col])
+        visible = g[g[date_col] >= anchor_ts].copy()
+        if visible.empty:
+            continue
+        visible[gain_col] = pd.to_numeric(visible[value_col], errors="coerce") - baseline_value
+        frames.append(visible)
+        if include_anchor_row and not bool((visible[date_col] == anchor_ts).any()):
+            anchor_payload = {col: baseline_row[col] for col in g.columns if col in baseline_row.index}
+            anchor_payload[date_col] = anchor_ts
+            anchor_payload[value_col] = baseline_value
+            anchor_payload[gain_col] = 0.0
+            anchor_payload[group_col] = account
+            anchor_rows.append(anchor_payload)
+
+    if not frames and not anchor_rows:
+        return out.iloc[0:0].copy()
+    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=list(out.columns) + [gain_col])
+    if anchor_rows:
+        result = pd.concat([result, pd.DataFrame(anchor_rows)], ignore_index=True)
+    result = result.sort_values([group_col, date_col, gain_col]).reset_index(drop=True)
+    return result
 
 
 def xp_at(player_df: pd.DataFrame, target_date: pd.Timestamp) -> XPAtResult:

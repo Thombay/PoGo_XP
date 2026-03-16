@@ -22,6 +22,7 @@ def render_dashboard_content_view(
     window_state_key: str,
     show_30d_limited_hint: bool,
     *,
+    account_color_map: dict[str, str],
     account_order: Sequence[str],
     derived_medal_id: str,
     baseline_min_windows_default: int,
@@ -29,7 +30,10 @@ def render_dashboard_content_view(
     latest_xp_snapshot_fn: Callable[[pd.DataFrame], pd.DataFrame],
     render_kpi_card_fn: Callable[..., Any],
     format_kpi_number_fn: Callable[[object, str], str],
-    build_xp_growth_figure_fn: Callable[[dict[int, int], pd.DataFrame], Any],
+    build_xp_growth_figure_fn: Callable[[dict[int, int], pd.DataFrame, dict[str, str] | None], Any],
+    account_cell_style_fn: Callable[[object, dict[str, str]], str],
+    render_account_color_legend_fn: Callable[[Sequence[object], dict[str, str]], Any],
+    apply_account_colors_fn: Callable[[Any, dict[str, str]], Any],
     render_plotly_chart_fn: Callable[..., Any],
 ) -> None:
     w = int(window_days)
@@ -116,6 +120,7 @@ def render_dashboard_content_view(
             "XP Leader",
             format_kpi_number_fn(leader_row["Total XP"], "XP"),
             winner=winner_with_level(leader_row["Spieler"]),
+            winner_color=account_color_map.get(str(leader_row["Spieler"]).strip()),
             context=f"Level {int(leader_row['Lvl'])}",
             help_text="Latest total XP snapshot per player.",
         )
@@ -130,6 +135,7 @@ def render_dashboard_content_view(
             f"Top XP Gain ({w_label})",
             format_kpi_number_fn(gain_leader[xp_gain_col], "XP"),
             winner=winner_with_level(gain_leader["Spieler"]),
+            winner_color=account_color_map.get(str(gain_leader["Spieler"]).strip()),
             context=f"{format_kpi_number_fn(gain_leader[xp_per_day_col], 'XP/day')} pace",
             help_text=(
                 f"{w}-day rolling XP gain (xp_at(now) - xp_at(now-{w}d)).\n"
@@ -155,6 +161,7 @@ def render_dashboard_content_view(
             f"Least XP Gain ({w_label})",
             format_kpi_number_fn(gain_trailer[xp_gain_col], "XP"),
             winner=winner_with_level(gain_trailer["Spieler"]),
+            winner_color=account_color_map.get(str(gain_trailer["Spieler"]).strip()),
             context=f"{format_kpi_number_fn(gain_trailer[xp_per_day_col], 'XP/day')} pace",
             help_text=(
                 f"{w}-day rolling XP gain (xp_at(now) - xp_at(now-{w}d)).\n"
@@ -210,6 +217,7 @@ def render_dashboard_content_view(
                 f"Fastest {w_label} Pace",
                 format_kpi_number_fn(fastest[xp_per_day_col], "XP/day"),
                 winner=winner_with_level(fastest["Spieler"]),
+                winner_color=account_color_map.get(str(fastest["Spieler"]).strip()),
                 context=f"{format_kpi_number_fn(fastest[xp_gain_col], 'XP')} gained in {w_label}",
                 help_text=(
                     f"{w}-day rolling pace.\n"
@@ -277,6 +285,7 @@ def render_dashboard_content_view(
                     f"Most Improved vs Baseline ({w_label})",
                     format_kpi_number_fn(improved[xp_per_day_col], "XP/day"),
                     winner=winner_with_level(improved["Spieler"]),
+                    winner_color=account_color_map.get(str(improved["Spieler"]).strip()),
                     delta=f"{int(round(improved_delta)):+,} XP/day vs baseline",
                     help_text=(
                         f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
@@ -306,6 +315,7 @@ def render_dashboard_content_view(
                     f"Most Declined vs Baseline ({w_label})",
                     format_kpi_number_fn(declined[xp_per_day_col], "XP/day"),
                     winner=winner_with_level(declined["Spieler"]),
+                    winner_color=account_color_map.get(str(declined["Spieler"]).strip()),
                     delta=f"{int(round(declined_delta)):+,} XP/day vs baseline",
                     help_text=(
                         f"baseline = median of previous rolling {w_label} windows (excluding current).\n"
@@ -363,7 +373,9 @@ def render_dashboard_content_view(
             ranking_df[delta_col] = pd.NA
             ranking_df[pct_col] = pd.NA
 
-        fig_growth = build_xp_growth_figure_fn(curve_map, dash_latest_xp_df)
+        render_account_color_legend_fn(ranking_df["Spieler"].tolist(), account_color_map)
+
+        fig_growth = build_xp_growth_figure_fn(curve_map, dash_latest_xp_df, account_color_map)
         if fig_growth is not None:
             render_plotly_chart_fn(fig_growth, use_container_width=True)
 
@@ -408,6 +420,10 @@ def render_dashboard_content_view(
                     na_rep="--",
                 )
                 .map(
+                    lambda v: account_cell_style_fn(v, account_color_map),
+                    subset=["Spieler"],
+                )
+                .map(
                     lambda v: "background-color: rgba(16, 185, 129, 0.20);"
                     if pd.notna(v) and float(v) > 0
                     else ("background-color: rgba(239, 68, 68, 0.20);" if pd.notna(v) and float(v) < 0 else ""),
@@ -432,20 +448,24 @@ def render_dashboard_content_view(
                     x="xp_gain",
                     y="Spieler",
                     orientation="h",
+                    color="Spieler",
+                    color_discrete_map=account_color_map,
                     title=f"Top XP Gain ({w_label})",
                     labels={"xp_gain": "XP Gain", "Spieler": "Account"},
                 )
+                fig_gain.update_layout(showlegend=False)
                 fig_gain.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
+                fig_gain.update_yaxes(autorange="reversed")
                 render_plotly_chart_fn(fig_gain, use_container_width=True)
                 gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
                     columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
                 )
-                gain_display = gain_view.copy()
-                gain_display["XP Gain"] = pd.to_numeric(gain_display["XP Gain"], errors="coerce").map(
-                    lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):,}"
-                )
-                gain_display["XP/Day"] = pd.to_numeric(gain_display["XP/Day"], errors="coerce").map(
-                    lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):,}"
+                gain_display = gain_view.style.format(
+                    {"XP Gain": "{:,.0f}", "XP/Day": "{:,.0f}"},
+                    na_rep="--",
+                ).map(
+                    lambda v: account_cell_style_fn(v, account_color_map),
+                    subset=["Spieler"],
                 )
                 with st.container(key="pogo_ranking_table_gain"):
                     st.dataframe(

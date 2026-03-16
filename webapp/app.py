@@ -103,6 +103,28 @@ SPECIAL_PLATINUM_MEDALS = [
 ]
 UI_PREFERENCES_PATH = config_dir() / "ui_preferences.json"
 UI_PREF_DASHBOARD_WINDOW_DAYS = "dashboard_window_days"
+ACCOUNT_COLORWAY = [
+    "#4FA3FF",
+    "#FF9F1C",
+    "#2EC4B6",
+    "#E71D36",
+    "#9B5DE5",
+    "#00BBF9",
+    "#FFBF69",
+    "#80ED99",
+    "#F15BB5",
+    "#AACC00",
+    "#43AA8B",
+    "#577590",
+    "#F3722C",
+    "#277DA1",
+    "#90BE6D",
+    "#F8961E",
+    "#F94144",
+    "#00F5D4",
+    "#C77DFF",
+    "#FFD166",
+]
 
 
 def ensure_account_in_xp_order(account_name: str, known_accounts: list[str] | None = None) -> None:
@@ -1490,6 +1512,7 @@ def _render_xp_explorer_section_impl(
     if df_source.empty:
         st.warning("No rows for selected filters.")
         return
+    account_color_map = build_account_color_map(selected_players, df_source)
 
     min_date = df_source["Date"].min().date()
     max_date = df_source["Date"].max().date()
@@ -1546,6 +1569,7 @@ def _render_xp_explorer_section_impl(
             x="Date",
             y="XP Gain",
             color="Spieler",
+            color_discrete_map=account_color_map,
             markers=True,
             title="XP Gain Over Time",
         )
@@ -1559,6 +1583,7 @@ def _render_xp_explorer_section_impl(
                 x="Date",
                 y="XP/day",
                 color="Spieler",
+                color_discrete_map=account_color_map,
                 markers=True,
                 title="Interval Pace (XP/day)",
             )
@@ -1604,6 +1629,7 @@ def _render_xp_explorer_section_impl(
                 x="Date",
                 y="Gap Change",
                 color="Spieler",
+                color_discrete_map=account_color_map,
                 markers=True,
                 title="Gap Change Since First Snapshot",
             )
@@ -1624,6 +1650,8 @@ def _render_xp_explorer_section_impl(
                     mode="lines+markers",
                     line_shape="hv",
                     name=player,
+                    line=dict(color=account_color_map.get(str(player))),
+                    marker=dict(color=account_color_map.get(str(player))),
                 )
             )
         fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
@@ -1660,6 +1688,7 @@ def _render_xp_explorer_section_impl(
         x="Date",
         y="Total XP",
         color="Spieler",
+        color_discrete_map=account_color_map,
         markers=True,
         title="Total XP Over Time",
     )
@@ -1669,11 +1698,8 @@ def _render_xp_explorer_section_impl(
         latest_total_date = pd.Timestamp(d_end)
     auto_trend_end = pd.Timestamp(latest_total_date) + pd.DateOffset(years=1)
     if show_catchup_trends:
-        color_by_player: dict[str, str | None] = {}
-        for tr in fig_total.data:
-            name = str(getattr(tr, "name", ""))
-            color = getattr(getattr(tr, "line", None), "color", None)
-            color_by_player[name] = color
+        apply_account_colors(fig_total, account_color_map)
+        color_by_player: dict[str, str | None] = {str(acc): account_color_map.get(str(acc)) for acc in selected_players}
 
         leader_series_all = trend_source_df[trend_source_df["Spieler"] == selected_leader][["Date", "Total XP"]].copy()
         longest_trend_end: pd.Timestamp | None = None
@@ -1807,6 +1833,7 @@ def _render_xp_explorer_section_impl(
     else:
         fig_total.update_yaxes(tickformat=",.0f")
     apply_total_xp_legend_order(fig_total, df)
+    apply_account_colors(fig_total, account_color_map)
 
     render_plotly_chart(fig_total, use_container_width=True, sort_legend=False)
     if show_catchup_trends and trend_failures:
@@ -1913,6 +1940,7 @@ def _render_xp_explorer_section_impl(
                 return value_txt, winner_txt, context_txt
 
             st.caption(f"Activity Snapshot ({w_label})")
+            render_account_color_legend(activity_accounts, account_color_map)
             a1, a2, a3 = st.columns(3)
             b_value, b_winner, b_context = _window_rate_kpi(battles_series, "")
             c_value, c_winner, c_context = _window_rate_kpi(caught_series, "")
@@ -1922,6 +1950,7 @@ def _render_xp_explorer_section_impl(
                 "Battles/day",
                 b_value,
                 winner=b_winner,
+                winner_color=account_color_map.get(str(b_winner).strip()) if b_winner else None,
                 context=b_context,
                 help_text="Latest battles/day from Battles Won cumulative snapshots (additional activity data).",
             )
@@ -1930,6 +1959,7 @@ def _render_xp_explorer_section_impl(
                 "Pokemon Caught/day",
                 c_value,
                 winner=c_winner,
+                winner_color=account_color_map.get(str(c_winner).strip()) if c_winner else None,
                 context=c_context,
                 help_text="Latest caught/day from Collector medal deltas.",
             )
@@ -1938,6 +1968,7 @@ def _render_xp_explorer_section_impl(
                 "Km/day",
                 k_value,
                 winner=k_winner,
+                winner_color=account_color_map.get(str(k_winner).strip()) if k_winner else None,
                 context=k_context,
                 help_text="Latest km/day from Jogger medal deltas.",
             )
@@ -1999,6 +2030,7 @@ def _render_xp_explorer_section_impl(
                         "Leader",
                         _fmt_total(leader_row["value"], unit),
                         winner=str(leader_row["account"]),
+                        winner_color=account_color_map.get(str(leader_row["account"]).strip()),
                         context=f"as of {leader_date_txt}",
                     )
                 else:
@@ -2035,6 +2067,7 @@ def _render_xp_explorer_section_impl(
                         f"Top Gain ({w_label})",
                         _fmt_gain(top_gain[xp_gain_col], unit),
                         winner=str(top_gain["Spieler"]),
+                        winner_color=account_color_map.get(str(top_gain["Spieler"]).strip()),
                         context=_fmt_rate(top_gain[xp_per_day_col], unit),
                     )
                     render_kpi_card(
@@ -2042,6 +2075,7 @@ def _render_xp_explorer_section_impl(
                         f"Least Gain ({w_label})",
                         _fmt_gain(least_gain[xp_gain_col], unit),
                         winner=str(least_gain["Spieler"]),
+                        winner_color=account_color_map.get(str(least_gain["Spieler"]).strip()),
                         context=_fmt_rate(least_gain[xp_per_day_col], unit),
                     )
                     render_kpi_card(
@@ -2049,6 +2083,7 @@ def _render_xp_explorer_section_impl(
                         f"Fastest {w_label} Pace",
                         _fmt_rate(best[xp_per_day_col], unit),
                         winner=str(best["Spieler"]),
+                        winner_color=account_color_map.get(str(best["Spieler"]).strip()),
                         context=_fmt_gain(best[xp_gain_col], unit),
                     )
                 elif not eligible_pool.empty:
@@ -2071,6 +2106,7 @@ def _render_xp_explorer_section_impl(
                             f"Most Improved ({w_label})",
                             _fmt_rate(improved[xp_per_day_col], unit),
                             winner=str(improved["Spieler"]),
+                            winner_color=account_color_map.get(str(improved["Spieler"]).strip()),
                             delta=_fmt_delta_rate(improved[delta_col], unit),
                         )
                     else:
@@ -2083,6 +2119,7 @@ def _render_xp_explorer_section_impl(
                             f"Most Declined ({w_label})",
                             _fmt_rate(declined[xp_per_day_col], unit),
                             winner=str(declined["Spieler"]),
+                            winner_color=account_color_map.get(str(declined["Spieler"]).strip()),
                             delta=_fmt_delta_rate(declined[delta_col], unit),
                         )
                     else:
@@ -2112,15 +2149,39 @@ def _render_xp_explorer_section_impl(
                 return d.sort_values(["account", "date"]).reset_index(drop=True)
 
             def _build_activity_gain_series(series_df: pd.DataFrame) -> pd.DataFrame:
-                clipped = _clip_series_to_selected_range(series_df)
-                if clipped.empty:
-                    return clipped
+                visible_start = pd.to_datetime(df["Date"].min(), errors="coerce")
+                visible_end = pd.to_datetime(df["Date"].max(), errors="coerce")
+                if pd.isna(visible_start):
+                    visible_start = pd.Timestamp(d_start)
+                if pd.isna(visible_end):
+                    visible_end = pd.Timestamp(d_end)
+                base = series_df.copy()
+                base["date"] = pd.to_datetime(base["date"], errors="coerce")
+                base = base.dropna(subset=["date"]).copy()
+                if base.empty:
+                    return base
+                base = base[base["date"] <= pd.Timestamp(visible_end)].copy()
+                if base.empty:
+                    return base
+                first_dates = (
+                    base.sort_values(["account", "date"])
+                    .groupby("account", as_index=False)["date"]
+                    .min()
+                )
+                if first_dates.empty:
+                    return base.iloc[0:0].copy()
+                overlap_start = pd.to_datetime(first_dates["date"].max(), errors="coerce")
+                if pd.isna(overlap_start):
+                    overlap_start = pd.Timestamp(visible_start)
+                anchor_start = max(pd.Timestamp(visible_start), pd.Timestamp(overlap_start))
                 return build_cumulative_gain_df(
-                    clipped,
+                    base,
                     date_col="date",
                     group_col="account",
                     value_col="value",
                     gain_col="gain_value",
+                    anchor_date=pd.Timestamp(anchor_start),
+                    include_anchor_row=True,
                 )
 
             battles_plot = _build_activity_gain_series(battles_series)
@@ -2138,6 +2199,7 @@ def _render_xp_explorer_section_impl(
                         x="date",
                         y="gain_value",
                         color="account",
+                        color_discrete_map=account_color_map,
                         markers=True,
                         title="Battles Won Gained Over Time",
                     )
@@ -2152,6 +2214,7 @@ def _render_xp_explorer_section_impl(
                         x="date",
                         y="gain_value",
                         color="account",
+                        color_discrete_map=account_color_map,
                         markers=True,
                         title="Pokemon Caught Gained Over Time",
                     )
@@ -2166,6 +2229,7 @@ def _render_xp_explorer_section_impl(
                     x="date",
                     y="gain_value",
                     color="account",
+                    color_discrete_map=account_color_map,
                     markers=True,
                     title="Distance Walked Gained Over Time",
                 )
@@ -2187,6 +2251,7 @@ def _render_xp_explorer_section_impl(
                         x="date",
                         y="value",
                         color="account",
+                        color_discrete_map=account_color_map,
                         markers=True,
                         title="Battles Won Total Over Time",
                     )
@@ -2201,6 +2266,7 @@ def _render_xp_explorer_section_impl(
                         x="date",
                         y="value",
                         color="account",
+                        color_discrete_map=account_color_map,
                         markers=True,
                         title="Pokemon Caught Total Over Time",
                     )
@@ -2215,6 +2281,7 @@ def _render_xp_explorer_section_impl(
                     x="date",
                     y="value",
                     color="account",
+                    color_discrete_map=account_color_map,
                     markers=True,
                     title="Distance Walked Total Over Time",
                 )
@@ -2241,6 +2308,7 @@ def _render_xp_explorer_section_impl(
 
     core_accounts = [a for a in ACCOUNT_ORDER if a in set(activity_accounts)]
     display_accounts = core_accounts if core_accounts else activity_accounts
+    personal_activity_color_map = build_account_color_map(display_accounts or activity_accounts, xp_subset_df)
 
     def _latest_per_core_txt(df_rates: pd.DataFrame, value_col: str = "per_day", fmt: str = "{:,.2f}") -> str:
         if not display_accounts:
@@ -2275,6 +2343,7 @@ def _render_xp_explorer_section_impl(
         return " | ".join(per_acc)
 
     k1, k2, k3, k4, k5 = st.columns(5)
+    render_account_color_legend(display_accounts or activity_accounts, personal_activity_color_map)
     render_kpi_card(k1, "Pokemon Caught/day", _latest_per_core_txt(caught_df), help_text="Latest interval per core account from Collector medal deltas.")
     render_kpi_card(k2, "Raids/day", _latest_per_core_txt(raids_df), help_text="Latest interval per core account from Champion + Battle Legend deltas.")
     render_kpi_card(k3, "PokeStops/day", _latest_per_core_txt(stops_df), help_text="Latest interval per core account from Backpacker medal deltas.")
@@ -2291,6 +2360,7 @@ def _render_xp_explorer_section_impl(
                 x="period_end",
                 y="per_day",
                 color="account",
+                color_discrete_map=personal_activity_color_map,
                 markers=True,
                 title="Pokemon Caught per Day (Intervals)",
             )
@@ -2305,6 +2375,7 @@ def _render_xp_explorer_section_impl(
                 x="period_end",
                 y="per_day",
                 color="account",
+                color_discrete_map=personal_activity_color_map,
                 markers=True,
                 title="Raids per Day (Intervals)",
             )
@@ -2321,6 +2392,7 @@ def _render_xp_explorer_section_impl(
                 x="period_end",
                 y="per_day",
                 color="account",
+                color_discrete_map=personal_activity_color_map,
                 markers=True,
                 title="PokeStops Spun per Day (Intervals)",
             )
@@ -2335,6 +2407,7 @@ def _render_xp_explorer_section_impl(
                 x="period_end",
                 y="per_day",
                 color="account",
+                color_discrete_map=personal_activity_color_map,
                 markers=True,
                 title="KM per Day (Intervals)",
             )
@@ -2349,6 +2422,7 @@ def _render_xp_explorer_section_impl(
             x="period_end",
             y="interval_days",
             color="account",
+            color_discrete_map=personal_activity_color_map,
             title="Intervals (Days Between Medal Snapshots)",
             barmode="group",
         )
@@ -2852,6 +2926,118 @@ def parse_window_days(value: object, fallback: int = WINDOW_DAYS_DEFAULT) -> int
         return int(fallback)
 
 
+def _hex_to_rgba(color: str, alpha: float) -> str:
+    text = str(color).strip().lstrip("#")
+    if len(text) != 6:
+        return f"rgba(148, 163, 184, {float(alpha)})"
+    try:
+        r = int(text[0:2], 16)
+        g = int(text[2:4], 16)
+        b = int(text[4:6], 16)
+    except Exception:
+        return f"rgba(148, 163, 184, {float(alpha)})"
+    return f"rgba({r}, {g}, {b}, {float(alpha)})"
+
+
+def _unique_accounts(accounts: Sequence[object]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in accounts:
+        acc = str(raw).strip()
+        if not acc or acc in seen:
+            continue
+        seen.add(acc)
+        out.append(acc)
+    return out
+
+
+def build_account_color_map(accounts: Sequence[object], xp_df: pd.DataFrame | None = None) -> dict[str, str]:
+    ordered_accounts = _unique_accounts(accounts)
+    if xp_df is not None and not xp_df.empty and {"Spieler", "Date", "Total XP"}.issubset(xp_df.columns):
+        ranked = xp_df[["Spieler", "Date", "Total XP"]].copy()
+        ranked["Spieler"] = ranked["Spieler"].astype(str).str.strip()
+        ranked["Date"] = pd.to_datetime(ranked["Date"], errors="coerce")
+        ranked["Total XP"] = pd.to_numeric(ranked["Total XP"], errors="coerce")
+        ranked = ranked.dropna(subset=["Spieler", "Date", "Total XP"]).copy()
+        ranked = ranked[ranked["Spieler"].isin(set(ordered_accounts))].copy()
+        if not ranked.empty:
+            ranked = ranked.sort_values(["Spieler", "Date"])
+            ranked = ranked.groupby("Spieler", as_index=False).tail(1)
+            ranked = ranked.sort_values(["Total XP", "Spieler"], ascending=[False, True])
+            ranked_accounts = ranked["Spieler"].astype(str).tolist()
+            ordered_accounts = ranked_accounts + [a for a in ordered_accounts if a not in set(ranked_accounts)]
+    return {acc: ACCOUNT_COLORWAY[idx % len(ACCOUNT_COLORWAY)] for idx, acc in enumerate(ordered_accounts)}
+
+
+def _trace_owner_name(trace_name: object) -> str | None:
+    name = str(trace_name).strip()
+    if not name or name == "_nolegend_":
+        return None
+    if " catch " in name and " -> " in name:
+        return name.split(" catch ", 1)[0].strip()
+    if name.endswith(" catch point"):
+        return name.rsplit(" catch point", 1)[0].strip()
+    if " trend (" in name:
+        return name.split(" trend (", 1)[0].strip()
+    return name
+
+
+def apply_account_colors(fig: go.Figure | None, account_color_map: dict[str, str]) -> None:
+    if fig is None or not getattr(fig, "data", None) or not account_color_map:
+        return
+    for trace in fig.data:
+        owner = _trace_owner_name(getattr(trace, "name", ""))
+        if not owner:
+            continue
+        color = account_color_map.get(owner)
+        if not color:
+            continue
+        trace_type = str(getattr(trace, "type", "")).strip().lower()
+        if trace_type in {"scatter", "scattergl"}:
+            trace.update(line={"color": color}, marker={"color": color})
+        elif trace_type == "bar":
+            trace.update(marker={"color": color})
+
+
+def account_badge_html(label: object, color: str | None) -> str:
+    text = str(label).strip()
+    if not text:
+        return ""
+    swatch = ""
+    if color:
+        swatch = (
+            f"<span style='display:inline-block;width:0.72rem;height:0.72rem;"
+            f"border-radius:999px;background:{escape(str(color))};"
+            "margin-right:0.42rem;vertical-align:-0.08rem;'></span>"
+        )
+    return f"<span style='white-space:nowrap;'>{swatch}{escape(text)}</span>"
+
+
+def render_account_color_legend(accounts: Sequence[object], account_color_map: dict[str, str]) -> None:
+    items = []
+    for acc in _unique_accounts(accounts):
+        items.append(account_badge_html(acc, account_color_map.get(acc)))
+    if not items:
+        return
+    st.markdown(
+        (
+            "<div style='display:flex;flex-wrap:wrap;gap:0.55rem 1rem;margin:0.12rem 0 0.4rem 0;"
+            "font-size:0.92rem;opacity:0.92;'>"
+            + "".join(items)
+            + "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def account_cell_style(value: object, account_color_map: dict[str, str]) -> str:
+    account = str(value).strip()
+    color = account_color_map.get(account)
+    if not color:
+        return ""
+    return f"background-color: {_hex_to_rgba(color, 0.16)}; border-left: 0.38rem solid {color}; font-weight: 600;"
+
+
 def normalize_dashboard_window_days(value: object, fallback: int) -> int:
     parsed = parse_window_days(value, fallback=fallback)
     if int(parsed) in DASHBOARD_WINDOW_OPTIONS:
@@ -2903,6 +3089,7 @@ def render_kpi_card(
     value: str,
     *,
     winner: str | None = None,
+    winner_color: str | None = None,
     context: str | None = None,
     delta: str | None = None,
     delta_color: str = "normal",
@@ -2927,7 +3114,10 @@ def render_kpi_card(
             help=card_help,
         )
         if winner is not None and str(winner).strip():
-            st.caption(str(winner))
+            if str(winner_color or "").strip():
+                st.markdown(account_badge_html(winner, winner_color), unsafe_allow_html=True)
+            else:
+                st.caption(str(winner))
         if context is not None and str(context).strip():
             st.caption(str(context))
 
@@ -3062,7 +3252,11 @@ def top_decliner(xp_df: pd.DataFrame, window_days: int = WINDOW_DAYS_DEFAULT) ->
     }
 
 
-def build_xp_growth_figure(curve_map: dict[int, int], latest_df: pd.DataFrame) -> go.Figure | None:
+def build_xp_growth_figure(
+    curve_map: dict[int, int],
+    latest_df: pd.DataFrame,
+    account_color_map: dict[str, str] | None = None,
+) -> go.Figure | None:
     if not curve_map:
         return None
 
@@ -3126,7 +3320,13 @@ def build_xp_growth_figure(curve_map: dict[int, int], latest_df: pd.DataFrame) -
                 text=pts["label"],
                 textposition="top center",
                 cliponaxis=False,
-                marker=dict(size=9, color="#ff4d4d"),
+                marker=dict(
+                    size=9,
+                    color=[
+                        (account_color_map or {}).get(str(player), "#ff4d4d")
+                        for player in pts["Spieler"].astype(str).tolist()
+                    ],
+                ),
                 hovertemplate="Player: %{customdata[0]}<br>Level: %{x}<br>Total XP: %{customdata[1]:,.0f}<extra></extra>",
                 customdata=pts[["Spieler", "Total XP"]],
             ),
@@ -3607,7 +3807,7 @@ def _build_dashboard_export_payload(
             gain_height = max(320, 34 * len(gain_top) + 80)
             fig_gain.update_layout(height=gain_height, margin=dict(l=150, r=30, t=45, b=35))
             fig_gain.update_xaxes(tickformat=",")
-            fig_gain.update_yaxes(automargin=True)
+            fig_gain.update_yaxes(automargin=True, autorange="reversed")
             gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
                 columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
             )
@@ -3900,6 +4100,8 @@ def render_dashboard_content(
     window_state_key: str,
     show_30d_limited_hint: bool,
 ) -> None:
+    dashboard_accounts = sorted(dash_xp_df["Spieler"].dropna().astype(str).str.strip().unique().tolist()) if not dash_xp_df.empty else []
+    account_color_map = build_account_color_map(dashboard_accounts, dash_xp_df)
     render_dashboard_content_view(
         dash_xp_df=dash_xp_df,
         dash_medal_df=dash_medal_df,
@@ -3911,6 +4113,7 @@ def render_dashboard_content(
         window_days=window_days,
         window_state_key=window_state_key,
         show_30d_limited_hint=show_30d_limited_hint,
+        account_color_map=account_color_map,
         account_order=ACCOUNT_ORDER,
         derived_medal_id=DERIVED_MEDAL_ID,
         baseline_min_windows_default=BASELINE_MIN_WINDOWS_DEFAULT,
@@ -3919,6 +4122,9 @@ def render_dashboard_content(
         render_kpi_card_fn=render_kpi_card,
         format_kpi_number_fn=format_kpi_number,
         build_xp_growth_figure_fn=build_xp_growth_figure,
+        account_cell_style_fn=account_cell_style,
+        render_account_color_legend_fn=render_account_color_legend,
+        apply_account_colors_fn=apply_account_colors,
         render_plotly_chart_fn=render_plotly_chart,
     )
 

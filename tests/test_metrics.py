@@ -135,6 +135,54 @@ class MetricsTest(unittest.TestCase):
         self.assertListEqual(gained["account"].tolist(), ["A", "A", "B", "B"])
         self.assertListEqual(gained["gain_value"].tolist(), [0.0, 60.0, 0.0, 30.0])
 
+    def test_build_cumulative_gain_df_can_anchor_all_groups_to_shared_start(self):
+        series = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-01-01", "2026-01-05", "2026-01-10", "2026-01-08"]),
+                "account": ["A", "A", "A", "B"],
+                "value": [100.0, 150.0, 210.0, 70.0],
+            }
+        )
+        gained = build_cumulative_gain_df(
+            series,
+            date_col="date",
+            group_col="account",
+            value_col="value",
+            gain_col="gain_value",
+            anchor_date=pd.Timestamp("2026-01-05"),
+            include_anchor_row=True,
+        )
+        a = gained[gained["account"] == "A"].reset_index(drop=True)
+        b = gained[gained["account"] == "B"].reset_index(drop=True)
+        self.assertListEqual(a["date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-05", "2026-01-10"])
+        self.assertListEqual(a["gain_value"].tolist(), [0.0, 60.0])
+        self.assertListEqual(b["date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-05", "2026-01-08"])
+        self.assertListEqual(b["gain_value"].tolist(), [0.0, 0.0])
+
+    def test_build_cumulative_gain_df_shared_overlap_start_can_be_later(self):
+        series = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-01-01", "2026-01-08", "2026-01-10", "2026-01-08", "2026-01-15"]),
+                "account": ["A", "A", "A", "B", "B"],
+                "value": [100.0, 160.0, 200.0, 70.0, 120.0],
+            }
+        )
+        gained = build_cumulative_gain_df(
+            series,
+            date_col="date",
+            group_col="account",
+            value_col="value",
+            gain_col="gain_value",
+            anchor_date=pd.Timestamp("2026-01-08"),
+            include_anchor_row=True,
+        )
+        a = gained[gained["account"] == "A"].reset_index(drop=True)
+        b = gained[gained["account"] == "B"].reset_index(drop=True)
+        self.assertListEqual(a["date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-08", "2026-01-10"])
+        self.assertListEqual(a["gain_value"].tolist(), [0.0, 40.0])
+        self.assertListEqual(b["date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-08", "2026-01-15"])
+        self.assertListEqual(b["gain_value"].tolist(), [0.0, 50.0])
+
 
 if __name__ == "__main__":
     unittest.main()
