@@ -4,7 +4,13 @@ import unittest
 
 import pandas as pd
 
-from webapp.metrics import compute_player_kpis_30d, compute_player_kpis_window, recent_gain_table_from_metrics, xp_at
+from webapp.metrics import (
+    build_cumulative_gain_df,
+    compute_player_kpis_30d,
+    compute_player_kpis_window,
+    recent_gain_table_from_metrics,
+    xp_at,
+)
 
 
 def _df(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
@@ -110,6 +116,24 @@ class MetricsTest(unittest.TestCase):
         row = metrics.iloc[0]
         self.assertTrue(bool(row["eligible_30d"]))
         self.assertFalse(bool(row["eligible_baseline_30d"]))
+
+    def test_build_cumulative_gain_df_starts_each_group_at_zero(self):
+        series = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-01-05", "2026-01-10", "2026-01-03", "2026-01-08"]),
+                "account": ["A", "A", "B", "B"],
+                "value": [150.0, 210.0, 40.0, 70.0],
+            }
+        )
+        gained = build_cumulative_gain_df(
+            series,
+            date_col="date",
+            group_col="account",
+            value_col="value",
+            gain_col="gain_value",
+        )
+        self.assertListEqual(gained["account"].tolist(), ["A", "A", "B", "B"])
+        self.assertListEqual(gained["gain_value"].tolist(), [0.0, 60.0, 0.0, 30.0])
 
 
 if __name__ == "__main__":

@@ -54,6 +54,33 @@ def _prep_xp_df(xp_df: pd.DataFrame) -> pd.DataFrame:
     return d[["Date", "Spieler", "Total XP"]]
 
 
+def build_cumulative_gain_df(
+    df: pd.DataFrame,
+    *,
+    date_col: str,
+    group_col: str,
+    value_col: str,
+    gain_col: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    required = {date_col, group_col, value_col}
+    if not required.issubset(df.columns):
+        return df.iloc[0:0].copy()
+
+    out = df.copy()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out[group_col] = out[group_col].astype(str).str.strip()
+    out[value_col] = pd.to_numeric(out[value_col], errors="coerce")
+    out = out.dropna(subset=[date_col, group_col, value_col]).copy()
+    if out.empty:
+        return out
+
+    out = out.sort_values([group_col, date_col]).reset_index(drop=True)
+    out[gain_col] = out[value_col] - out.groupby(group_col)[value_col].transform("first")
+    return out
+
+
 def xp_at(player_df: pd.DataFrame, target_date: pd.Timestamp) -> XPAtResult:
     if player_df.empty:
         return XPAtResult(value=None, method=None)

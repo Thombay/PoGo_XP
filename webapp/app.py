@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from shared.paths import (
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
     WINDOW_DAYS_DEFAULT,
+    build_cumulative_gain_df,
     compute_player_kpis_window,
     recent_gain_table_from_metrics,
 )
@@ -99,6 +101,8 @@ SPECIAL_PLATINUM_MEDALS = [
         },
     }
 ]
+UI_PREFERENCES_PATH = config_dir() / "ui_preferences.json"
+UI_PREF_DASHBOARD_WINDOW_DAYS = "dashboard_window_days"
 
 
 def ensure_account_in_xp_order(account_name: str, known_accounts: list[str] | None = None) -> None:
@@ -1575,8 +1579,13 @@ def _render_xp_explorer_section_impl(
     default_leader = infer_default_gap_leader(df)
     default_idx = leader_options.index(default_leader) if default_leader in leader_options else 0
     leader_key = f"{key_prefix}_gap_leader"
+    leader_scope_key = f"{key_prefix}_gap_leader_scope_sig"
     catchup_key = f"{key_prefix}_show_catchup_trends"
-    if leader_key not in st.session_state or st.session_state.get(leader_key) not in leader_options:
+    prior_leader_scope_sig = str(st.session_state.get(leader_scope_key, ""))
+    if prior_leader_scope_sig != trend_scope_sig:
+        st.session_state[leader_key] = leader_options[default_idx]
+        st.session_state[leader_scope_key] = trend_scope_sig
+    elif leader_key not in st.session_state or st.session_state.get(leader_key) not in leader_options:
         st.session_state[leader_key] = leader_options[default_idx]
     if catchup_key not in st.session_state:
         st.session_state[catchup_key] = True
@@ -2093,14 +2102,32 @@ def _render_xp_explorer_section_impl(
                 d = series_df.copy()
                 d["date"] = pd.to_datetime(d["date"], errors="coerce")
                 d = d.dropna(subset=["date"]).copy()
-                d = d[(d["date"] >= pd.Timestamp(d_start)) & (d["date"] <= pd.Timestamp(d_end))].copy()
+                visible_start = pd.to_datetime(df["Date"].min(), errors="coerce")
+                visible_end = pd.to_datetime(df["Date"].max(), errors="coerce")
+                if pd.isna(visible_start):
+                    visible_start = pd.Timestamp(d_start)
+                if pd.isna(visible_end):
+                    visible_end = pd.Timestamp(d_end)
+                d = d[(d["date"] >= pd.Timestamp(visible_start)) & (d["date"] <= pd.Timestamp(visible_end))].copy()
                 return d.sort_values(["account", "date"]).reset_index(drop=True)
 
-            battles_plot = _clip_series_to_selected_range(battles_series)
-            caught_plot = _clip_series_to_selected_range(caught_series)
-            km_plot = _clip_series_to_selected_range(km_series)
+            def _build_activity_gain_series(series_df: pd.DataFrame) -> pd.DataFrame:
+                clipped = _clip_series_to_selected_range(series_df)
+                if clipped.empty:
+                    return clipped
+                return build_cumulative_gain_df(
+                    clipped,
+                    date_col="date",
+                    group_col="account",
+                    value_col="value",
+                    gain_col="gain_value",
+                )
 
-            st.caption("Activity Trends (Cumulative)")
+            battles_plot = _build_activity_gain_series(battles_series)
+            caught_plot = _build_activity_gain_series(caught_series)
+            km_plot = _build_activity_gain_series(km_series)
+
+            st.caption("Activity Trends (Since First Visible Snapshot)")
             g1, g2 = st.columns(2)
             with g1:
                 if battles_plot.empty:
@@ -2109,12 +2136,12 @@ def _render_xp_explorer_section_impl(
                     fig_battles = px.line(
                         battles_plot,
                         x="date",
-                        y="value",
+                        y="gain_value",
                         color="account",
                         markers=True,
-                        title="Battles Won Over Time",
+                        title="Battles Won Gained Over Time",
                     )
-                    fig_battles.update_yaxes(title="battles won", tickformat=",.0f")
+                    fig_battles.update_yaxes(title="battles won gained", tickformat=",.0f")
                     render_plotly_chart(fig_battles, use_container_width=True)
             with g2:
                 if caught_plot.empty:
@@ -2123,12 +2150,12 @@ def _render_xp_explorer_section_impl(
                     fig_caught = px.line(
                         caught_plot,
                         x="date",
-                        y="value",
+                        y="gain_value",
                         color="account",
                         markers=True,
-                        title="Pokemon Caught Over Time",
+                        title="Pokemon Caught Gained Over Time",
                     )
-                    fig_caught.update_yaxes(title="pokemon caught", tickformat=",.0f")
+                    fig_caught.update_yaxes(title="pokemon caught gained", tickformat=",.0f")
                     render_plotly_chart(fig_caught, use_container_width=True)
 
             if km_plot.empty:
@@ -2137,13 +2164,62 @@ def _render_xp_explorer_section_impl(
                 fig_km = px.line(
                     km_plot,
                     x="date",
+                    y="gain_value",
+                    color="account",
+                    markers=True,
+                    title="Distance Walked Gained Over Time",
+                )
+                fig_km.update_yaxes(title="km gained", tickformat=",.1f")
+                render_plotly_chart(fig_km, use_container_width=True)
+
+            battles_total_plot = _clip_series_to_selected_range(battles_series)
+            caught_total_plot = _clip_series_to_selected_range(caught_series)
+            km_total_plot = _clip_series_to_selected_range(km_series)
+
+            st.caption("Activity Trends (Totals)")
+            t1, t2 = st.columns(2)
+            with t1:
+                if battles_total_plot.empty:
+                    st.info("Battles Won total trend: no data in selected range.")
+                else:
+                    fig_battles_total = px.line(
+                        battles_total_plot,
+                        x="date",
+                        y="value",
+                        color="account",
+                        markers=True,
+                        title="Battles Won Total Over Time",
+                    )
+                    fig_battles_total.update_yaxes(title="battles won", tickformat=",.0f")
+                    render_plotly_chart(fig_battles_total, use_container_width=True)
+            with t2:
+                if caught_total_plot.empty:
+                    st.info("Pokemon Caught total trend: no data in selected range.")
+                else:
+                    fig_caught_total = px.line(
+                        caught_total_plot,
+                        x="date",
+                        y="value",
+                        color="account",
+                        markers=True,
+                        title="Pokemon Caught Total Over Time",
+                    )
+                    fig_caught_total.update_yaxes(title="pokemon caught", tickformat=",.0f")
+                    render_plotly_chart(fig_caught_total, use_container_width=True)
+
+            if km_total_plot.empty:
+                st.info("Distance Walked total trend: no data in selected range.")
+            else:
+                fig_km_total = px.line(
+                    km_total_plot,
+                    x="date",
                     y="value",
                     color="account",
                     markers=True,
-                    title="Distance Walked Over Time",
+                    title="Distance Walked Total Over Time",
                 )
-                fig_km.update_yaxes(title="km", tickformat=",.1f")
-                render_plotly_chart(fig_km, use_container_width=True)
+                fig_km_total.update_yaxes(title="km", tickformat=",.1f")
+                render_plotly_chart(fig_km_total, use_container_width=True)
         return
 
     st.subheader("Personal Activity Intervals")
@@ -2774,6 +2850,42 @@ def parse_window_days(value: object, fallback: int = WINDOW_DAYS_DEFAULT) -> int
         return int(m.group(1))
     except Exception:
         return int(fallback)
+
+
+def normalize_dashboard_window_days(value: object, fallback: int) -> int:
+    parsed = parse_window_days(value, fallback=fallback)
+    if int(parsed) in DASHBOARD_WINDOW_OPTIONS:
+        return int(parsed)
+    return int(fallback)
+
+
+def load_ui_preferences(path: Path = UI_PREFERENCES_PATH) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_ui_preferences(prefs: dict[str, object], path: Path = UI_PREFERENCES_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prefs, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def load_saved_dashboard_window_days(fallback: int, path: Path = UI_PREFERENCES_PATH) -> int:
+    prefs = load_ui_preferences(path)
+    return normalize_dashboard_window_days(prefs.get(UI_PREF_DASHBOARD_WINDOW_DAYS), fallback=fallback)
+
+
+def save_dashboard_window_days(window_days: int, path: Path = UI_PREFERENCES_PATH) -> None:
+    normalized = normalize_dashboard_window_days(window_days, fallback=DASHBOARD_WINDOW_OPTIONS[0])
+    prefs = load_ui_preferences(path)
+    if prefs.get(UI_PREF_DASHBOARD_WINDOW_DAYS) == int(normalized):
+        return
+    prefs[UI_PREF_DASHBOARD_WINDOW_DAYS] = int(normalized)
+    save_ui_preferences(prefs, path)
 
 
 def format_kpi_number(value: object, suffix: str = "") -> str:
@@ -3881,11 +3993,15 @@ if page == "Dashboard Global":
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
         metrics_by_window = compute_metrics_by_window(dash_xp_df, window_options=DASHBOARD_WINDOW_OPTIONS)
         default_window_days = auto_default_window_days(metrics_by_window)
-        window_key = f"dashboard_global_window_{_slugify(selected_dashboard_group)}"
+        saved_window_days = load_saved_dashboard_window_days(default_window_days)
+        window_key = "dashboard_window_days"
         if window_key not in st.session_state:
-            st.session_state[window_key] = int(default_window_days)
+            st.session_state[window_key] = int(saved_window_days)
         else:
-            st.session_state[window_key] = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+            st.session_state[window_key] = normalize_dashboard_window_days(
+                st.session_state.get(window_key),
+                fallback=saved_window_days,
+            )
         eligible_30d_count = count_window_eligible(metrics_by_window.get(30, pd.DataFrame()), 30, baseline=False)
         show_30d_limited_hint = eligible_30d_count < MIN_ELIGIBLE_FOR_30D_DEFAULT
         with window_slot.container():
@@ -3899,7 +4015,11 @@ if page == "Dashboard Global":
             )
             if show_30d_limited_hint:
                 st.caption("30d limited")
-        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+        selected_window_days = normalize_dashboard_window_days(
+            st.session_state.get(window_key),
+            fallback=saved_window_days,
+        )
+        save_dashboard_window_days(selected_window_days)
         header_left, header_right = st.columns([4.0, 1.65], gap="small")
         with header_left:
             st.subheader("Dashboard Global")
@@ -3975,11 +4095,15 @@ if page == "Dashboard Personal":
         dash_display_medal_df = display_medal_df[display_medal_df["account"].isin(dashboard_accounts)].copy()
         metrics_by_window = compute_metrics_by_window(dash_xp_df, window_options=DASHBOARD_WINDOW_OPTIONS)
         default_window_days = auto_default_window_days(metrics_by_window)
-        window_key = f"dashboard_personal_window_{_slugify(selected_dashboard_group)}"
+        saved_window_days = load_saved_dashboard_window_days(default_window_days)
+        window_key = "dashboard_window_days"
         if window_key not in st.session_state:
-            st.session_state[window_key] = int(default_window_days)
+            st.session_state[window_key] = int(saved_window_days)
         else:
-            st.session_state[window_key] = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+            st.session_state[window_key] = normalize_dashboard_window_days(
+                st.session_state.get(window_key),
+                fallback=saved_window_days,
+            )
         eligible_30d_count = count_window_eligible(metrics_by_window.get(30, pd.DataFrame()), 30, baseline=False)
         show_30d_limited_hint = eligible_30d_count < MIN_ELIGIBLE_FOR_30D_DEFAULT
         with window_slot.container():
@@ -3993,7 +4117,11 @@ if page == "Dashboard Personal":
             )
             if show_30d_limited_hint:
                 st.caption("30d limited")
-        selected_window_days = parse_window_days(st.session_state.get(window_key), fallback=default_window_days)
+        selected_window_days = normalize_dashboard_window_days(
+            st.session_state.get(window_key),
+            fallback=saved_window_days,
+        )
+        save_dashboard_window_days(selected_window_days)
         header_left, header_right = st.columns([4.0, 1.65], gap="small")
         with header_left:
             st.subheader("Dashboard Personal")
