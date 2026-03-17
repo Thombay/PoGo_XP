@@ -3535,6 +3535,7 @@ def _build_dashboard_export_payload(
     selected_accounts: list[str],
     dash_xp_df: pd.DataFrame,
     dash_medal_df: pd.DataFrame,
+    dash_additional_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
     goals_df: pd.DataFrame,
     curve_map: dict[int, int],
@@ -3908,6 +3909,374 @@ def _build_dashboard_export_payload(
                 title="Interval Pace (XP/day)",
             )
 
+    activity_chart_items: list[tuple[str, go.Figure | None]] = []
+    activity_sections: list[tuple[str, pd.DataFrame]] = []
+    if not show_medals:
+        activity_accounts = [str(a).strip() for a in selected_accounts if str(a).strip()]
+        activity_color_map = build_account_color_map(activity_accounts, dash_xp_df)
+        medal_source = dash_medal_df.copy()
+        additional_source = dash_additional_df.copy()
+
+        def _medal_series(medal_id: str, accounts: list[str]) -> pd.DataFrame:
+            cols = ["date", "account", "value"]
+            if medal_source.empty or not accounts:
+                return pd.DataFrame(columns=cols)
+            d = medal_source.copy()
+            d["date"] = pd.to_datetime(d["date"], errors="coerce")
+            d["account"] = d["account"].astype(str).str.strip()
+            d["medal_id"] = d["medal_id"].astype(str).str.strip().str.lower().map(goal_medal_id_for)
+            d["value"] = pd.to_numeric(d["value"], errors="coerce")
+            d = d.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+            d = d[d["account"].isin(set(accounts))].copy()
+            d = d[d["medal_id"] == goal_medal_id_for(medal_id)].copy()
+            if d.empty:
+                return pd.DataFrame(columns=cols)
+            d = d.sort_values("date").groupby(["account", "date"], as_index=False).agg({"value": "max"})
+            return d[cols].sort_values(["account", "date"]).reset_index(drop=True)
+
+        def _series_to_metric_df(series_df: pd.DataFrame) -> pd.DataFrame:
+            if series_df.empty:
+                return pd.DataFrame(columns=["Date", "Spieler", "Total XP"])
+            out = series_df.copy()
+            out = out.rename(columns={"date": "Date", "account": "Spieler", "value": "Total XP"})
+            out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+            out["Spieler"] = out["Spieler"].astype(str).str.strip()
+            out["Total XP"] = pd.to_numeric(out["Total XP"], errors="coerce")
+            out = out.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
+            out = out.sort_values(["Spieler", "Date"]).reset_index(drop=True)
+            return out[["Date", "Spieler", "Total XP"]]
+
+        def _fmt_total(value: object, unit: str, metric_label: str = "") -> str:
+            num = pd.to_numeric(value, errors="coerce")
+            if pd.isna(num):
+                return "-"
+            noun = str(metric_label).strip().lower()
+            return f"{float(num):,.1f} km" if unit == "km" else f"{int(round(float(num))):,} {noun}"
+
+        def _fmt_rate(value: object, unit: str, metric_label: str = "") -> str:
+            num = pd.to_numeric(value, errors="coerce")
+            if pd.isna(num):
+                return "-"
+            noun = str(metric_label).strip().lower()
+            return f"{float(num):,.2f} km/day" if unit == "km" else f"{float(num):,.2f} {noun}/day"
+
+        def _fmt_gain(value: object, unit: str, metric_label: str = "") -> str:
+            num = pd.to_numeric(value, errors="coerce")
+            if pd.isna(num):
+                return "-"
+            noun = str(metric_label).strip().lower()
+            return f"{float(num):,.2f} km in {w_label}" if unit == "km" else f"{int(round(float(num))):,} {noun} in {w_label}"
+
+        def _fmt_delta_rate(value: object, unit: str, metric_label: str = "") -> str:
+            num = pd.to_numeric(value, errors="coerce")
+            if pd.isna(num):
+                return "-"
+            n = float(num)
+            sign = "+" if n >= 0 else "-"
+            abs_n = abs(n)
+            if unit == "km":
+                return f"{sign}{abs_n:,.2f} km/day vs baseline"
+            noun = str(metric_label).strip().lower()
+            return f"{sign}{abs_n:,.2f} {noun}/day vs baseline"
+
+        def _build_activity_snapshot_card(
+            series_df: pd.DataFrame,
+            title: str,
+            unit_suffix: str,
+            metric_label: str,
+        ) -> tuple[str, str, str]:
+            metric_df = _series_to_metric_df(series_df)
+            if metric_df.empty:
+                return (title, "-", f"no {w_label} data")
+            kpis = compute_player_kpis_window(
+                metric_df,
+                window_days=w,
+                baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+            )
+            if kpis.empty or eligible_col not in kpis.columns:
+                return (title, "-", f"no {w_label} data")
+            eligible_pool = kpis[kpis[eligible_col] == True].copy()  # noqa: E712
+            if eligible_pool.empty:
+                return (title, "-", f"no eligible {w_label} windows")
+            eligible_pool[xp_per_day_col] = pd.to_numeric(eligible_pool[xp_per_day_col], errors="coerce")
+            eligible_pool[xp_gain_col] = pd.to_numeric(eligible_pool[xp_gain_col], errors="coerce")
+            eligible_pool = eligible_pool.dropna(subset=[xp_per_day_col, xp_gain_col]).copy()
+            if eligible_pool.empty:
+                return (title, "-", f"no eligible {w_label} windows")
+            active_pool = eligible_pool[eligible_pool[xp_gain_col] > 0].copy()
+            headline_pool = active_pool if not active_pool.empty else eligible_pool
+            leader = headline_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
+            avg_val = float(eligible_pool[xp_per_day_col].mean())
+            end_date = pd.to_datetime(eligible_pool[window_end_col], errors="coerce").max()
+            date_txt = end_date.strftime("%Y-%m-%d") if pd.notna(end_date) else "-"
+            noun = str(metric_label).strip().lower()
+            unit_part = f" {str(unit_suffix).strip()}" if str(unit_suffix).strip() else ""
+            value_txt = (
+                f"{float(leader[xp_per_day_col]):,.2f} {noun}/day"
+                if noun and unit_suffix == ""
+                else f"{float(leader[xp_per_day_col]):,.2f}{unit_part}/day"
+            )
+            context_txt = (
+                f"{str(leader['Spieler']).strip()} | "
+                + (
+                    f"Team avg {avg_val:,.2f} {noun}/day | {w_label} window end: {date_txt}"
+                    if noun and unit_suffix == ""
+                    else f"Team avg {avg_val:,.2f}{unit_part}/day | {w_label} window end: {date_txt}"
+                )
+                + f" ({int(len(eligible_pool))} account(s))"
+            )
+            if active_pool.empty:
+                context_txt += f" | no active {w_label} gains"
+            return (title, value_txt, context_txt)
+
+        def _build_activity_performance_view(series_df: pd.DataFrame, unit: str, metric_label: str) -> pd.DataFrame:
+            metric_df = _series_to_metric_df(series_df)
+            if metric_df.empty:
+                return pd.DataFrame()
+            latest_metric = series_df.sort_values("date").groupby("account", as_index=False).tail(1).copy()
+            latest_metric["value"] = pd.to_numeric(latest_metric["value"], errors="coerce")
+            latest_metric["date"] = pd.to_datetime(latest_metric["date"], errors="coerce")
+            latest_metric = latest_metric.dropna(subset=["value"]).copy()
+            activity_kpis = compute_player_kpis_window(
+                metric_df,
+                window_days=w,
+                baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+            )
+            if activity_kpis.empty:
+                merged = latest_metric.rename(columns={"account": "Spieler"})
+            else:
+                merged = latest_metric.rename(columns={"account": "Spieler"}).merge(
+                    activity_kpis[
+                        [
+                            "Spieler",
+                            window_end_col,
+                            xp_gain_col,
+                            xp_per_day_col,
+                            delta_col,
+                            eligible_col,
+                            eligible_baseline_col,
+                        ]
+                    ],
+                    on="Spieler",
+                    how="left",
+                )
+            merged["_sort_total"] = pd.to_numeric(merged["value"], errors="coerce").fillna(-1)
+            merged = merged.sort_values(["_sort_total", "Spieler"], ascending=[False, True]).copy()
+            merged["Snapshot Date"] = pd.to_datetime(merged["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            merged["Window End"] = pd.to_datetime(
+                merged.get(window_end_col, pd.Series(index=merged.index, dtype=object)),
+                errors="coerce",
+            ).dt.strftime("%Y-%m-%d")
+            merged["Total"] = merged["value"].map(lambda v: _fmt_total(v, unit, metric_label))
+            merged[f"Gain ({w_label})"] = merged.get(xp_gain_col, pd.Series(index=merged.index, dtype=object)).map(
+                lambda v: _fmt_gain(v, unit, metric_label)
+            )
+            merged[f"Pace ({w_label})"] = merged.get(
+                xp_per_day_col,
+                pd.Series(index=merged.index, dtype=object),
+            ).map(
+                lambda v: _fmt_rate(v, unit, metric_label)
+            )
+            merged[f"Delta vs Baseline ({w_label})"] = merged.get(
+                delta_col,
+                pd.Series(index=merged.index, dtype=object),
+            ).map(
+                lambda v: _fmt_delta_rate(v, unit, metric_label)
+            )
+            merged["Eligible"] = merged.get(eligible_col, pd.Series(index=merged.index, dtype=object)).map(
+                lambda v: "Yes" if bool(v) else "No"
+            )
+            merged["Baseline Eligible"] = merged.get(
+                eligible_baseline_col,
+                pd.Series(index=merged.index, dtype=object),
+            ).map(
+                lambda v: "Yes" if bool(v) else "No"
+            )
+            return merged[
+                [
+                    "Spieler",
+                    "Snapshot Date",
+                    "Total",
+                    f"Gain ({w_label})",
+                    f"Pace ({w_label})",
+                    f"Delta vs Baseline ({w_label})",
+                    "Window End",
+                    "Eligible",
+                    "Baseline Eligible",
+                ]
+            ].rename(columns={"Spieler": "Account"})
+
+        visible_start = (
+            pd.to_datetime(xp_explorer_df["Date"].min(), errors="coerce")
+            if not xp_explorer_df.empty
+            else pd.to_datetime(dash_xp_df["Date"].min(), errors="coerce")
+        )
+        visible_end = (
+            pd.to_datetime(xp_explorer_df["Date"].max(), errors="coerce")
+            if not xp_explorer_df.empty
+            else pd.to_datetime(dash_xp_df["Date"].max(), errors="coerce")
+        )
+
+        def _clip_series_to_selected_range(series_df: pd.DataFrame) -> pd.DataFrame:
+            if series_df.empty:
+                return series_df.copy()
+            d = series_df.copy()
+            d["date"] = pd.to_datetime(d["date"], errors="coerce")
+            d = d.dropna(subset=["date"]).copy()
+            if pd.notna(visible_start):
+                d = d[d["date"] >= pd.Timestamp(visible_start)].copy()
+            if pd.notna(visible_end):
+                d = d[d["date"] <= pd.Timestamp(visible_end)].copy()
+            return d.sort_values(["account", "date"]).reset_index(drop=True)
+
+        def _build_activity_gain_series(series_df: pd.DataFrame) -> pd.DataFrame:
+            base = series_df.copy()
+            base["date"] = pd.to_datetime(base["date"], errors="coerce")
+            base = base.dropna(subset=["date"]).copy()
+            if base.empty:
+                return base
+            if pd.notna(visible_end):
+                base = base[base["date"] <= pd.Timestamp(visible_end)].copy()
+            if base.empty:
+                return base
+            first_dates = (
+                base.sort_values(["account", "date"])
+                .groupby("account", as_index=False)["date"]
+                .min()
+            )
+            if first_dates.empty:
+                return base.iloc[0:0].copy()
+            overlap_start = pd.to_datetime(first_dates["date"].max(), errors="coerce")
+            anchor_start = pd.Timestamp(overlap_start) if pd.notna(overlap_start) else pd.Timestamp(base["date"].min())
+            if pd.notna(visible_start):
+                anchor_start = max(pd.Timestamp(visible_start), pd.Timestamp(anchor_start))
+            return build_cumulative_gain_df(
+                base,
+                date_col="date",
+                group_col="account",
+                value_col="value",
+                gain_col="gain_value",
+                anchor_date=pd.Timestamp(anchor_start),
+                include_anchor_row=True,
+            )
+
+        battles_series = pd.DataFrame(columns=["date", "account", "value"])
+        if not additional_source.empty and activity_accounts:
+            d = additional_source.copy()
+            d["date"] = pd.to_datetime(d["date"], errors="coerce")
+            d["account"] = d["account"].astype(str).str.strip()
+            d["battles_won"] = pd.to_numeric(d["battles_won"], errors="coerce")
+            d = d.dropna(subset=["date", "account", "battles_won"]).copy()
+            d = d[d["account"].isin(set(activity_accounts))].copy()
+            if not d.empty:
+                d = d.sort_values("date").drop_duplicates(["account", "date"], keep="last")
+                battles_series = d.rename(columns={"battles_won": "value"})[["date", "account", "value"]]
+                battles_series = battles_series.sort_values(["account", "date"]).reset_index(drop=True)
+        caught_series = _medal_series("collector", activity_accounts)
+        km_series = _medal_series("jogger", activity_accounts)
+
+        metric_cards.extend(
+            [
+                _build_activity_snapshot_card(battles_series, "Battles/day", "", "Battles"),
+                _build_activity_snapshot_card(caught_series, "Pokemon/day", "", "Pokemon"),
+                _build_activity_snapshot_card(km_series, "Km/day", "km", "Km"),
+            ]
+        )
+
+        battles_performance_view = _build_activity_performance_view(battles_series, "", "Battles")
+        if not battles_performance_view.empty:
+            activity_sections.append((f"Activity Performance: Battles ({w_label})", battles_performance_view))
+        pokemon_performance_view = _build_activity_performance_view(caught_series, "", "Pokemon")
+        if not pokemon_performance_view.empty:
+            activity_sections.append((f"Activity Performance: Pokemon ({w_label})", pokemon_performance_view))
+        km_performance_view = _build_activity_performance_view(km_series, "km", "Km")
+        if not km_performance_view.empty:
+            activity_sections.append((f"Activity Performance: Distance Walked ({w_label})", km_performance_view))
+
+        battles_plot = _build_activity_gain_series(battles_series)
+        if not battles_plot.empty:
+            fig_battles = px.line(
+                battles_plot,
+                x="date",
+                y="gain_value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Battles Gained Over Time",
+            )
+            fig_battles.update_yaxes(title="battles gained", tickformat=",.0f")
+            activity_chart_items.append(("Activity: Battles Gained Over Time", fig_battles))
+
+        caught_plot = _build_activity_gain_series(caught_series)
+        if not caught_plot.empty:
+            fig_caught = px.line(
+                caught_plot,
+                x="date",
+                y="gain_value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Pokemon Gained Over Time",
+            )
+            fig_caught.update_yaxes(title="pokemon gained", tickformat=",.0f")
+            activity_chart_items.append(("Activity: Pokemon Gained Over Time", fig_caught))
+
+        km_plot = _build_activity_gain_series(km_series)
+        if not km_plot.empty:
+            fig_km = px.line(
+                km_plot,
+                x="date",
+                y="gain_value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Distance Walked Gained Over Time",
+            )
+            fig_km.update_yaxes(title="km gained", tickformat=",.1f")
+            activity_chart_items.append(("Activity: Distance Walked Gained Over Time", fig_km))
+
+        battles_total_plot = _clip_series_to_selected_range(battles_series)
+        if not battles_total_plot.empty:
+            fig_battles_total = px.line(
+                battles_total_plot,
+                x="date",
+                y="value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Battles Total Over Time",
+            )
+            fig_battles_total.update_yaxes(title="battles", tickformat=",.0f")
+            activity_chart_items.append(("Activity: Battles Total Over Time", fig_battles_total))
+
+        caught_total_plot = _clip_series_to_selected_range(caught_series)
+        if not caught_total_plot.empty:
+            fig_caught_total = px.line(
+                caught_total_plot,
+                x="date",
+                y="value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Pokemon Total Over Time",
+            )
+            fig_caught_total.update_yaxes(title="pokemon", tickformat=",.0f")
+            activity_chart_items.append(("Activity: Pokemon Total Over Time", fig_caught_total))
+
+        km_total_plot = _clip_series_to_selected_range(km_series)
+        if not km_total_plot.empty:
+            fig_km_total = px.line(
+                km_total_plot,
+                x="date",
+                y="value",
+                color="account",
+                color_discrete_map=activity_color_map,
+                markers=True,
+                title="Distance Walked Total Over Time",
+            )
+            fig_km_total.update_yaxes(title="km", tickformat=",.1f")
+            activity_chart_items.append(("Activity: Distance Walked Total Over Time", fig_km_total))
+
     latest_medals_view = pd.DataFrame()
     first_achieved_view = pd.DataFrame()
     if show_medals:
@@ -3922,11 +4291,13 @@ def _build_dashboard_export_payload(
         ("XP Explorer: Rank Over Time (Step)", fig_rank),
         ("XP Explorer: Total XP Over Time", fig_xp_total),
     ]
+    chart_items.extend(activity_chart_items)
 
     sections: list[tuple[str, pd.DataFrame]] = [
         ("Current XP Ranking", ranking_view),
         (f"XP Gain Table (Last {w} Days)", gain_view),
     ]
+    sections.extend(activity_sections)
     if show_medals:
         sections.append(("Latest Medal Status", latest_medals_view))
         sections.append(("Latest Achieved Platinum Medals", first_achieved_view))
@@ -3948,6 +4319,7 @@ def build_dashboard_export_html(
     selected_accounts: list[str],
     dash_xp_df: pd.DataFrame,
     dash_medal_df: pd.DataFrame,
+    dash_additional_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
     goals_df: pd.DataFrame,
     curve_map: dict[int, int],
@@ -3960,6 +4332,7 @@ def build_dashboard_export_html(
             selected_accounts=selected_accounts,
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
+            dash_additional_df=dash_additional_df,
             dash_display_medal_df=dash_display_medal_df,
             goals_df=goals_df,
             curve_map=curve_map,
@@ -3984,6 +4357,7 @@ def build_dashboard_export_png(
     selected_accounts: list[str],
     dash_xp_df: pd.DataFrame,
     dash_medal_df: pd.DataFrame,
+    dash_additional_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
     goals_df: pd.DataFrame,
     curve_map: dict[int, int],
@@ -3996,6 +4370,7 @@ def build_dashboard_export_png(
             selected_accounts=selected_accounts,
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
+            dash_additional_df=dash_additional_df,
             dash_display_medal_df=dash_display_medal_df,
             goals_df=goals_df,
             curve_map=curve_map,
@@ -4019,6 +4394,7 @@ def render_dashboard_export_button(
     selected_accounts: list[str],
     dash_xp_df: pd.DataFrame,
     dash_medal_df: pd.DataFrame,
+    dash_additional_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
     goals_df: pd.DataFrame,
     curve_map: dict[int, int],
@@ -4059,6 +4435,7 @@ def render_dashboard_export_button(
             selected_accounts=selected_accounts,
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
+            dash_additional_df=dash_additional_df,
             dash_display_medal_df=dash_display_medal_df,
             goals_df=goals_df,
             curve_map=curve_map,
@@ -4086,6 +4463,7 @@ def render_dashboard_export_button(
         selected_accounts=selected_accounts,
         dash_xp_df=dash_xp_df,
         dash_medal_df=dash_medal_df,
+        dash_additional_df=dash_additional_df,
         dash_display_medal_df=dash_display_medal_df,
         goals_df=goals_df,
         curve_map=curve_map,
@@ -4253,6 +4631,7 @@ if page == "Dashboard Global":
                     selected_accounts=dashboard_accounts,
                     dash_xp_df=dash_xp_df,
                     dash_medal_df=dash_medal_df,
+                    dash_additional_df=dash_additional_df,
                     dash_display_medal_df=dash_display_medal_df,
                     goals_df=goals_df,
                     curve_map=curve_map,
@@ -4355,6 +4734,7 @@ if page == "Dashboard Personal":
                     selected_accounts=dashboard_accounts,
                     dash_xp_df=dash_xp_df,
                     dash_medal_df=dash_medal_df,
+                    dash_additional_df=dash_additional_df,
                     dash_display_medal_df=dash_display_medal_df,
                     goals_df=goals_df,
                     curve_map=curve_map,
