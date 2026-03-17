@@ -117,13 +117,42 @@ def inject_responsive_styles() -> None:
           white-space: normal !important;
           overflow-wrap: anywhere;
         }
-        div[data-testid="stMetricValue"] > div {
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] {
+          background: linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(15, 23, 42, 0.92));
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          border-radius: 0.95rem;
+          padding: 0.85rem 0.95rem 0.8rem 0.95rem;
+          box-shadow: 0 12px 28px rgba(2, 8, 23, 0.22);
+          min-height: 9.2rem;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] > div {
+          gap: 0.35rem;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetricLabel"] {
+          margin-bottom: 0.15rem;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetricLabel"] p {
+          letter-spacing: 0.01em;
+          font-weight: 700 !important;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetricValue"] > div {
           white-space: normal !important;
           overflow: visible !important;
           text-overflow: clip !important;
           overflow-wrap: anywhere;
           line-height: 1.02 !important;
           font-size: clamp(1.55rem, 1.9vw, 2.1rem) !important;
+          font-weight: 800 !important;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetricDelta"] > div {
+          font-weight: 700 !important;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] + div[data-testid="stCaptionContainer"] p {
+          margin-top: 0.28rem !important;
+          padding-left: 0.12rem;
+        }
+        div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] + div[data-testid="stCaptionContainer"] + div[data-testid="stCaptionContainer"] p {
+          opacity: 0.92;
         }
         @media (max-width: 1200px) {
           .block-container { padding-left: 1rem; padding-right: 1rem; }
@@ -145,8 +174,12 @@ def inject_responsive_styles() -> None:
           div[class*="st-key-pogo_export_header_"] {
             max-width: none;
           }
-          div[data-testid="stMetricValue"] > div {
+          div[class*="st-key-pogo_activity_"] div[data-testid="stMetricValue"] > div {
             font-size: clamp(1.35rem, 6vw, 1.9rem) !important;
+          }
+          div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] {
+            min-height: 8.2rem;
+            padding: 0.72rem 0.8rem 0.72rem 0.8rem;
           }
         }
         </style>

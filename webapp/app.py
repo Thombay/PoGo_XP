@@ -1903,7 +1903,7 @@ def _render_xp_explorer_section_impl(
             xp_per_day_col = window_col("xp_per_day", window_days)
             delta_col = window_col("delta_vs_baseline", window_days)
 
-            def _window_rate_kpi(series_df: pd.DataFrame, unit_suffix: str) -> tuple[str, str | None, str]:
+            def _window_rate_kpi(series_df: pd.DataFrame, unit_suffix: str, metric_label: str) -> tuple[str, str | None, str]:
                 metric_df = _series_to_metric_df(series_df)
                 if metric_df.empty:
                     return "-", None, f"no {w_label} data"
@@ -1928,12 +1928,21 @@ def _render_xp_explorer_section_impl(
                 avg_val = float(eligible_pool[xp_per_day_col].mean())
                 end_date = pd.to_datetime(eligible_pool[window_end_col], errors="coerce").max()
                 date_txt = end_date.strftime("%Y-%m-%d") if pd.notna(end_date) else "-"
+                noun = str(metric_label).strip().lower()
                 unit_part = f" {str(unit_suffix).strip()}" if str(unit_suffix).strip() else ""
-                value_txt = f"{float(leader[xp_per_day_col]):,.2f}{unit_part}/day"
+                value_txt = (
+                    f"{float(leader[xp_per_day_col]):,.2f} {noun}/day"
+                    if noun and unit_suffix == ""
+                    else f"{float(leader[xp_per_day_col]):,.2f}{unit_part}/day"
+                )
                 winner_txt = str(leader["Spieler"])
+                avg_txt = (
+                    f"Team avg {avg_val:,.2f} {noun}/day | {w_label} window end: {date_txt} "
+                    if noun and unit_suffix == ""
+                    else f"Team avg {avg_val:,.2f}{unit_part}/day | {w_label} window end: {date_txt} "
+                )
                 context_txt = (
-                    f"Team avg {avg_val:,.2f}{unit_part}/day | {w_label} window end: {date_txt} "
-                    f"({int(len(eligible_pool))} account(s))"
+                    avg_txt + f"({int(len(eligible_pool))} account(s))"
                 )
                 if active_pool.empty:
                     context_txt += f" | no active {w_label} gains"
@@ -1941,60 +1950,64 @@ def _render_xp_explorer_section_impl(
 
             st.caption(f"Activity Snapshot ({w_label})")
             render_account_color_legend(activity_accounts, account_color_map)
-            a1, a2, a3 = st.columns(3)
-            b_value, b_winner, b_context = _window_rate_kpi(battles_series, "")
-            c_value, c_winner, c_context = _window_rate_kpi(caught_series, "")
-            k_value, k_winner, k_context = _window_rate_kpi(km_series, "km")
-            render_kpi_card(
-                a1,
-                "Battles/day",
-                b_value,
-                winner=b_winner,
-                winner_color=account_color_map.get(str(b_winner).strip()) if b_winner else None,
-                context=b_context,
-                help_text="Latest battles/day from Battles Won cumulative snapshots (additional activity data).",
-            )
-            render_kpi_card(
-                a2,
-                "Pokemon Caught/day",
-                c_value,
-                winner=c_winner,
-                winner_color=account_color_map.get(str(c_winner).strip()) if c_winner else None,
-                context=c_context,
-                help_text="Latest caught/day from Collector medal deltas.",
-            )
-            render_kpi_card(
-                a3,
-                "Km/day",
-                k_value,
-                winner=k_winner,
-                winner_color=account_color_map.get(str(k_winner).strip()) if k_winner else None,
-                context=k_context,
-                help_text="Latest km/day from Jogger medal deltas.",
-            )
+            with st.container(key="pogo_activity_snapshot_metrics"):
+                a1, a2, a3 = st.columns(3)
+                b_value, b_winner, b_context = _window_rate_kpi(battles_series, "", "Battles")
+                c_value, c_winner, c_context = _window_rate_kpi(caught_series, "", "Pokemon")
+                k_value, k_winner, k_context = _window_rate_kpi(km_series, "km", "Km")
+                render_kpi_card(
+                    a1,
+                    "Battles/day",
+                    b_value,
+                    winner=b_winner,
+                    winner_color=account_color_map.get(str(b_winner).strip()) if b_winner else None,
+                    context=b_context,
+                    help_text="Latest battles/day from Battles Won cumulative snapshots (additional activity data).",
+                )
+                render_kpi_card(
+                    a2,
+                    "Pokemon/day",
+                    c_value,
+                    winner=c_winner,
+                    winner_color=account_color_map.get(str(c_winner).strip()) if c_winner else None,
+                    context=c_context,
+                    help_text="Latest caught/day from Collector medal deltas.",
+                )
+                render_kpi_card(
+                    a3,
+                    "Km/day",
+                    k_value,
+                    winner=k_winner,
+                    winner_color=account_color_map.get(str(k_winner).strip()) if k_winner else None,
+                    context=k_context,
+                    help_text="Latest km/day from Jogger medal deltas.",
+                )
 
-            def _fmt_total(value: object, unit: str) -> str:
+            def _fmt_total(value: object, unit: str, metric_label: str = "") -> str:
                 num = pd.to_numeric(value, errors="coerce")
                 if pd.isna(num):
                     return "-"
                 v = float(num)
-                return f"{v:,.1f} km" if unit == "km" else f"{int(round(v)):,}"
+                noun = str(metric_label).strip().lower()
+                return f"{v:,.1f} km" if unit == "km" else f"{int(round(v)):,} {noun}"
 
-            def _fmt_rate(value: object, unit: str) -> str:
+            def _fmt_rate(value: object, unit: str, metric_label: str = "") -> str:
                 num = pd.to_numeric(value, errors="coerce")
                 if pd.isna(num):
                     return "-"
                 v = float(num)
-                return f"{v:,.2f} km/day" if unit == "km" else f"{v:,.2f}/day"
+                noun = str(metric_label).strip().lower()
+                return f"{v:,.2f} km/day" if unit == "km" else f"{v:,.2f} {noun}/day"
 
-            def _fmt_gain(value: object, unit: str) -> str:
+            def _fmt_gain(value: object, unit: str, metric_label: str = "") -> str:
                 num = pd.to_numeric(value, errors="coerce")
                 if pd.isna(num):
                     return "-"
                 v = float(num)
-                return f"{v:,.2f} km in {w_label}" if unit == "km" else f"{int(round(v)):,} in {w_label}"
+                noun = str(metric_label).strip().lower()
+                return f"{v:,.2f} km in {w_label}" if unit == "km" else f"{int(round(v)):,} {noun} in {w_label}"
 
-            def _fmt_delta_rate(value: object, unit: str) -> str:
+            def _fmt_delta_rate(value: object, unit: str, metric_label: str = "") -> str:
                 num = pd.to_numeric(value, errors="coerce")
                 if pd.isna(num):
                     return "-"
@@ -2003,135 +2016,137 @@ def _render_xp_explorer_section_impl(
                 abs_n = abs(n)
                 if unit == "km":
                     return f"{sign}{abs_n:,.2f} km/day vs baseline"
-                return f"{sign}{abs_n:,.2f}/day vs baseline"
+                noun = str(metric_label).strip().lower()
+                return f"{sign}{abs_n:,.2f} {noun}/day vs baseline"
 
-            def _render_activity_kpi_row(series_df: pd.DataFrame, title: str, unit: str) -> None:
-                st.markdown(f"**{title} ({w_label})**")
-                c1, c2, c3, c4, c5, c6 = st.columns(6)
-                metric_df = _series_to_metric_df(series_df)
-                if metric_df.empty:
-                    render_kpi_card(c1, "Leader", "-", context="no data")
-                    render_kpi_card(c2, f"Top Gain ({w_label})", "-", context="no data")
-                    render_kpi_card(c3, f"Least Gain ({w_label})", "-", context="no data")
-                    render_kpi_card(c4, f"Fastest {w_label} Pace", "-", context="no data")
-                    render_kpi_card(c5, f"Most Improved ({w_label})", "-", context="no baseline data")
-                    render_kpi_card(c6, f"Most Declined ({w_label})", "-", context="no baseline data")
-                    return
+            def _render_activity_kpi_row(series_df: pd.DataFrame, title: str, unit: str, metric_label: str = "") -> None:
+                row_slug = re.sub(r"[^a-z0-9]+", "_", str(title).strip().lower()).strip("_") or "activity"
+                with st.container(key=f"pogo_activity_perf_{row_slug}_{w_label}"):
+                    st.markdown(f"**{title} ({w_label})**")
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
+                    metric_df = _series_to_metric_df(series_df)
+                    if metric_df.empty:
+                        render_kpi_card(c1, "Leader", "-", context="no data")
+                        render_kpi_card(c2, f"Top Gain ({w_label})", "-", context="no data")
+                        render_kpi_card(c3, f"Least Gain ({w_label})", "-", context="no data")
+                        render_kpi_card(c4, f"Fastest {w_label} Pace", "-", context="no data")
+                        render_kpi_card(c5, f"Most Improved ({w_label})", "-", context="no baseline data")
+                        render_kpi_card(c6, f"Most Declined ({w_label})", "-", context="no baseline data")
+                        return
 
-                latest_metric = series_df.sort_values("date").groupby("account", as_index=False).tail(1).copy()
-                latest_metric["value"] = pd.to_numeric(latest_metric["value"], errors="coerce")
-                latest_metric = latest_metric.dropna(subset=["value"])
-                if not latest_metric.empty:
-                    leader_row = latest_metric.sort_values("value", ascending=False).iloc[0]
-                    leader_date = pd.to_datetime(leader_row["date"], errors="coerce")
-                    leader_date_txt = leader_date.strftime("%Y-%m-%d") if pd.notna(leader_date) else "-"
-                    render_kpi_card(
-                        c1,
-                        "Leader",
-                        _fmt_total(leader_row["value"], unit),
-                        winner=str(leader_row["account"]),
-                        winner_color=account_color_map.get(str(leader_row["account"]).strip()),
-                        context=f"as of {leader_date_txt}",
-                    )
-                else:
-                    render_kpi_card(c1, "Leader", "-", context="no data")
-
-                activity_kpis = compute_player_kpis_window(
-                    metric_df,
-                    window_days=window_days,
-                    baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
-                )
-                eligible_pool = (
-                    activity_kpis[activity_kpis[eligible_col] == True].copy()  # noqa: E712
-                    if not activity_kpis.empty and eligible_col in activity_kpis.columns
-                    else pd.DataFrame()
-                )
-                active_pool = (
-                    eligible_pool[pd.to_numeric(eligible_pool[xp_gain_col], errors="coerce") > 0].copy()
-                    if not eligible_pool.empty
-                    else pd.DataFrame()
-                )
-                baseline_pool = (
-                    activity_kpis[activity_kpis[eligible_baseline_col] == True].copy()  # noqa: E712
-                    if not activity_kpis.empty and eligible_baseline_col in activity_kpis.columns
-                    else pd.DataFrame()
-                )
-
-                if not active_pool.empty:
-                    best = active_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
-                    worst = active_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[True, True]).iloc[0]
-                    top_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[False, False]).iloc[0]
-                    least_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[True, True]).iloc[0]
-                    render_kpi_card(
-                        c2,
-                        f"Top Gain ({w_label})",
-                        _fmt_gain(top_gain[xp_gain_col], unit),
-                        winner=str(top_gain["Spieler"]),
-                        winner_color=account_color_map.get(str(top_gain["Spieler"]).strip()),
-                        context=_fmt_rate(top_gain[xp_per_day_col], unit),
-                    )
-                    render_kpi_card(
-                        c3,
-                        f"Least Gain ({w_label})",
-                        _fmt_gain(least_gain[xp_gain_col], unit),
-                        winner=str(least_gain["Spieler"]),
-                        winner_color=account_color_map.get(str(least_gain["Spieler"]).strip()),
-                        context=_fmt_rate(least_gain[xp_per_day_col], unit),
-                    )
-                    render_kpi_card(
-                        c4,
-                        f"Fastest {w_label} Pace",
-                        _fmt_rate(best[xp_per_day_col], unit),
-                        winner=str(best["Spieler"]),
-                        winner_color=account_color_map.get(str(best["Spieler"]).strip()),
-                        context=_fmt_gain(best[xp_gain_col], unit),
-                    )
-                elif not eligible_pool.empty:
-                    no_active_ctx = f"all {xp_gain_col} = 0"
-                    render_kpi_card(c2, f"Top Gain ({w_label})", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
-                    render_kpi_card(c3, f"Least Gain ({w_label})", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
-                    render_kpi_card(c4, f"Fastest {w_label} Pace", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
-                else:
-                    render_kpi_card(c2, f"Top Gain ({w_label})", "-", context="no data")
-                    render_kpi_card(c3, f"Least Gain ({w_label})", "-", context="no data")
-                    render_kpi_card(c4, f"Fastest {w_label} Pace", "-", context="no data")
-
-                if not baseline_pool.empty:
-                    improved_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") > 0].copy()
-                    declined_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") < 0].copy()
-                    if not improved_pool.empty:
-                        improved = improved_pool.sort_values(delta_col, ascending=False).iloc[0]
+                    latest_metric = series_df.sort_values("date").groupby("account", as_index=False).tail(1).copy()
+                    latest_metric["value"] = pd.to_numeric(latest_metric["value"], errors="coerce")
+                    latest_metric = latest_metric.dropna(subset=["value"])
+                    if not latest_metric.empty:
+                        leader_row = latest_metric.sort_values("value", ascending=False).iloc[0]
+                        leader_date = pd.to_datetime(leader_row["date"], errors="coerce")
+                        leader_date_txt = leader_date.strftime("%Y-%m-%d") if pd.notna(leader_date) else "-"
                         render_kpi_card(
-                            c5,
-                            f"Most Improved ({w_label})",
-                            _fmt_rate(improved[xp_per_day_col], unit),
-                            winner=str(improved["Spieler"]),
-                            winner_color=account_color_map.get(str(improved["Spieler"]).strip()),
-                            delta=_fmt_delta_rate(improved[delta_col], unit),
+                            c1,
+                            "Leader",
+                            _fmt_total(leader_row["value"], unit, metric_label),
+                            winner=str(leader_row["account"]),
+                            winner_color=account_color_map.get(str(leader_row["account"]).strip()),
+                            context=f"as of {leader_date_txt}",
                         )
                     else:
-                        render_kpi_card(c5, f"Most Improved ({w_label})", "No improvements", context="all deltas <= 0", delta_color="off")
+                        render_kpi_card(c1, "Leader", "-", context="no data")
 
-                    if not declined_pool.empty:
-                        declined = declined_pool.sort_values(delta_col, ascending=True).iloc[0]
+                    activity_kpis = compute_player_kpis_window(
+                        metric_df,
+                        window_days=window_days,
+                        baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+                    )
+                    eligible_pool = (
+                        activity_kpis[activity_kpis[eligible_col] == True].copy()  # noqa: E712
+                        if not activity_kpis.empty and eligible_col in activity_kpis.columns
+                        else pd.DataFrame()
+                    )
+                    active_pool = (
+                        eligible_pool[pd.to_numeric(eligible_pool[xp_gain_col], errors="coerce") > 0].copy()
+                        if not eligible_pool.empty
+                        else pd.DataFrame()
+                    )
+                    baseline_pool = (
+                        activity_kpis[activity_kpis[eligible_baseline_col] == True].copy()  # noqa: E712
+                        if not activity_kpis.empty and eligible_baseline_col in activity_kpis.columns
+                        else pd.DataFrame()
+                    )
+
+                    if not active_pool.empty:
+                        best = active_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
+                        top_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[False, False]).iloc[0]
+                        least_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[True, True]).iloc[0]
                         render_kpi_card(
-                            c6,
-                            f"Most Declined ({w_label})",
-                            _fmt_rate(declined[xp_per_day_col], unit),
-                            winner=str(declined["Spieler"]),
-                            winner_color=account_color_map.get(str(declined["Spieler"]).strip()),
-                            delta=_fmt_delta_rate(declined[delta_col], unit),
+                            c2,
+                            f"Top Gain ({w_label})",
+                            _fmt_gain(top_gain[xp_gain_col], unit, metric_label),
+                            winner=str(top_gain["Spieler"]),
+                            winner_color=account_color_map.get(str(top_gain["Spieler"]).strip()),
+                            context=_fmt_rate(top_gain[xp_per_day_col], unit, metric_label),
                         )
+                        render_kpi_card(
+                            c3,
+                            f"Least Gain ({w_label})",
+                            _fmt_gain(least_gain[xp_gain_col], unit, metric_label),
+                            winner=str(least_gain["Spieler"]),
+                            winner_color=account_color_map.get(str(least_gain["Spieler"]).strip()),
+                            context=_fmt_rate(least_gain[xp_per_day_col], unit, metric_label),
+                        )
+                        render_kpi_card(
+                            c4,
+                            f"Fastest {w_label} Pace",
+                            _fmt_rate(best[xp_per_day_col], unit, metric_label),
+                            winner=str(best["Spieler"]),
+                            winner_color=account_color_map.get(str(best["Spieler"]).strip()),
+                            context=_fmt_gain(best[xp_gain_col], unit, metric_label),
+                        )
+                    elif not eligible_pool.empty:
+                        no_active_ctx = f"all {xp_gain_col} = 0"
+                        render_kpi_card(c2, f"Top Gain ({w_label})", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
+                        render_kpi_card(c3, f"Least Gain ({w_label})", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
+                        render_kpi_card(c4, f"Fastest {w_label} Pace", f"No active ({w_label})", context=no_active_ctx, delta_color="off")
                     else:
-                        render_kpi_card(c6, f"Most Declined ({w_label})", "No decline", context="all deltas >= 0", delta_color="off")
-                else:
-                    render_kpi_card(c5, f"Most Improved ({w_label})", "-", context="no baseline data")
-                    render_kpi_card(c6, f"Most Declined ({w_label})", "-", context="no baseline data")
+                        render_kpi_card(c2, f"Top Gain ({w_label})", "-", context="no data")
+                        render_kpi_card(c3, f"Least Gain ({w_label})", "-", context="no data")
+                        render_kpi_card(c4, f"Fastest {w_label} Pace", "-", context="no data")
+
+                    if not baseline_pool.empty:
+                        improved_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") > 0].copy()
+                        declined_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") < 0].copy()
+                        if not improved_pool.empty:
+                            improved = improved_pool.sort_values(delta_col, ascending=False).iloc[0]
+                            render_kpi_card(
+                                c5,
+                                f"Most Improved ({w_label})",
+                                _fmt_rate(improved[xp_per_day_col], unit, metric_label),
+                                winner=str(improved["Spieler"]),
+                                winner_color=account_color_map.get(str(improved["Spieler"]).strip()),
+                                delta=_fmt_delta_rate(improved[delta_col], unit, metric_label),
+                            )
+                        else:
+                            render_kpi_card(c5, f"Most Improved ({w_label})", "No improvements", context="all deltas <= 0", delta_color="off")
+
+                        if not declined_pool.empty:
+                            declined = declined_pool.sort_values(delta_col, ascending=True).iloc[0]
+                            render_kpi_card(
+                                c6,
+                                f"Most Declined ({w_label})",
+                                _fmt_rate(declined[xp_per_day_col], unit, metric_label),
+                                winner=str(declined["Spieler"]),
+                                winner_color=account_color_map.get(str(declined["Spieler"]).strip()),
+                                delta=_fmt_delta_rate(declined[delta_col], unit, metric_label),
+                            )
+                        else:
+                            render_kpi_card(c6, f"Most Declined ({w_label})", "No decline", context="all deltas >= 0", delta_color="off")
+                    else:
+                        render_kpi_card(c5, f"Most Improved ({w_label})", "-", context="no baseline data")
+                        render_kpi_card(c6, f"Most Declined ({w_label})", "-", context="no baseline data")
 
             st.caption(f"Activity Performance ({w_label})")
-            _render_activity_kpi_row(battles_series, "Battles Won", "")
-            _render_activity_kpi_row(caught_series, "Pokemon Caught", "")
-            _render_activity_kpi_row(km_series, "Distance Walked", "km")
+            _render_activity_kpi_row(battles_series, "Battles", "", "Battles")
+            _render_activity_kpi_row(caught_series, "Pokemon", "", "Pokemon")
+            _render_activity_kpi_row(km_series, "Distance Walked", "km", "Km")
 
             def _clip_series_to_selected_range(series_df: pd.DataFrame) -> pd.DataFrame:
                 if series_df.empty:
@@ -2342,13 +2357,14 @@ def _render_xp_explorer_section_impl(
                 per_acc.append(f"{acc}: {float(val):.1f}d")
         return " | ".join(per_acc)
 
-    k1, k2, k3, k4, k5 = st.columns(5)
     render_account_color_legend(display_accounts or activity_accounts, personal_activity_color_map)
-    render_kpi_card(k1, "Pokemon Caught/day", _latest_per_core_txt(caught_df), help_text="Latest interval per core account from Collector medal deltas.")
-    render_kpi_card(k2, "Raids/day", _latest_per_core_txt(raids_df), help_text="Latest interval per core account from Champion + Battle Legend deltas.")
-    render_kpi_card(k3, "PokeStops/day", _latest_per_core_txt(stops_df), help_text="Latest interval per core account from Backpacker medal deltas.")
-    render_kpi_card(k4, "Km/day", _latest_per_core_txt(km_df), help_text="Latest interval per core account from Jogger medal deltas.")
-    render_kpi_card(k5, "Interval (avg days)", _avg_interval_txt(intervals_df), help_text="Average snapshot interval from medal history.")
+    with st.container(key="pogo_activity_personal_metrics"):
+        k1, k2, k3, k4, k5 = st.columns(5)
+        render_kpi_card(k1, "Pokemon Caught/day", _latest_per_core_txt(caught_df), help_text="Latest interval per core account from Collector medal deltas.")
+        render_kpi_card(k2, "Raids/day", _latest_per_core_txt(raids_df), help_text="Latest interval per core account from Champion + Battle Legend deltas.")
+        render_kpi_card(k3, "PokeStops/day", _latest_per_core_txt(stops_df), help_text="Latest interval per core account from Backpacker medal deltas.")
+        render_kpi_card(k4, "Km/day", _latest_per_core_txt(km_df), help_text="Latest interval per core account from Jogger medal deltas.")
+        render_kpi_card(k5, "Interval (avg days)", _avg_interval_txt(intervals_df), help_text="Average snapshot interval from medal history.")
 
     g1, g2 = st.columns(2)
     with g1:
