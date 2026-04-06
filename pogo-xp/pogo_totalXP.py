@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shared.paths import player_groups_path, repo_root, total_xp_curve_path, xp_history_path
+from shared.xp_utils import carry_forward_max_level_rows, is_max_level, total_xp_from_level_input
 
 CURVE_FILE = str(total_xp_curve_path())
 HISTORY_FILE = str(xp_history_path())
@@ -208,12 +209,13 @@ def load_history(path: str, total_xp_by_level: dict[int, int]) -> pd.DataFrame:
     hist = hist.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
     hist["Lvl"] = hist["Lvl"].astype(int)
     hist["XP Bar"] = hist["XP Bar"].astype(int)
+    hist = hist[hist["Lvl"].isin(set(total_xp_by_level.keys()))].copy()
 
     def calc_total(row: pd.Series) -> int:
         lvl = row["Lvl"]
         if lvl not in total_xp_by_level:
             raise ValueError(f"Level {lvl} from history file not found in curve file.")
-        return int(total_xp_by_level[lvl] + row["XP Bar"])
+        return total_xp_from_level_input(int(lvl), int(row["XP Bar"]), total_xp_by_level)
 
     hist["Total XP"] = hist.apply(calc_total, axis=1)
     hist = hist.sort_values(["Date", "Spieler"]).reset_index(drop=True)
@@ -449,6 +451,7 @@ def plot_curve_with_players(
 
     for i, r in players_plot.iterrows():
         player = str(r["Spieler"])
+        lvl = int(r["Lvl"])
         ax.scatter(
             [r["x_plot"]],
             [r["y_plot"]],
@@ -457,6 +460,7 @@ def plot_curve_with_players(
             edgecolors="white",
             linewidths=1.4,
             zorder=7,
+            marker="D" if is_max_level(lvl, xp_to_next_by_level) else "o",
             label="Players" if i == 0 else "_nolegend_",
         )
 
@@ -465,14 +469,15 @@ def plot_curve_with_players(
         lvl = int(r["Lvl"])
         xp_needed = int(xp_to_next_by_level.get(lvl, 0))
         xp_bar = int(r["XP Bar"])
-        if xp_needed <= 0:
-            pct = 100
+        if is_max_level(lvl, xp_to_next_by_level):
+            label = f'{r["Spieler"]}({int(r["Total XP"]) / 1_000_000:.1f}M)'
+        elif xp_needed <= 0:
+            label = f'{r["Spieler"]}(100%)'
         else:
             pct = int(round((xp_bar / xp_needed) * 100))
             pct = max(0, min(100, pct))
-        label_points.append(
-            {"x": float(r["x_plot"]), "y": int(r["Total XP"]), "text": f'{r["Spieler"]}({pct}%)'}
-        )
+            label = f'{r["Spieler"]}({pct}%)'
+        label_points.append({"x": float(r["x_plot"]), "y": int(r["Total XP"]), "text": label})
 
     ax.set_title(f"{group_name}: Pogo XP Growth{title_suffix}")
     ax.set_xlabel("Level")
@@ -944,6 +949,7 @@ def main():
     curve = read_curve(CURVE_FILE)
     total_xp_by_level = dict(zip(curve["Level"], curve["Total XP"]))
     history = load_history(HISTORY_FILE, total_xp_by_level)
+    history = carry_forward_max_level_rows(history, total_xp_by_level)
     groups = parse_groups(args.groups_file)
     history_names = set(history["Spieler"].astype(str).unique())
 

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from shared.xp_utils import total_xp_from_level_input
+
 
 def to_int_series(series: pd.Series) -> pd.Series:
     cleaned = series.astype(str).str.replace(r"[^0-9\-]", "", regex=True)
@@ -89,6 +91,18 @@ def add_account_to_groups(path: Path, account_name: str, target_groups: list[str
     return selected_groups
 
 
+def accounts_for_selected_group(
+    selected_group: str,
+    groups: dict[str, list[str]],
+    all_accounts: list[str],
+) -> list[str]:
+    available = set(all_accounts)
+    if selected_group == "All" and "All" not in groups:
+        return list(all_accounts)
+    group_accounts = [str(a).strip() for a in groups.get(selected_group, []) if str(a).strip()]
+    return [a for a in group_accounts if a in available]
+
+
 def load_curve_map(path: Path) -> dict[int, int]:
     if not path.exists():
         return {}
@@ -120,9 +134,11 @@ def load_xp_history(path: Path, curve_map: dict[int, int]) -> pd.DataFrame:
     hist = hist.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
     hist["Lvl"] = hist["Lvl"].astype(int)
     hist["XP Bar"] = hist["XP Bar"].astype(int)
-    hist["base_xp"] = hist["Lvl"].map(curve_map)
-    hist = hist.dropna(subset=["base_xp"]).copy()
-    hist["Total XP"] = hist["base_xp"].astype(int) + hist["XP Bar"]
+    hist = hist[hist["Lvl"].isin(set(curve_map.keys()))].copy()
+    hist["Total XP"] = hist.apply(
+        lambda row: total_xp_from_level_input(int(row["Lvl"]), int(row["XP Bar"]), curve_map),
+        axis=1,
+    )
     return hist[cols].sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
 

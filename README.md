@@ -134,6 +134,7 @@ Dashboard pages:
   - platinum progress graph ignores dates before medal tracking start per account
 - `Data Input`:
   - XP snapshot input for multiple accounts in one save
+  - accounts whose latest XP row is already at the highest configured level (currently `80`) are skipped in XP input because no further visible XP input is expected
   - for selected date, accounts already entered are hidden so you only see missing accounts
   - medal snapshot input account-wise (`Thombay`, `Cerius`, `Thomzay`) with one-save full medal list
   - for selected date, accounts already entered are hidden so you only see missing accounts
@@ -212,3 +213,4 @@ XP source for medal report:
 
 - Preferred canonical file: `inputs/data/xp_snapshots.csv` with columns `date`, `spieler`, `total xp`
 - Current working fallback: `inputs/data/xp_history.csv` + `inputs/reference/total_xp_curve.csv` (level + XP bar converted to total XP)
+  - max-level rows in `xp_history.csv` still use the stored level-plus-bar format; dashboard/XP plots can carry the last known max-level value forward on later snapshot dates

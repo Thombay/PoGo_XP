@@ -29,6 +29,7 @@ from shared.paths import (
     total_xp_curve_path,
     xp_history_path,
 )
+from shared.xp_utils import carry_forward_max_level_rows, is_max_level, max_configured_level, total_xp_from_level_input
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
     WINDOW_DAYS_DEFAULT,
@@ -38,6 +39,7 @@ from webapp.metrics import (
 )
 from webapp.data_files import (
     add_account_to_groups,
+    accounts_for_selected_group,
     load_curve_map,
     load_medal_goals,
     load_medal_snapshots,
@@ -2471,27 +2473,31 @@ def _validate_xp_rows_non_decreasing(
     existing = existing_df.copy()
     if not existing.empty:
         existing = existing.drop_duplicates(subset=["Date", "Spieler"], keep="last")
-        existing["base_xp"] = existing["Lvl"].map(curve_map)
-        existing["Total XP"] = pd.to_numeric(existing["base_xp"], errors="coerce") + pd.to_numeric(
-            existing["XP Bar"], errors="coerce"
+        existing["Lvl"] = pd.to_numeric(existing["Lvl"], errors="coerce")
+        existing["XP Bar"] = pd.to_numeric(existing["XP Bar"], errors="coerce")
+        existing = existing.dropna(subset=["Date", "Spieler", "Lvl", "XP Bar"]).copy()
+        existing["Lvl"] = existing["Lvl"].astype(int)
+        existing["XP Bar"] = existing["XP Bar"].astype(int)
+        existing = existing[existing["Lvl"].isin(set(curve_map.keys()))].copy()
+        existing["Total XP"] = existing.apply(
+            lambda row: total_xp_from_level_input(int(row["Lvl"]), int(row["XP Bar"]), curve_map),
+            axis=1,
         )
         existing = existing.dropna(subset=["Date", "Spieler", "Total XP"]).copy()
 
     rows = new_df.drop_duplicates(subset=["Date", "Spieler"], keep="last").copy()
-    rows["base_xp"] = rows["Lvl"].map(curve_map)
     for _, row in rows.iterrows():
         player = str(row["Spieler"]).strip()
         dt = pd.to_datetime(row["Date"], errors="coerce")
         lvl = pd.to_numeric(row["Lvl"], errors="coerce")
         xp_bar = pd.to_numeric(row["XP Bar"], errors="coerce")
-        base_xp = pd.to_numeric(row["base_xp"], errors="coerce")
         if pd.isna(dt) or not player or pd.isna(lvl) or pd.isna(xp_bar):
             continue
-        if pd.isna(base_xp):
+        if int(lvl) not in curve_map:
             errors.append(f"{player} {pd.Timestamp(dt).date().isoformat()}: missing XP curve entry for level {int(lvl)}.")
             continue
 
-        total_xp = int(base_xp) + int(xp_bar)
+        total_xp = total_xp_from_level_input(int(lvl), int(xp_bar), curve_map)
         if existing.empty:
             continue
 
@@ -3322,6 +3328,7 @@ def build_xp_growth_figure(
         pts["Lvl"] = pd.to_numeric(pts["Lvl"], errors="coerce")
         pts["Total XP"] = pd.to_numeric(pts["Total XP"], errors="coerce")
         pts = pts.dropna(subset=["Lvl", "Total XP"]).copy()
+        pts["Lvl"] = pts["Lvl"].astype(int)
         pts["Total XP (M)"] = pts["Total XP"] / 1_000_000
         pts = pts.sort_values("Total XP", ascending=False).reset_index(drop=True)
         pts["label"] = ""
@@ -3345,6 +3352,10 @@ def build_xp_growth_figure(
                     color=[
                         (account_color_map or {}).get(str(player), "#ff4d4d")
                         for player in pts["Spieler"].astype(str).tolist()
+                    ],
+                    symbol=[
+                        "diamond" if is_max_level(int(lvl), curve_map) else "circle"
+                        for lvl in pts["Lvl"].tolist()
                     ],
                 ),
                 hovertemplate="Player: %{customdata[0]}<br>Level: %{x}<br>Total XP: %{customdata[1]:,.0f}<extra></extra>",
@@ -3390,14 +3401,6 @@ def build_xp_growth_figure(
         zeroline=False,
     )
     return fig
-
-
-def accounts_for_selected_group(selected_group: str, groups: dict[str, list[str]], all_accounts: list[str]) -> list[str]:
-    if selected_group == "All":
-        return list(all_accounts)
-    group_accounts = [str(a).strip() for a in groups.get(selected_group, []) if str(a).strip()]
-    available = set(all_accounts)
-    return [a for a in group_accounts if a in available]
 
 
 def _slugify(value: str) -> str:
@@ -4533,7 +4536,8 @@ st.title("PoGo Local Dashboard")
 st.caption("Interactive XP + medal dashboard.")
 
 curve_map = load_curve_map(total_xp_curve_path())
-xp_df = load_xp_history(xp_history_path(), curve_map)
+xp_input_df = load_xp_history(xp_history_path(), curve_map)
+xp_df = carry_forward_max_level_rows(xp_input_df, curve_map)
 additional_activity_df = load_additional_activity(additional_activity_path())
 groups = parse_groups(player_groups_path())
 medal_df = load_medal_snapshots(
@@ -4545,8 +4549,8 @@ goals_df = load_medal_goals(medals_config_path())
 ensure_medal_explanations_file(medal_explanations_path(), goals_df)
 medal_explanations_map = load_medal_explanations(medal_explanations_path())
 display_medal_df = with_derived_platinum_rows(medal_df, goals_df)
-all_accounts = account_options_from_data(xp_df, medal_df)
-latest_xp_df = latest_xp_snapshot(xp_df)
+all_accounts = account_options_from_data(xp_input_df, medal_df)
+latest_xp_df = latest_xp_snapshot(xp_input_df)
 
 pages = [
     "Dashboard Global",
@@ -5269,12 +5273,23 @@ if page == "Data Input":
         raw_players = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
         all_players = load_xp_input_order(raw_players)
         xp_on_date = set()
-        if not xp_df.empty:
-            xp_on_date = set(xp_df[xp_df["Date"].dt.date == xp_date]["Spieler"].astype(str).tolist())
-        available_xp_accounts = [a for a in all_players if a not in xp_on_date]
+        if not xp_input_df.empty:
+            xp_on_date = set(xp_input_df[xp_input_df["Date"].dt.date == xp_date]["Spieler"].astype(str).tolist())
+        max_level_accounts: set[str] = set()
+        xp_level_max = max_configured_level(curve_map) or 100
+        if not xp_input_df.empty:
+            latest_actual_xp = xp_input_df.sort_values(["Spieler", "Date"]).groupby("Spieler", as_index=False).tail(1)
+            max_level_accounts = set(
+                latest_actual_xp[latest_actual_xp["Lvl"].astype(int) >= int(xp_level_max)]["Spieler"].astype(str).tolist()
+            )
+        available_xp_accounts = [a for a in all_players if a not in xp_on_date and a not in max_level_accounts]
 
         if xp_on_date:
             st.caption(f"Already entered for this date: {', '.join(sorted(xp_on_date))}")
+        if max_level_accounts:
+            st.caption(
+                f"No XP input needed after max level {xp_level_max}: {', '.join(sorted(max_level_accounts))}"
+            )
         if available_xp_accounts:
             st.caption(f"Missing for this date: {', '.join(available_xp_accounts)}")
 
@@ -5290,8 +5305,8 @@ if page == "Data Input":
             st.info("Select at least one missing account.")
         else:
             latest_map: dict[str, tuple[int, int]] = {}
-            if not xp_df.empty:
-                latest_xp = xp_df.sort_values(["Spieler", "Date"]).groupby("Spieler", as_index=False).tail(1)
+            if not xp_input_df.empty:
+                latest_xp = xp_input_df.sort_values(["Spieler", "Date"]).groupby("Spieler", as_index=False).tail(1)
                 for _, r in latest_xp.iterrows():
                     latest_map[str(r["Spieler"])] = (int(r["Lvl"]), int(r["XP Bar"]))
 
@@ -5366,12 +5381,14 @@ if page == "Data Input":
             h11.markdown("**Distance Walked**")
             h12.markdown("**Caught (last)**")
             h13.markdown("**Pokemon Caught**")
-            h14.markdown("**Status**")
+            h14.markdown("**Error**")
 
             xp_inputs: list[dict[str, object]] = []
             inline_xp_errors: list[str] = []
-            xp_existing_for_validation = xp_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy() if not xp_df.empty else pd.DataFrame(
-                columns=["Date", "Spieler", "Lvl", "XP Bar"]
+            xp_existing_for_validation = (
+                xp_input_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy()
+                if not xp_input_df.empty
+                else pd.DataFrame(columns=["Date", "Spieler", "Lvl", "XP Bar"])
             )
 
             def _fmt_input_default(val: object, decimals: int = 0) -> str:
@@ -5420,7 +5437,7 @@ if page == "Data Input":
                         current_lvl = int(st.session_state[lvl_state_key])
                     except Exception:
                         current_lvl = int(row["lvl"])
-                    st.session_state[lvl_state_key] = max(1, min(100, current_lvl))
+                    st.session_state[lvl_state_key] = max(1, min(xp_level_max, current_lvl))
                 dec_clicked = c4.button(
                     " ",
                     key=f"{lvl_state_key}_dec",
@@ -5438,11 +5455,11 @@ if page == "Data Input":
                     use_container_width=True,
                 )
                 if inc_clicked:
-                    st.session_state[lvl_state_key] = min(100, int(st.session_state[lvl_state_key]) + 1)
+                    st.session_state[lvl_state_key] = min(xp_level_max, int(st.session_state[lvl_state_key]) + 1)
                 lvl_value = c5.number_input(
                     "Level",
                     min_value=1,
-                    max_value=100,
+                    max_value=xp_level_max,
                     step=1,
                     format="%d",
                     key=lvl_state_key,
@@ -5560,7 +5577,7 @@ if page == "Data Input":
                         unsafe_allow_html=True,
                     )
                 else:
-                    c14.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
+                    c14.caption("")
                 xp_inputs.append(
                     {
                         "account": acc,
@@ -5589,7 +5606,7 @@ if page == "Data Input":
                     if not acc:
                         errors.append("Missing account value.")
                         continue
-                    if pd.isna(lvl) or int(lvl) < 1:
+                    if pd.isna(lvl) or int(lvl) < 1 or int(lvl) > xp_level_max:
                         errors.append(f"{acc}: invalid level.")
                         continue
                     if pd.isna(xp_bar) or int(xp_bar) < 0:

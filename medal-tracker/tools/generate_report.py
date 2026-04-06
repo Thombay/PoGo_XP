@@ -17,6 +17,7 @@ from shared.paths import (
     xp_history_path,
     xp_snapshots_path,
 )
+from shared.xp_utils import total_xp_from_level_input
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
 DERIVED_MEDAL_ID = "platinum_medals"
@@ -79,9 +80,11 @@ def _try_load_xp_history(path: Path) -> pd.DataFrame:
     hist = hist.dropna(subset=["date", "account", "Lvl", "XP Bar"]).copy()
     hist["Lvl"] = hist["Lvl"].astype(int)
     hist["XP Bar"] = hist["XP Bar"].astype(int)
-    hist["base_xp"] = hist["Lvl"].map(total_xp_by_level)
-    hist = hist.dropna(subset=["base_xp"]).copy()
-    hist["total_xp"] = hist["base_xp"].astype(int) + hist["XP Bar"]
+    hist = hist[hist["Lvl"].isin(set(total_xp_by_level.keys()))].copy()
+    hist["total_xp"] = hist.apply(
+        lambda row: total_xp_from_level_input(int(row["Lvl"]), int(row["XP Bar"]), total_xp_by_level),
+        axis=1,
+    )
 
     out = hist[["date", "account", "total_xp"]].copy()
     out = out.sort_values(["account", "date"]).reset_index(drop=True)
