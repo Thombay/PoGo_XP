@@ -63,6 +63,7 @@ DASHBOARD_WINDOW_OPTIONS = [7, 30]
 MIN_ELIGIBLE_FOR_30D_DEFAULT = 2
 TREND_MIN_DATE = pd.Timestamp("2025-01-01")
 TREND_MIN_DATE_LABEL = "2025-01-01"
+MEDAL_GOAL_TREND_SNAPSHOTS = 3
 MIN_MEDAL_ROWS_FOR_TRACKING_START = 10
 EXCLUDED_MANUAL_MEDAL_IDS = {"total_xp", DERIVED_MEDAL_ID}
 GOAL_ALIAS_BY_MEDAL_ID = {
@@ -297,6 +298,19 @@ def _filter_trend_series(series: pd.DataFrame, date_col: str, value_col: str) ->
     return s.sort_values(date_col)
 
 
+def _goal_projection_fit_series(
+    series: pd.DataFrame,
+    *,
+    date_col: str,
+    value_col: str,
+    trend_points: int | None = None,
+) -> pd.DataFrame:
+    s = _filter_trend_series(series, date_col, value_col)
+    if trend_points is not None and int(trend_points) > 0 and len(s) > int(trend_points):
+        s = s.tail(int(trend_points)).copy()
+    return s.reset_index(drop=True)
+
+
 def infer_medal_tracking_start_dates(
     medal_df: pd.DataFrame,
     min_medal_rows: int = MIN_MEDAL_ROWS_FOR_TRACKING_START,
@@ -333,8 +347,8 @@ def infer_medal_tracking_start_dates(
     return starts
 
 
-def _predict_goal_eta(series: pd.DataFrame, goal_value: float) -> pd.Timestamp | None:
-    s = _filter_trend_series(series, "date", "value")
+def _predict_goal_eta(series: pd.DataFrame, goal_value: float, trend_points: int | None = None) -> pd.Timestamp | None:
+    s = _goal_projection_fit_series(series, date_col="date", value_col="value", trend_points=trend_points)
     if len(s) < 2 or pd.isna(goal_value):
         return None
 
@@ -458,10 +472,15 @@ def build_goal_projection_trace(
     account: str,
     color: str | None = None,
 ) -> go.Scatter | None:
-    s = _filter_trend_series(series, "date", "value")
+    s = _goal_projection_fit_series(
+        series,
+        date_col="date",
+        value_col="value",
+        trend_points=MEDAL_GOAL_TREND_SNAPSHOTS,
+    )
     if s.empty:
         return None
-    eta = _predict_goal_eta(s[["date", "value"]], goal_value)
+    eta = _predict_goal_eta(s[["date", "value"]], goal_value, trend_points=MEDAL_GOAL_TREND_SNAPSHOTS)
     if eta is None:
         return None
 
@@ -569,6 +588,31 @@ def _goal_days_status_for_account(
     if s.empty:
         return "n/a (insufficient trend data)", "unknown"
 
+    def _pace_suffix() -> str:
+        latest_pace: float | None = None
+        previous_pace: float | None = None
+        if len(s) >= 2:
+            latest_value = pd.to_numeric(pd.Series([s[value_col].iloc[-1]]), errors="coerce").iloc[0]
+            prev_value = pd.to_numeric(pd.Series([s[value_col].iloc[-2]]), errors="coerce").iloc[0]
+            latest_dt = pd.Timestamp(s[date_col].iloc[-1]).normalize()
+            prev_dt = pd.Timestamp(s[date_col].iloc[-2]).normalize()
+            latest_days = int((latest_dt - prev_dt).days)
+            if pd.notna(latest_value) and pd.notna(prev_value) and latest_days > 0:
+                latest_pace = float(latest_value - prev_value) / float(latest_days)
+        if len(s) >= 3:
+            prev_value = pd.to_numeric(pd.Series([s[value_col].iloc[-2]]), errors="coerce").iloc[0]
+            prev2_value = pd.to_numeric(pd.Series([s[value_col].iloc[-3]]), errors="coerce").iloc[0]
+            prev_dt = pd.Timestamp(s[date_col].iloc[-2]).normalize()
+            prev2_dt = pd.Timestamp(s[date_col].iloc[-3]).normalize()
+            prev_days = int((prev_dt - prev2_dt).days)
+            if pd.notna(prev_value) and pd.notna(prev2_value) and prev_days > 0:
+                previous_pace = float(prev_value - prev2_value) / float(prev_days)
+        if latest_pace is None:
+            return ""
+        if previous_pace is None:
+            return f" | pace {latest_pace:,.2f}/day"
+        return f" | pace {latest_pace:,.2f}/day vs prev {previous_pace:,.2f}/day"
+
     latest_date = pd.Timestamp(s[date_col].iloc[-1]).normalize()
     goal = float(goal_value)
     reached_rows = s[pd.to_numeric(s[value_col], errors="coerce") >= goal]
@@ -577,20 +621,39 @@ def _goal_days_status_for_account(
         reached_txt = reached_date.date().isoformat()
         days_ahead = int((latest_date - reached_date).days)
         if days_ahead <= 0:
-            return f"completed (reached {reached_txt})", "completed"
-        return f"completed ({days_ahead}d ago, reached {reached_txt})", "completed"
+            return f"completed (reached {reached_txt}){_pace_suffix()}", "completed"
+        return f"completed ({days_ahead}d ago, reached {reached_txt}){_pace_suffix()}", "completed"
 
     eta = _predict_goal_eta(
         s.rename(columns={date_col: "date", value_col: "value"})[["date", "value"]],
         goal,
+        trend_points=MEDAL_GOAL_TREND_SNAPSHOTS,
     )
+
     if eta is None:
-        return "behind (no ETA: trend too flat/negative)", "behind"
+        return "no ETA yet (trend too flat/negative)", "unknown"
     eta_txt = pd.Timestamp(eta).date().isoformat()
-    days_behind = int((pd.Timestamp(eta).normalize() - latest_date).days)
-    if days_behind <= 0:
-        return f"ahead (ETA {eta_txt})", "ahead"
-    return f"{days_behind}d behind (ETA {eta_txt})", "behind"
+
+    previous_eta: pd.Timestamp | None = None
+    if len(s) >= 3:
+        previous_eta = _predict_goal_eta(
+            s.iloc[:-1].rename(columns={date_col: "date", value_col: "value"})[["date", "value"]],
+            goal,
+            trend_points=MEDAL_GOAL_TREND_SNAPSHOTS,
+        )
+
+    if previous_eta is None:
+        days_to_goal = int((pd.Timestamp(eta).normalize() - latest_date).days)
+        if days_to_goal <= 0:
+            return f"ETA {eta_txt}{_pace_suffix()}", "unknown"
+        return f"ETA {eta_txt} ({days_to_goal}d from latest snapshot){_pace_suffix()}", "unknown"
+
+    eta_shift_days = int((pd.Timestamp(eta).normalize() - pd.Timestamp(previous_eta).normalize()).days)
+    if eta_shift_days < 0:
+        return f"ETA improved by {abs(eta_shift_days)}d since last snapshot (ETA {eta_txt}){_pace_suffix()}", "improved"
+    if eta_shift_days > 0:
+        return f"ETA worsened by {abs(eta_shift_days)}d since last snapshot (ETA {eta_txt}){_pace_suffix()}", "declined"
+    return f"ETA unchanged since last snapshot (ETA {eta_txt}){_pace_suffix()}", "unknown"
 
 
 def build_goal_days_status_html(
@@ -627,8 +690,8 @@ def build_goal_days_status_html(
         )
         account_name = escape(str(account))
         status_color_map = {
-            "ahead": "#16A34A",
-            "behind": "#DC2626",
+            "improved": "#16A34A",
+            "declined": "#DC2626",
             "completed": "#2563EB",
             "unknown": "#64748B",
         }
@@ -640,7 +703,7 @@ def build_goal_days_status_html(
 
     return (
         "<b>Goal Pace</b><br>"
-        "<span style='color:#94A3B8'>relative to latest snapshot date</span><br>"
+        "<span style='color:#94A3B8'>ETA change since previous snapshot</span><br>"
         + "<br>".join(rows)
     )
 
@@ -4799,7 +4862,10 @@ if page == "Medal Explorer":
     if display_medal_df.empty:
         st.warning("No medal snapshot data found.")
     else:
-        selected_accounts = st.multiselect("Accounts", all_accounts, default=all_accounts[:3] or all_accounts)
+        default_medal_accounts = [a for a in MEDAL_EXPLORER_CORE_ACCOUNTS if a in set(all_accounts)]
+        if not default_medal_accounts:
+            default_medal_accounts = all_accounts[:3] or all_accounts
+        selected_accounts = st.multiselect("Accounts", all_accounts, default=default_medal_accounts)
         selected_medal_source_df = medal_df[medal_df["account"].isin(selected_accounts)].copy()
         tracking_start_by_account = infer_medal_tracking_start_dates(
             selected_medal_source_df,
