@@ -3917,20 +3917,23 @@ def _build_dashboard_export_payload(
                 pct_col: f"% vs Baseline ({w_label})",
             }
         )
-        fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df)
+        fig_growth = build_xp_growth_figure(curve_map, dash_latest_xp_df, export_account_color_map)
 
         if not dash_recent_gain_df.empty:
             gain_top = dash_recent_gain_df.sort_values("xp_gain", ascending=False).head(10).copy()
             fig_gain = px.bar(
-                gain_top.sort_values("xp_gain", ascending=False),
+                gain_top.sort_values("xp_gain", ascending=True),
                 x="xp_gain",
                 y="Spieler",
                 orientation="h",
+                color="Spieler",
+                color_discrete_map=export_account_color_map,
                 title=f"Top XP Gain ({w_label})",
                 labels={"xp_gain": "XP Gain", "Spieler": "Account"},
             )
             gain_height = max(320, 34 * len(gain_top) + 80)
             fig_gain.update_layout(height=gain_height, margin=dict(l=150, r=30, t=45, b=35))
+            fig_gain.update_layout(showlegend=False)
             fig_gain.update_xaxes(tickformat=",")
             fig_gain.update_yaxes(automargin=True, autorange="reversed")
             gain_view = gain_top[["Spieler", "xp_gain", "xp_per_day"]].copy().rename(
@@ -3950,6 +3953,7 @@ def _build_dashboard_export_payload(
             x="Date",
             y="XP Gain",
             color="Spieler",
+            color_discrete_map=export_account_color_map,
             markers=True,
             title="XP Gain Over Time",
         )
@@ -3959,6 +3963,7 @@ def _build_dashboard_export_payload(
             x="Date",
             y="Total XP",
             color="Spieler",
+            color_discrete_map=export_account_color_map,
             markers=True,
             title="Total XP Over Time",
         )
@@ -3974,6 +3979,8 @@ def _build_dashboard_export_payload(
                         mode="lines+markers",
                         line_shape="hv",
                         name=player,
+                        line=dict(color=export_account_color_map.get(str(player))),
+                        marker=dict(color=export_account_color_map.get(str(player))),
                     )
                 )
             fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
@@ -3996,6 +4003,7 @@ def _build_dashboard_export_payload(
                 x="Date",
                 y="Gap Change",
                 color="Spieler",
+                color_discrete_map=export_account_color_map,
                 markers=True,
                 title="Gap Change Since First Snapshot",
             )
@@ -4013,6 +4021,7 @@ def _build_dashboard_export_payload(
                 x="Date",
                 y="XP/day",
                 color="Spieler",
+                color_discrete_map=export_account_color_map,
                 markers=True,
                 title="Interval Pace (XP/day)",
             )
@@ -5109,6 +5118,10 @@ if page == "Medal Explorer":
         if not default_medal_accounts:
             default_medal_accounts = all_accounts[:3] or all_accounts
         selected_accounts = st.multiselect("Accounts", all_accounts, default=default_medal_accounts)
+        medal_account_color_map = build_account_color_map(
+            selected_accounts,
+            xp_df[xp_df["Spieler"].isin(selected_accounts)].copy(),
+        )
         selected_medal_source_df = medal_df[medal_df["account"].isin(selected_accounts)].copy()
         tracking_start_by_account = infer_medal_tracking_start_dates(
             selected_medal_source_df,
@@ -5295,10 +5308,12 @@ if page == "Medal Explorer":
                         x="date",
                         y="value",
                         color="account",
+                        color_discrete_map=medal_account_color_map,
                         markers=True,
                         title=f"Progress: {platinum_title}",
                     )
                     add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID, status_mode="in_chart")
+                    apply_account_colors(fig_platinum, medal_account_color_map)
                     fig_platinum.update_layout(height=520)
                     render_plotly_chart(fig_platinum, use_container_width=True)
                     st.caption(
@@ -5317,6 +5332,7 @@ if page == "Medal Explorer":
                     x="Date",
                     y="Total XP",
                     color="Spieler",
+                    color_discrete_map=medal_account_color_map,
                     markers=True,
                     title="Progress: XP",
                 )
@@ -5340,6 +5356,7 @@ if page == "Medal Explorer":
                             )
                             if trend_trace is not None:
                                 fig_xp.add_trace(trend_trace)
+                apply_account_colors(fig_xp, medal_account_color_map)
                 if xp_goal_value is not None:
                     account_count_xp = int(xp_line_df["Spieler"].dropna().astype(str).nunique())
                     status_y_xp = max(0.22, min(0.84, 1.0 - 0.06 * max(1, account_count_xp)))
@@ -5447,6 +5464,7 @@ if page == "Medal Explorer":
                             x="date",
                             y="value",
                             color="account",
+                            color_discrete_map=medal_account_color_map,
                             markers=True,
                             title=None,
                         )
@@ -5467,6 +5485,7 @@ if page == "Medal Explorer":
                                         ),
                                     )
                         status_html = add_goal_and_trends(fig_medal, line_df, medal_id, status_mode="below_chart")
+                        apply_account_colors(fig_medal, medal_account_color_map)
                         fig_medal.update_layout(height=320, margin=dict(t=20))
                         with row_cols[col_idx]:
                             title_text = f"Progress: {title_label}"

@@ -196,6 +196,15 @@ def _style_export_figure(fig: go.Figure, mode: str) -> None:
 
     name_to_color: dict[str, str] = {}
     next_idx = 0
+
+    def _scalar_color(value: object) -> str | None:
+        if isinstance(value, str):
+            return value
+        return None
+
+    def _has_multi_color(value: object) -> bool:
+        return isinstance(value, (list, tuple))
+
     for tr in fig.data:
         trace_name = str(getattr(tr, "name", "")).strip() or f"trace_{next_idx}"
         if trace_name not in name_to_color:
@@ -204,12 +213,32 @@ def _style_export_figure(fig: go.Figure, mode: str) -> None:
         color = name_to_color[trace_name]
         trace_type = str(getattr(tr, "type", ""))
         if trace_type in {"scatter", "scattergl"}:
-            tr.update(
-                line=dict(color=color),
-                marker=dict(color=color),
-            )
+            line_obj = getattr(tr, "line", None)
+            marker_obj = getattr(tr, "marker", None)
+            raw_line_color = getattr(line_obj, "color", None) if line_obj is not None else None
+            raw_marker_color = getattr(marker_obj, "color", None) if marker_obj is not None else None
+            line_color = _scalar_color(raw_line_color)
+            marker_color = _scalar_color(raw_marker_color)
+            marker_has_multi_color = _has_multi_color(raw_marker_color)
+            chosen_color = line_color or marker_color or color
+            updates: dict[str, object] = {}
+            if line_color or (marker_color and not line_color):
+                updates["line"] = dict(color=chosen_color)
+            elif not line_color and not marker_color:
+                updates["line"] = dict(color=chosen_color)
+            if marker_has_multi_color:
+                pass
+            elif marker_color or (line_color and not marker_color):
+                updates["marker"] = dict(color=chosen_color)
+            elif not line_color and not marker_color:
+                updates["marker"] = dict(color=chosen_color)
+            if updates:
+                tr.update(**updates)
         elif trace_type == "bar":
-            tr.update(marker=dict(color=color))
+            marker_obj = getattr(tr, "marker", None)
+            marker_color = getattr(marker_obj, "color", None) if marker_obj is not None else None
+            if not marker_color:
+                tr.update(marker=dict(color=color))
     fig.update_yaxes(
         gridcolor=str(theme["grid"]),
         zerolinecolor=str(theme["grid"]),

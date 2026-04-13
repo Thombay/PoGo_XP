@@ -444,7 +444,7 @@ def render_dashboard_content_view(
             else:
                 gain_top = dash_recent_gain_df.sort_values("xp_gain", ascending=False).head(10).copy()
                 fig_gain = px.bar(
-                    gain_top.sort_values("xp_gain", ascending=False),
+                    gain_top.sort_values("xp_gain", ascending=True),
                     x="xp_gain",
                     y="Spieler",
                     orientation="h",
