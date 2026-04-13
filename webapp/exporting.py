@@ -546,6 +546,8 @@ def build_dashboard_export_png(
     font_title = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 36)
     font_section = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 24)
     font_body = _load_font(["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"], 18)
+    font_metric_value = _load_font(["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"], 28)
+    font_metric_delta = _load_font(["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"], 15)
     font_mono = _load_font(["C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/cour.ttf"], 16)
 
     def _line_height(font_obj: "ImageFont.ImageFont") -> int:
@@ -579,6 +581,130 @@ def build_dashboard_export_png(
             y += line_h
         return img
 
+    def _text_width(draw: "ImageDraw.ImageDraw", text: str, font_obj: "ImageFont.ImageFont") -> int:
+        try:
+            box = draw.textbbox((0, 0), text, font=font_obj)
+            return max(0, int(box[2] - box[0]))
+        except Exception:
+            return len(text) * 8
+
+    def _wrap_text(
+        draw: "ImageDraw.ImageDraw",
+        text: str,
+        font_obj: "ImageFont.ImageFont",
+        max_width: int,
+    ) -> list[str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return [""]
+        words = raw.split()
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if _text_width(draw, candidate, font_obj) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    def metric_cards_block(cards: list[tuple[str, str, str]]) -> "Image.Image":
+        if not cards:
+            return Image.new("RGB", (width, 1), bg)
+
+        if width >= 1600:
+            cols = 4
+        elif width >= 1100:
+            cols = 3
+        elif width >= 700:
+            cols = 2
+        else:
+            cols = 1
+
+        title_h = _line_height(font_section)
+        card_gap = 12
+        card_pad = 14
+        grid_top = pad + title_h + 8
+        card_width = max(180, int((width - (card_gap * (cols - 1))) / cols))
+        measure_img = Image.new("RGB", (10, 10), bg)
+        measure_draw = ImageDraw.Draw(measure_img)
+        label_h = _line_height(font_metric_delta)
+        value_h = _line_height(font_metric_value)
+        delta_h = _line_height(font_metric_delta)
+
+        card_layouts: list[dict[str, object]] = []
+        for lbl, val, delta in cards:
+            text_width = max(60, card_width - (card_pad * 2))
+            label_lines = _wrap_text(measure_draw, lbl, font_metric_delta, text_width)
+            value_lines = _wrap_text(measure_draw, val, font_metric_value, text_width)
+            delta_lines = _wrap_text(measure_draw, delta, font_metric_delta, text_width)
+            card_height = (
+                card_pad * 2
+                + (len(label_lines) * label_h)
+                + 8
+                + (len(value_lines) * value_h)
+                + 10
+                + (len(delta_lines) * delta_h)
+            )
+            card_layouts.append(
+                {
+                    "label_lines": label_lines,
+                    "value_lines": value_lines,
+                    "delta_lines": delta_lines,
+                    "delta_class": _export_delta_class(delta),
+                    "height": max(120, card_height),
+                }
+            )
+
+        row_heights: list[int] = []
+        for start in range(0, len(card_layouts), cols):
+            row_heights.append(max(int(card["height"]) for card in card_layouts[start : start + cols]))
+
+        grid_height = sum(row_heights) + (card_gap * max(0, len(row_heights) - 1))
+        block_h = grid_top + grid_height + pad
+        img = Image.new("RGB", (width, block_h), bg)
+        draw = ImageDraw.Draw(img)
+        draw.text((0, pad), "Metrics", fill=muted, font=font_section)
+
+        delta_colors = {
+            "delta-pos": "#22c55e",
+            "delta-neg": "#ef4444",
+            "delta-neutral": fg,
+        }
+        y = grid_top
+        card_idx = 0
+        for row_height in row_heights:
+            for col_idx in range(cols):
+                if card_idx >= len(cards):
+                    break
+                x = col_idx * (card_width + card_gap)
+                draw.rounded_rectangle(
+                    [(x, y), (x + card_width - 1, y + row_height - 1)],
+                    radius=10,
+                    fill=card_bg,
+                    outline=border,
+                    width=1,
+                )
+                layout = card_layouts[card_idx]
+                ty = y + card_pad
+                for line in layout["label_lines"]:
+                    draw.text((x + card_pad, ty), str(line), fill=muted, font=font_metric_delta)
+                    ty += label_h
+                ty += 8
+                for line in layout["value_lines"]:
+                    draw.text((x + card_pad, ty), str(line), fill=fg, font=font_metric_value)
+                    ty += value_h
+                ty += 10
+                delta_color = delta_colors.get(str(layout["delta_class"]), fg)
+                for line in layout["delta_lines"]:
+                    draw.text((x + card_pad, ty), str(line), fill=delta_color, font=font_metric_delta)
+                    ty += delta_h
+                card_idx += 1
+            y += row_height + card_gap
+        return img
+
     blocks: list["Image.Image"] = []
     header_lines = [
         f"Group: {selected_group}",
@@ -588,8 +714,7 @@ def build_dashboard_export_png(
         f"Generated: {generated_at}",
     ]
     blocks.append(text_block(dashboard_title, header_lines, title_color=fg, title_font=font_title, body_font=font_body))
-    metric_lines = [f"{lbl}: {val} ({delta})" for (lbl, val, delta) in metric_cards]
-    blocks.append(text_block("Metrics", metric_lines, title_color=muted, title_font=font_section, body_font=font_body))
+    blocks.append(metric_cards_block(metric_cards))
 
     for _, fig in chart_items:
         if fig is None:

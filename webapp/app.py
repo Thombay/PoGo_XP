@@ -5729,12 +5729,58 @@ if page == "Data Input":
             allowed_accounts = list(dict.fromkeys([str(a).strip() for a in MEDAL_INPUT_CORE_ACCOUNTS if str(a).strip()]))
         else:
             allowed_accounts = all_input_accounts
-        medal_on_date = set()
-        if not medal_df.empty:
-            medal_on_date = set(medal_df[medal_df["date"].dt.date == medal_date]["account"].astype(str).tolist())
-        available_medal_accounts = [a for a in allowed_accounts if a not in medal_on_date]
-        if medal_on_date:
-            st.caption(f"Already entered for this date: {', '.join(sorted(medal_on_date))}")
+        valid_manual_medal_ids = {
+            str(m).strip().lower()
+            for m in goals_df.get("medal_id", pd.Series(dtype="object")).astype(str).tolist()
+            if str(m).strip() and str(m).strip().lower() not in EXCLUDED_MANUAL_MEDAL_IDS
+        }
+        xp_activity_medal_ids = set(XP_TAB_ACTIVITY_MEDAL_IDS.values())
+        expected_medal_count = len(valid_manual_medal_ids)
+        complete_medal_on_date: set[str] = set()
+        partial_medal_counts: dict[str, int] = {}
+        partial_medal_ids: dict[str, list[str]] = {}
+        if not medal_df.empty and expected_medal_count > 0:
+            same_day_medals = medal_df[medal_df["date"].dt.date == medal_date].copy()
+            if not same_day_medals.empty:
+                same_day_medals["account"] = same_day_medals["account"].astype(str).str.strip()
+                same_day_medals["medal_id"] = same_day_medals["medal_id"].astype(str).str.strip().str.lower()
+                same_day_medals = same_day_medals[same_day_medals["medal_id"].isin(valid_manual_medal_ids)].copy()
+                medal_counts = (
+                    same_day_medals.groupby("account", as_index=False)["medal_id"]
+                    .nunique()
+                    .rename(columns={"medal_id": "medal_count"})
+                )
+                for _, row in medal_counts.iterrows():
+                    account_name = str(row["account"]).strip()
+                    medal_count = int(row["medal_count"])
+                    medal_ids_for_account = sorted(
+                        same_day_medals[same_day_medals["account"] == account_name]["medal_id"].astype(str).unique().tolist()
+                    )
+                    if medal_count >= expected_medal_count:
+                        complete_medal_on_date.add(account_name)
+                    elif medal_count > 0:
+                        partial_medal_counts[account_name] = medal_count
+                        partial_medal_ids[account_name] = medal_ids_for_account
+        available_medal_accounts = [a for a in allowed_accounts if a not in complete_medal_on_date]
+        if complete_medal_on_date:
+            st.caption(f"Already entered for this date: {', '.join(sorted(complete_medal_on_date))}")
+        if partial_medal_counts:
+            activity_only_accounts = []
+            other_partial_accounts = []
+            for acc, cnt in sorted(partial_medal_counts.items()):
+                medal_ids_for_account = set(partial_medal_ids.get(acc, []))
+                label = f"{acc} ({cnt}/{expected_medal_count})"
+                if medal_ids_for_account and medal_ids_for_account.issubset(xp_activity_medal_ids):
+                    activity_only_accounts.append(label)
+                else:
+                    other_partial_accounts.append(label)
+            if activity_only_accounts:
+                st.caption(
+                    "Activity medal rows already on this date from XP input "
+                    f"(Distance Walked, Pokemon Caught): {', '.join(activity_only_accounts)}"
+                )
+            if other_partial_accounts:
+                st.caption(f"Partial medal rows on this date: {', '.join(other_partial_accounts)}")
         if available_medal_accounts:
             st.caption(f"Missing for this date: {', '.join(available_medal_accounts)}")
             medal_account = st.selectbox(
@@ -5756,6 +5802,9 @@ if page == "Data Input":
             latest_account_rows = medal_df[medal_df["account"] == medal_account].copy()
             latest_vals: dict[str, float] = {}
             if not latest_account_rows.empty:
+                latest_account_rows = latest_account_rows[
+                    pd.to_datetime(latest_account_rows["date"], errors="coerce") <= pd.Timestamp(medal_date)
+                ].copy()
                 latest_account_rows = latest_account_rows.sort_values("date").drop_duplicates("medal_id", keep="last")
                 latest_vals = dict(
                     zip(latest_account_rows["medal_id"].astype(str).tolist(), latest_account_rows["value"].astype(float).tolist())
