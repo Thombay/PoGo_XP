@@ -259,41 +259,100 @@ def build_dashboard_export_html(
 ) -> str:
     def _render_payload_block(payload: dict[str, object], include_js: bool, mode: str) -> tuple[str, bool]:
         metric_cards = payload["metric_cards"]
+        ordered_blocks = payload.get("ordered_blocks") or []
         chart_items = payload["chart_items"]
         sections_data = payload["sections"]
-        chart_blocks: list[str] = []
-        include_plotly = include_js
-        for chart_title, fig in chart_items:
-            if fig is None:
-                continue
-            sort_legend_by_latest_y(fig)
-            _style_export_figure(fig, mode)
-            chart_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
-            chart_blocks.append(
-                fig.to_html(
-                    full_html=False,
-                    include_plotlyjs="inline" if include_plotly else False,
-                    config={"displaylogo": False},
-                )
-            )
-            chart_blocks.append("</section>")
-            include_plotly = False
 
-        cards_html_parts: list[str] = []
-        for (lbl, val, delta) in metric_cards:
-            delta_cls = _export_delta_class(delta)
-            cards_html_parts.append(
-                (
-                    "<div class='metric-card'>"
-                    f"<div class='metric-label'>{escape(lbl)}</div>"
-                    f"<div class='metric-value'>{escape(val)}</div>"
-                    f"<div class='metric-delta {delta_cls}'>{escape(delta)}</div>"
-                    "</div>"
+        def _normalize_card(card: object) -> dict[str, str]:
+            if isinstance(card, dict):
+                return {
+                    "label": str(card.get("label", "")),
+                    "value": str(card.get("value", "")),
+                    "detail": str(card.get("detail", "")),
+                    "winner": str(card.get("winner", "")),
+                    "winner_color": str(card.get("winner_color", "")),
+                }
+            if isinstance(card, (tuple, list)) and len(card) >= 3:
+                return {
+                    "label": str(card[0]),
+                    "value": str(card[1]),
+                    "detail": str(card[2]),
+                    "winner": "",
+                    "winner_color": "",
+                }
+            return {"label": str(card), "value": "", "detail": "", "winner": "", "winner_color": ""}
+
+        def _render_cards_html(cards: list[object], title: str | None = None) -> str:
+            cards_html_parts: list[str] = []
+            for raw_card in cards:
+                card = _normalize_card(raw_card)
+                detail = card["detail"]
+                delta_cls = _export_delta_class(detail)
+                winner_html = ""
+                if card["winner"].strip():
+                    style_attr = f" style='color:{escape(card['winner_color'])};'" if card["winner_color"].strip() else ""
+                    winner_html = f"<div class='metric-winner'{style_attr}>{escape(card['winner'])}</div>"
+                detail_html = f"<div class='metric-delta {delta_cls}'>{escape(detail)}</div>" if detail.strip() else ""
+                cards_html_parts.append(
+                    (
+                        "<div class='metric-card'>"
+                        f"<div class='metric-label'>{escape(card['label'])}</div>"
+                        f"<div class='metric-value'>{escape(card['value'])}</div>"
+                        f"{winner_html}"
+                        f"{detail_html}"
+                        "</div>"
+                    )
                 )
-            )
-        cards_html = "".join(cards_html_parts)
+            cards_html = f"<div class='metrics metric-group-grid'>{''.join(cards_html_parts)}</div>"
+            if title:
+                return f"<section class='metric-group'><h2>{escape(title)}</h2>{cards_html}</section>"
+            return cards_html
+
+        content_blocks: list[str] = []
+        include_plotly = include_js
+        if ordered_blocks:
+            for block in ordered_blocks:
+                block_type = str(block.get("type", "")).strip().lower() if isinstance(block, dict) else ""
+                if block_type == "card_group":
+                    content_blocks.append(_render_cards_html(list(block.get("cards", [])), title=str(block.get("title", ""))))
+                    continue
+                if block_type == "chart":
+                    chart_title = str(block.get("title", ""))
+                    fig = block.get("figure")
+                    if fig is None:
+                        continue
+                    sort_legend_by_latest_y(fig)
+                    _style_export_figure(fig, mode)
+                    content_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
+                    content_blocks.append(
+                        fig.to_html(
+                            full_html=False,
+                            include_plotlyjs="inline" if include_plotly else False,
+                            config={"displaylogo": False},
+                        )
+                    )
+                    content_blocks.append("</section>")
+                    include_plotly = False
+        else:
+            for chart_title, fig in chart_items:
+                if fig is None:
+                    continue
+                sort_legend_by_latest_y(fig)
+                _style_export_figure(fig, mode)
+                content_blocks.append(f"<section><h2>{escape(chart_title)}</h2>")
+                content_blocks.append(
+                    fig.to_html(
+                        full_html=False,
+                        include_plotlyjs="inline" if include_plotly else False,
+                        config={"displaylogo": False},
+                    )
+                )
+                content_blocks.append("</section>")
+                include_plotly = False
+
+        cards_html = _render_cards_html(list(metric_cards))
         sections_html = "".join([_df_section_html(str(title), df) for (title, df) in sections_data])
-        block_html = f"<div class='metrics'>{cards_html}</div>{''.join(chart_blocks)}{sections_html}"
+        block_html = f"{cards_html}{''.join(content_blocks)}{sections_html}"
         return block_html, include_plotly
 
     layout_theme = _export_theme(export_mode)
@@ -393,10 +452,13 @@ def build_dashboard_export_html(
     .window-btn, .theme-btn {{ background:var(--card-bg); color:var(--font); border:1px solid var(--border); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px; }}
     .window-btn.active, .theme-btn.active {{ background:var(--table-head); border-color:var(--line); font-weight:600; }}
     .metrics {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin:14px 0 18px 0; }}
+    .metric-group {{ margin-bottom:18px; }}
+    .metric-group-grid {{ margin-top:10px; }}
     .window-pane {{ width:100%; }}
     .metric-card {{ background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:12px; }}
     .metric-label {{ color:var(--muted); font-size:12px; }}
     .metric-value {{ font-size:30px; margin:8px 0 6px 0; }}
+    .metric-winner {{ font-size:13px; font-weight:700; min-height:16px; margin-bottom:4px; }}
     .metric-delta {{ color:var(--font); opacity:0.9; font-size:13px; min-height:16px; }}
     .metric-delta.delta-pos {{ color:#22c55e; font-weight:600; }}
     .metric-delta.delta-neg {{ color:#ef4444; font-weight:600; }}
@@ -522,6 +584,7 @@ def build_dashboard_export_png(
     chart_items: list[tuple[str, go.Figure | None]] = payload["chart_items"]
     sections_data: list[tuple[str, pd.DataFrame]] = payload["sections"]
     metric_cards: list[tuple[str, str, str]] = payload["metric_cards"]
+    ordered_blocks = payload.get("ordered_blocks") or []
     accounts_text = str(payload["accounts_text"])
     generated_at = str(payload["generated_at"])
 
@@ -610,7 +673,26 @@ def build_dashboard_export_png(
         lines.append(current)
         return lines
 
-    def metric_cards_block(cards: list[tuple[str, str, str]]) -> "Image.Image":
+    def _normalize_card(card: object) -> dict[str, str]:
+        if isinstance(card, dict):
+            return {
+                "label": str(card.get("label", "")),
+                "value": str(card.get("value", "")),
+                "detail": str(card.get("detail", "")),
+                "winner": str(card.get("winner", "")),
+                "winner_color": str(card.get("winner_color", "")),
+            }
+        if isinstance(card, (tuple, list)) and len(card) >= 3:
+            return {
+                "label": str(card[0]),
+                "value": str(card[1]),
+                "detail": str(card[2]),
+                "winner": "",
+                "winner_color": "",
+            }
+        return {"label": str(card), "value": "", "detail": "", "winner": "", "winner_color": ""}
+
+    def metric_cards_block(cards: list[object], title: str = "Metrics") -> "Image.Image":
         if not cards:
             return Image.new("RGB", (width, 1), bg)
 
@@ -632,28 +714,33 @@ def build_dashboard_export_png(
         measure_draw = ImageDraw.Draw(measure_img)
         label_h = _line_height(font_metric_delta)
         value_h = _line_height(font_metric_value)
+        winner_h = _line_height(font_metric_delta)
         delta_h = _line_height(font_metric_delta)
 
         card_layouts: list[dict[str, object]] = []
-        for lbl, val, delta in cards:
+        for raw_card in cards:
+            card = _normalize_card(raw_card)
             text_width = max(60, card_width - (card_pad * 2))
-            label_lines = _wrap_text(measure_draw, lbl, font_metric_delta, text_width)
-            value_lines = _wrap_text(measure_draw, val, font_metric_value, text_width)
-            delta_lines = _wrap_text(measure_draw, delta, font_metric_delta, text_width)
+            label_lines = _wrap_text(measure_draw, card["label"], font_metric_delta, text_width)
+            value_lines = _wrap_text(measure_draw, card["value"], font_metric_value, text_width)
+            winner_lines = _wrap_text(measure_draw, card["winner"], font_metric_delta, text_width) if card["winner"].strip() else []
+            delta_lines = _wrap_text(measure_draw, card["detail"], font_metric_delta, text_width) if card["detail"].strip() else []
             card_height = (
                 card_pad * 2
                 + (len(label_lines) * label_h)
                 + 8
                 + (len(value_lines) * value_h)
-                + 10
-                + (len(delta_lines) * delta_h)
+                + (8 + (len(winner_lines) * winner_h) if winner_lines else 0)
+                + (8 + (len(delta_lines) * delta_h) if delta_lines else 0)
             )
             card_layouts.append(
                 {
                     "label_lines": label_lines,
                     "value_lines": value_lines,
+                    "winner_lines": winner_lines,
+                    "winner_color": card["winner_color"],
                     "delta_lines": delta_lines,
-                    "delta_class": _export_delta_class(delta),
+                    "delta_class": _export_delta_class(card["detail"]),
                     "height": max(120, card_height),
                 }
             )
@@ -666,7 +753,7 @@ def build_dashboard_export_png(
         block_h = grid_top + grid_height + pad
         img = Image.new("RGB", (width, block_h), bg)
         draw = ImageDraw.Draw(img)
-        draw.text((0, pad), "Metrics", fill=muted, font=font_section)
+        draw.text((0, pad), title, fill=muted, font=font_section)
 
         delta_colors = {
             "delta-pos": "#22c55e",
@@ -696,7 +783,14 @@ def build_dashboard_export_png(
                 for line in layout["value_lines"]:
                     draw.text((x + card_pad, ty), str(line), fill=fg, font=font_metric_value)
                     ty += value_h
-                ty += 10
+                if layout["winner_lines"]:
+                    ty += 8
+                    winner_color = str(layout["winner_color"]).strip() or fg
+                    for line in layout["winner_lines"]:
+                        draw.text((x + card_pad, ty), str(line), fill=winner_color, font=font_metric_delta)
+                        ty += winner_h
+                if layout["delta_lines"]:
+                    ty += 8
                 delta_color = delta_colors.get(str(layout["delta_class"]), fg)
                 for line in layout["delta_lines"]:
                     draw.text((x + card_pad, ty), str(line), fill=delta_color, font=font_metric_delta)
@@ -714,11 +808,11 @@ def build_dashboard_export_png(
         f"Generated: {generated_at}",
     ]
     blocks.append(text_block(dashboard_title, header_lines, title_color=fg, title_font=font_title, body_font=font_body))
-    blocks.append(metric_cards_block(metric_cards))
+    blocks.append(metric_cards_block(metric_cards, title="Metrics"))
 
-    for _, fig in chart_items:
+    def _append_chart_block(fig: go.Figure | None) -> tuple[bool, str | None]:
         if fig is None:
-            continue
+            return True, None
         sort_legend_by_latest_y(fig)
         _style_export_figure(fig, export_mode)
         h = int(fig.layout.height) if getattr(fig.layout, "height", None) else 520
@@ -730,21 +824,38 @@ def build_dashboard_export_png(
                 png_bytes, sub_err = _figure_to_png_via_subprocess(fig, width=width, height=max(320, h), scale=2)
                 if not png_bytes:
                     detail = f" ({sub_err})" if sub_err else ""
-                    return None, (
+                    return False, (
                         "Picture export failed due to mixed Plotly/Kaleido runtime. "
                         f"Restart Streamlit after dependency updates (`python run_server.py`).{detail}"
                     )
             elif "Chrome" in msg or "chrom" in msg.lower():
-                return None, "Picture export needs Chrome for Kaleido v1. Install Chrome and retry."
+                return False, "Picture export needs Chrome for Kaleido v1. Install Chrome and retry."
             elif msg:
-                return None, f"Picture export failed: {msg}"
+                return False, f"Picture export failed: {msg}"
             else:
-                return None, "Picture export failed while rendering Plotly images."
+                return False, "Picture export failed while rendering Plotly images."
         chart_img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         if chart_img.width != width:
             new_h = int(chart_img.height * (width / chart_img.width))
             chart_img = chart_img.resize((width, new_h))
         blocks.append(chart_img)
+        return True, None
+
+    if ordered_blocks:
+        for block in ordered_blocks:
+            block_type = str(block.get("type", "")).strip().lower() if isinstance(block, dict) else ""
+            if block_type == "card_group":
+                blocks.append(metric_cards_block(list(block.get("cards", [])), title=str(block.get("title", ""))))
+                continue
+            if block_type == "chart":
+                ok, err = _append_chart_block(block.get("figure"))
+                if not ok:
+                    return None, err
+    else:
+        for _, fig in chart_items:
+            ok, err = _append_chart_block(fig)
+            if not ok:
+                return None, err
 
     for sec_title, sec_df in sections_data:
         if sec_df.empty:

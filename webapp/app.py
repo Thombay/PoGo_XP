@@ -3679,43 +3679,73 @@ def _build_dashboard_export_payload(
         if not eligible_baseline_pool.empty
         else pd.DataFrame()
     )
+    export_account_color_map = build_account_color_map(selected_accounts, dash_xp_df)
 
-    metric_cards: list[tuple[str, str, str]] = []
+    def _headline_export_card(
+        label: str,
+        value: str,
+        *,
+        winner: object | None = None,
+        detail: str | None = None,
+    ) -> dict[str, object]:
+        winner_text = "" if winner is None else str(winner).strip()
+        winner_name = winner_text.split(" (Lvl", 1)[0].strip() if winner_text else ""
+        return {
+            "label": str(label),
+            "value": str(value),
+            "winner": winner_text,
+            "winner_color": export_account_color_map.get(winner_name, "") if winner_name else "",
+            "detail": "" if detail is None else str(detail),
+        }
+
+    metric_cards: list[object] = []
     if not dash_latest_xp_df.empty:
         leader_row = dash_latest_xp_df.sort_values("Total XP", ascending=False).iloc[0]
         metric_cards.append(
-            (
+            _headline_export_card(
                 "XP Leader",
                 f"{int(leader_row['Total XP']):,}",
-                f"{leader_row['Spieler']} (Lvl {int(leader_row['Lvl'])})",
+                winner=f"{leader_row['Spieler']} (Lvl {int(leader_row['Lvl'])})",
             )
         )
     else:
-        metric_cards.append(("XP Leader", "-", "no data"))
+        metric_cards.append(_headline_export_card("XP Leader", "-", detail="no data"))
 
     if not active_kpi_pool.empty:
         gain_leader = active_kpi_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[False, False]).iloc[0]
         metric_cards.append(
-            (
+            _headline_export_card(
                 f"Top XP Gain ({w_label})",
                 format_kpi_number(gain_leader[xp_gain_col], "XP"),
-                winner_with_level(gain_leader["Spieler"]),
+                winner=winner_with_level(gain_leader["Spieler"]),
             )
         )
         gain_trailer = active_kpi_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[True, True]).iloc[0]
         metric_cards.append(
-            (
+            _headline_export_card(
                 f"Least XP Gain ({w_label})",
                 format_kpi_number(gain_trailer[xp_gain_col], "XP"),
-                winner_with_level(gain_trailer["Spieler"]),
+                winner=winner_with_level(gain_trailer["Spieler"]),
             )
         )
     elif not eligible_gain_pool.empty:
-        metric_cards.append((f"Top XP Gain ({w_label})", f"No active players ({w_label})", f"all {xp_gain_col} = 0"))
-        metric_cards.append((f"Least XP Gain ({w_label})", f"No active players ({w_label})", f"all {xp_gain_col} = 0"))
+        metric_cards.append(
+            _headline_export_card(
+                f"Top XP Gain ({w_label})",
+                f"No active players ({w_label})",
+                detail=f"all {xp_gain_col} = 0",
+            )
+        )
+        metric_cards.append(
+            _headline_export_card(
+                f"Least XP Gain ({w_label})",
+                f"No active players ({w_label})",
+                detail=f"all {xp_gain_col} = 0",
+            )
+        )
     else:
-        metric_cards.append((f"Top XP Gain ({w_label})", "-", "no data"))
-        metric_cards.append((f"Least XP Gain ({w_label})", "-", "no data"))
+        metric_cards.append(_headline_export_card(f"Top XP Gain ({w_label})", "-", detail="no data"))
+        metric_cards.append(_headline_export_card(f"Least XP Gain ({w_label})", "-", detail="no data"))
 
     if show_medals:
         platinum_latest = dash_display_medal_df[dash_display_medal_df["medal_id"] == DERIVED_MEDAL_ID].copy()
@@ -3727,84 +3757,86 @@ def _build_dashboard_export_payload(
                 row = platinum_latest[platinum_latest["account"].astype(str) == acc]
                 if not row.empty:
                     breakdown.append(f"{acc}:{int(float(row['value'].iloc[0]))}")
-            metric_cards.append(("Team Platinum Total", f"{team_platinum_total:,}", " | ".join(breakdown)))
+            metric_cards.append(_headline_export_card("Team Platinum Total", f"{team_platinum_total:,}", detail=" | ".join(breakdown)))
         else:
-            metric_cards.append(("Team Platinum Total", "-", "no data"))
+            metric_cards.append(_headline_export_card("Team Platinum Total", "-", detail="no data"))
     else:
         if active_kpi_pool.empty:
             if not eligible_gain_pool.empty:
-                metric_cards.append((f"Fastest {w_label} Pace", f"No active players ({w_label})", f"all {xp_gain_col} = 0"))
+                metric_cards.append(
+                    _headline_export_card(
+                        f"Fastest {w_label} Pace",
+                        f"No active players ({w_label})",
+                        detail=f"all {xp_gain_col} = 0",
+                    )
+                )
             else:
-                metric_cards.append((f"Fastest {w_label} Pace", "-", "no data"))
+                metric_cards.append(_headline_export_card(f"Fastest {w_label} Pace", "-", detail="no data"))
         else:
             fastest = active_kpi_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
             metric_cards.append(
-                (
+                _headline_export_card(
                     f"Fastest {w_label} Pace",
                     format_kpi_number(fastest[xp_per_day_col], "XP/day"),
-                    winner_with_level(fastest["Spieler"]),
+                    winner=winner_with_level(fastest["Spieler"]),
                 )
             )
 
         if eligible_baseline_pool.empty:
-            metric_cards.append((f"Most Improved vs Baseline ({w_label})", "-", "no baseline-eligible data"))
-            metric_cards.append((f"Most Declined vs Baseline ({w_label})", "-", "no baseline-eligible data"))
+            metric_cards.append(_headline_export_card(f"Most Improved vs Baseline ({w_label})", "-", detail="no baseline-eligible data"))
+            metric_cards.append(_headline_export_card(f"Most Declined vs Baseline ({w_label})", "-", detail="no baseline-eligible data"))
         elif baseline_headline_pool.empty:
             metric_cards.append(
-                (
+                _headline_export_card(
                     f"Most Improved vs Baseline ({w_label})",
                     "No improvements",
-                    f"all {xp_gain_col} = 0 for baseline-eligible players",
+                    detail=f"all {xp_gain_col} = 0 for baseline-eligible players",
                 )
             )
             metric_cards.append(
-                (
+                _headline_export_card(
                     f"Most Declined vs Baseline ({w_label})",
                     "No decline",
-                    f"all {xp_gain_col} = 0 for baseline-eligible players",
+                    detail=f"all {xp_gain_col} = 0 for baseline-eligible players",
                 )
             )
         else:
             improvements = baseline_headline_pool[baseline_headline_pool[delta_col] > 0].copy()
             if improvements.empty:
                 metric_cards.append(
-                    (
+                    _headline_export_card(
                         f"Most Improved vs Baseline ({w_label})",
                         "No improvements",
-                        "all deltas <= 0",
+                        detail="all deltas <= 0",
                     )
                 )
             else:
                 improved = improvements.sort_values(delta_col, ascending=False).iloc[0]
                 metric_cards.append(
-                    (
+                    _headline_export_card(
                         f"Most Improved vs Baseline ({w_label})",
                         format_kpi_number(improved[xp_per_day_col], "XP/day"),
-                        (
-                            f"{winner_with_level(improved['Spieler'])} | "
-                            f"{int(round(float(improved[delta_col]))):+,} XP/day vs baseline"
-                        ),
+                        winner=winner_with_level(improved["Spieler"]),
+                        detail=f"{int(round(float(improved[delta_col]))):+,} XP/day vs baseline",
                     )
                 )
             declines = baseline_headline_pool[baseline_headline_pool[delta_col] < 0].copy()
             if declines.empty:
                 metric_cards.append(
-                    (
+                    _headline_export_card(
                         f"Most Declined vs Baseline ({w_label})",
                         "No decline",
-                        "all deltas >= 0",
+                        detail="all deltas >= 0",
                     )
                 )
             else:
                 declined = declines.sort_values(delta_col, ascending=True).iloc[0]
                 metric_cards.append(
-                    (
+                    _headline_export_card(
                         f"Most Declined vs Baseline ({w_label})",
                         format_kpi_number(declined[xp_per_day_col], "XP/day"),
-                        (
-                            f"{winner_with_level(declined['Spieler'])} | "
-                            f"{int(round(float(declined[delta_col]))):+,} XP/day vs baseline"
-                        ),
+                        winner=winner_with_level(declined["Spieler"]),
+                        detail=f"{int(round(float(declined[delta_col]))):+,} XP/day vs baseline",
                     )
                 )
 
@@ -3812,16 +3844,22 @@ def _build_dashboard_export_payload(
         latest_xp_date = pd.to_datetime(dash_latest_xp_df["Date"], errors="coerce").max()
         if pd.notna(latest_xp_date):
             days_ago = (pd.Timestamp.today().normalize() - latest_xp_date.normalize()).days
-            metric_cards.append(("Last XP Snapshot", latest_xp_date.strftime("%Y-%m-%d"), f"{int(days_ago)} day(s) ago"))
+            metric_cards.append(
+                _headline_export_card(
+                    "Last XP Snapshot",
+                    latest_xp_date.strftime("%Y-%m-%d"),
+                    detail=f"{int(days_ago)} day(s) ago",
+                )
+            )
         else:
-            metric_cards.append(("Last XP Snapshot", "-", "no data"))
+            metric_cards.append(_headline_export_card("Last XP Snapshot", "-", detail="no data"))
     else:
-        metric_cards.append(("Last XP Snapshot", "-", "no data"))
+        metric_cards.append(_headline_export_card("Last XP Snapshot", "-", detail="no data"))
     metric_cards.append(
-        (
+        _headline_export_card(
             f"Coverage ({w_label} / baseline)",
             f"{eligible_window}/{total_players}",
-            f"{eligible_baseline_window}/{total_players} | active {active_kpi_count}/{total_players}",
+            detail=f"{eligible_baseline_window}/{total_players} | active {active_kpi_count}/{total_players}",
         )
     )
 
@@ -3884,7 +3922,7 @@ def _build_dashboard_export_payload(
         if not dash_recent_gain_df.empty:
             gain_top = dash_recent_gain_df.sort_values("xp_gain", ascending=False).head(10).copy()
             fig_gain = px.bar(
-                gain_top.sort_values("xp_gain", ascending=True),
+                gain_top.sort_values("xp_gain", ascending=False),
                 x="xp_gain",
                 y="Spieler",
                 orientation="h",
@@ -4099,6 +4137,181 @@ def _build_dashboard_export_payload(
                 context_txt += f" | no active {w_label} gains"
             return (title, value_txt, context_txt)
 
+        def _activity_export_card(
+            label: str,
+            value: str,
+            *,
+            winner: object | None = None,
+            winner_color: str | None = None,
+            detail: str | None = None,
+        ) -> dict[str, object]:
+            return {
+                "label": str(label),
+                "value": str(value),
+                "winner": "" if winner is None else str(winner),
+                "winner_color": "" if winner_color is None else str(winner_color),
+                "detail": "" if detail is None else str(detail),
+            }
+
+        def _build_activity_export_cards(series_df: pd.DataFrame, unit: str, metric_label: str) -> list[dict[str, object]]:
+            metric_df = _series_to_metric_df(series_df)
+            if metric_df.empty:
+                return [
+                    _activity_export_card("Leader", "-", detail="no data"),
+                    _activity_export_card(f"Top Gain ({w_label})", "-", detail="no data"),
+                    _activity_export_card(f"Least Gain ({w_label})", "-", detail="no data"),
+                    _activity_export_card(f"Fastest {w_label} Pace", "-", detail="no data"),
+                    _activity_export_card(f"Most Improved ({w_label})", "-", detail="no baseline data"),
+                    _activity_export_card(f"Most Declined ({w_label})", "-", detail="no baseline data"),
+                ]
+
+            latest_metric = series_df.sort_values("date").groupby("account", as_index=False).tail(1).copy()
+            latest_metric["value"] = pd.to_numeric(latest_metric["value"], errors="coerce")
+            latest_metric["date"] = pd.to_datetime(latest_metric["date"], errors="coerce")
+            latest_metric = latest_metric.dropna(subset=["value"]).copy()
+
+            activity_kpis = compute_player_kpis_window(
+                metric_df,
+                window_days=w,
+                baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+            )
+            eligible_pool = (
+                activity_kpis[activity_kpis[eligible_col] == True].copy()  # noqa: E712
+                if not activity_kpis.empty and eligible_col in activity_kpis.columns
+                else pd.DataFrame()
+            )
+            active_pool = (
+                eligible_pool[pd.to_numeric(eligible_pool[xp_gain_col], errors="coerce") > 0].copy()
+                if not eligible_pool.empty
+                else pd.DataFrame()
+            )
+            baseline_pool = (
+                activity_kpis[activity_kpis[eligible_baseline_col] == True].copy()  # noqa: E712
+                if not activity_kpis.empty and eligible_baseline_col in activity_kpis.columns
+                else pd.DataFrame()
+            )
+
+            cards: list[dict[str, object]] = []
+            if not latest_metric.empty:
+                leader_row = latest_metric.sort_values("value", ascending=False).iloc[0]
+                leader_date = pd.to_datetime(leader_row["date"], errors="coerce")
+                leader_date_txt = leader_date.strftime("%Y-%m-%d") if pd.notna(leader_date) else "-"
+                leader_name = str(leader_row["account"]).strip()
+                cards.append(
+                    _activity_export_card(
+                        "Leader",
+                        _fmt_total(leader_row["value"], unit, metric_label),
+                        winner=leader_name,
+                        winner_color=activity_color_map.get(leader_name),
+                        detail=f"as of {leader_date_txt}",
+                    )
+                )
+            else:
+                cards.append(_activity_export_card("Leader", "-", detail="no data"))
+
+            if not active_pool.empty:
+                best = active_pool.sort_values([xp_per_day_col, xp_gain_col], ascending=[False, False]).iloc[0]
+                top_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[False, False]).iloc[0]
+                least_gain = active_pool.sort_values([xp_gain_col, xp_per_day_col], ascending=[True, True]).iloc[0]
+                top_name = str(top_gain["Spieler"]).strip()
+                least_name = str(least_gain["Spieler"]).strip()
+                best_name = str(best["Spieler"]).strip()
+                cards.extend(
+                    [
+                        _activity_export_card(
+                            f"Top Gain ({w_label})",
+                            _fmt_gain(top_gain[xp_gain_col], unit, metric_label),
+                            winner=top_name,
+                            winner_color=activity_color_map.get(top_name),
+                            detail=_fmt_rate(top_gain[xp_per_day_col], unit, metric_label),
+                        ),
+                        _activity_export_card(
+                            f"Least Gain ({w_label})",
+                            _fmt_gain(least_gain[xp_gain_col], unit, metric_label),
+                            winner=least_name,
+                            winner_color=activity_color_map.get(least_name),
+                            detail=_fmt_rate(least_gain[xp_per_day_col], unit, metric_label),
+                        ),
+                        _activity_export_card(
+                            f"Fastest {w_label} Pace",
+                            _fmt_rate(best[xp_per_day_col], unit, metric_label),
+                            winner=best_name,
+                            winner_color=activity_color_map.get(best_name),
+                            detail=_fmt_gain(best[xp_gain_col], unit, metric_label),
+                        ),
+                    ]
+                )
+            elif not eligible_pool.empty:
+                no_active_ctx = f"all {xp_gain_col} = 0"
+                cards.extend(
+                    [
+                        _activity_export_card(f"Top Gain ({w_label})", f"No active ({w_label})", detail=no_active_ctx),
+                        _activity_export_card(f"Least Gain ({w_label})", f"No active ({w_label})", detail=no_active_ctx),
+                        _activity_export_card(f"Fastest {w_label} Pace", f"No active ({w_label})", detail=no_active_ctx),
+                    ]
+                )
+            else:
+                cards.extend(
+                    [
+                        _activity_export_card(f"Top Gain ({w_label})", "-", detail="no data"),
+                        _activity_export_card(f"Least Gain ({w_label})", "-", detail="no data"),
+                        _activity_export_card(f"Fastest {w_label} Pace", "-", detail="no data"),
+                    ]
+                )
+
+            if not baseline_pool.empty:
+                improved_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") > 0].copy()
+                declined_pool = baseline_pool[pd.to_numeric(baseline_pool[delta_col], errors="coerce") < 0].copy()
+                if not improved_pool.empty:
+                    improved = improved_pool.sort_values(delta_col, ascending=False).iloc[0]
+                    improved_name = str(improved["Spieler"]).strip()
+                    cards.append(
+                        _activity_export_card(
+                            f"Most Improved ({w_label})",
+                            _fmt_rate(improved[xp_per_day_col], unit, metric_label),
+                            winner=improved_name,
+                            winner_color=activity_color_map.get(improved_name),
+                            detail=_fmt_delta_rate(improved[delta_col], unit, metric_label),
+                        )
+                    )
+                else:
+                    cards.append(
+                        _activity_export_card(
+                            f"Most Improved ({w_label})",
+                            "No improvements",
+                            detail="all deltas <= 0",
+                        )
+                    )
+
+                if not declined_pool.empty:
+                    declined = declined_pool.sort_values(delta_col, ascending=True).iloc[0]
+                    declined_name = str(declined["Spieler"]).strip()
+                    cards.append(
+                        _activity_export_card(
+                            f"Most Declined ({w_label})",
+                            _fmt_rate(declined[xp_per_day_col], unit, metric_label),
+                            winner=declined_name,
+                            winner_color=activity_color_map.get(declined_name),
+                            detail=_fmt_delta_rate(declined[delta_col], unit, metric_label),
+                        )
+                    )
+                else:
+                    cards.append(
+                        _activity_export_card(
+                            f"Most Declined ({w_label})",
+                            "No decline",
+                            detail="all deltas >= 0",
+                        )
+                    )
+            else:
+                cards.extend(
+                    [
+                        _activity_export_card(f"Most Improved ({w_label})", "-", detail="no baseline data"),
+                        _activity_export_card(f"Most Declined ({w_label})", "-", detail="no baseline data"),
+                    ]
+                )
+            return cards
+
         def _build_activity_performance_view(series_df: pd.DataFrame, unit: str, metric_label: str) -> pd.DataFrame:
             metric_df = _series_to_metric_df(series_df)
             if metric_df.empty:
@@ -4245,14 +4458,6 @@ def _build_dashboard_export_payload(
         caught_series = _medal_series("collector", activity_accounts)
         km_series = _medal_series("jogger", activity_accounts)
 
-        metric_cards.extend(
-            [
-                _build_activity_snapshot_card(battles_series, "Battles/day", "", "Battles"),
-                _build_activity_snapshot_card(caught_series, "Pokemon/day", "", "Pokemon"),
-                _build_activity_snapshot_card(km_series, "Km/day", "km", "Km"),
-            ]
-        )
-
         battles_performance_view = _build_activity_performance_view(battles_series, "", "Battles")
         if not battles_performance_view.empty:
             activity_sections.append((f"Activity Performance: Battles ({w_label})", battles_performance_view))
@@ -4347,6 +4552,32 @@ def _build_dashboard_export_payload(
             fig_km_total.update_yaxes(title="km", tickformat=",.1f")
             activity_chart_items.append(("Activity: Distance Walked Total Over Time", fig_km_total))
 
+        activity_ordered_blocks: list[dict[str, object]] = [
+            {
+                "type": "card_group",
+                "title": f"Activity Summary: Battles ({w_label})",
+                "cards": _build_activity_export_cards(battles_series, "", "Battles"),
+            },
+            {"type": "chart", "title": "Activity: Battles Gained Over Time", "figure": fig_battles if 'fig_battles' in locals() else None},
+            {"type": "chart", "title": "Activity: Battles Total Over Time", "figure": fig_battles_total if 'fig_battles_total' in locals() else None},
+            {
+                "type": "card_group",
+                "title": f"Activity Summary: Pokemon ({w_label})",
+                "cards": _build_activity_export_cards(caught_series, "", "Pokemon"),
+            },
+            {"type": "chart", "title": "Activity: Pokemon Gained Over Time", "figure": fig_caught if 'fig_caught' in locals() else None},
+            {"type": "chart", "title": "Activity: Pokemon Total Over Time", "figure": fig_caught_total if 'fig_caught_total' in locals() else None},
+            {
+                "type": "card_group",
+                "title": f"Activity Summary: Distance Walked ({w_label})",
+                "cards": _build_activity_export_cards(km_series, "km", "Km"),
+            },
+            {"type": "chart", "title": "Activity: Distance Walked Gained Over Time", "figure": fig_km if 'fig_km' in locals() else None},
+            {"type": "chart", "title": "Activity: Distance Walked Total Over Time", "figure": fig_km_total if 'fig_km_total' in locals() else None},
+        ]
+    else:
+        activity_ordered_blocks = []
+
     latest_medals_view = pd.DataFrame()
     first_achieved_view = pd.DataFrame()
     if show_medals:
@@ -4363,6 +4594,17 @@ def _build_dashboard_export_payload(
     ]
     chart_items.extend(activity_chart_items)
 
+    ordered_blocks: list[dict[str, object]] = [
+        {"type": "chart", "title": "PoGo XP Growth", "figure": fig_growth},
+        {"type": "chart", "title": f"XP Gain (Last {w} Days)", "figure": fig_gain},
+        {"type": "chart", "title": "XP Explorer: XP Gain Over Time", "figure": fig_xp_gain_over_time},
+        {"type": "chart", "title": "XP Explorer: Interval Pace (XP/day)", "figure": fig_pace},
+        {"type": "chart", "title": "XP Explorer: Gap Change Since First Snapshot", "figure": fig_gap},
+        {"type": "chart", "title": "XP Explorer: Rank Over Time (Step)", "figure": fig_rank},
+        {"type": "chart", "title": "XP Explorer: Total XP Over Time", "figure": fig_xp_total},
+    ]
+    ordered_blocks.extend(activity_ordered_blocks)
+
     sections: list[tuple[str, pd.DataFrame]] = [
         ("Current XP Ranking", ranking_view),
         (f"XP Gain Table (Last {w} Days)", gain_view),
@@ -4376,6 +4618,7 @@ def _build_dashboard_export_payload(
     generated_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "metric_cards": metric_cards,
+        "ordered_blocks": ordered_blocks,
         "chart_items": chart_items,
         "sections": sections,
         "accounts_text": accounts_text,
