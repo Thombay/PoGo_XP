@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shared.paths import player_groups_path, repo_root, total_xp_curve_path, xp_history_path
+from shared.data_intervals import carry_forward_value_rows, restrict_to_max_data_start_interval
 from shared.xp_utils import carry_forward_max_level_rows, is_max_level, total_xp_from_level_input
 
 CURVE_FILE = str(total_xp_curve_path())
@@ -337,25 +338,29 @@ def restrict_to_common_interval(history: pd.DataFrame, group_name: str) -> pd.Da
     if history.empty:
         return history.copy()
 
-    hist = history.copy()
-    hist["Date"] = pd.to_datetime(hist["Date"])
-    ranges = hist.groupby("Spieler")["Date"].agg(["min", "max"])
-    if ranges.empty:
-        return hist
-
-    common_start = pd.to_datetime(ranges["min"].max())
-    common_end = pd.to_datetime(ranges["max"].min())
-    if common_start > common_end:
-        print(
-            f"Warning [{group_name}]: no overlapping date window across all players "
-            f"({common_start.date()} > {common_end.date()}); skipped."
-        )
-        return hist.iloc[0:0].copy()
-
-    clipped = hist[(hist["Date"] >= common_start) & (hist["Date"] <= common_end)].copy()
-    clipped["Date"] = clipped["Date"].dt.date.astype(str)
-    print(f"Info [{group_name}]: using common interval {common_start.date()} to {common_end.date()}")
+    clipped = restrict_to_max_data_start_interval(history, date_col="Date", group_col="Spieler")
+    if clipped.empty:
+        print(f"Warning [{group_name}]: no rows left after max-data interval selection.")
+        return clipped
+    start = pd.to_datetime(clipped["Date"], errors="coerce").min()
+    end = pd.to_datetime(clipped["Date"], errors="coerce").max()
+    print(f"Info [{group_name}]: using max-data interval {start.date()} to {end.date()}")
     return clipped
+
+
+def carry_forward_xp_chart_rows(history: pd.DataFrame, chart_dates: list[pd.Timestamp]) -> pd.DataFrame:
+    if history.empty or not chart_dates:
+        return history.iloc[0:0].copy()
+    value_cols = [col for col in ["Lvl", "XP Bar", "Total XP"] if col in history.columns]
+    if "Total XP" not in value_cols:
+        return history.iloc[0:0].copy()
+    return carry_forward_value_rows(
+        history,
+        date_col="Date",
+        group_col="Spieler",
+        value_cols=value_cols,
+        chart_dates=chart_dates,
+    )
 
 
 def build_player_colors(players: list[str]) -> dict[str, tuple[float, float, float, float]]:
@@ -955,14 +960,18 @@ def main():
 
     for group_name, players_in_group in groups.items():
         resolved_players = resolve_group_players(players_in_group, history_names, group_name)
-        group_hist = history[history["Spieler"].isin(resolved_players)].copy()
-        if group_hist.empty:
+        group_source_hist = history[history["Spieler"].isin(resolved_players)].copy()
+        if group_source_hist.empty:
             print(f"{group_name}: no matching players in history, skipped.")
             continue
-        group_hist = restrict_to_common_interval(group_hist, group_name)
+        group_hist = restrict_to_common_interval(group_source_hist, group_name)
         if group_hist.empty:
             print(f"{group_name}: no data left after common-interval filter, skipped.")
             continue
+        chart_dates = sorted(pd.Timestamp(dt) for dt in pd.to_datetime(group_hist["Date"], errors="coerce").dropna().unique().tolist())
+        carried_group_hist = carry_forward_xp_chart_rows(group_source_hist, chart_dates)
+        if not carried_group_hist.empty:
+            group_hist = carried_group_hist
 
         interval_hist = add_interval_columns(group_hist)
         warn_large_intervals(interval_hist, group_name, threshold_days=10.0)

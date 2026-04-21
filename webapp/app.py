@@ -21,7 +21,6 @@ if str(REPO_ROOT) not in sys.path:
 from shared.paths import (
     additional_activity_path,
     config_dir,
-    medal_explanations_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
@@ -29,6 +28,7 @@ from shared.paths import (
     total_xp_curve_path,
     xp_history_path,
 )
+from shared.data_intervals import carry_forward_value_rows, restrict_to_max_data_start_interval
 from shared.xp_utils import carry_forward_max_level_rows, is_max_level, max_configured_level, total_xp_from_level_input
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
@@ -244,40 +244,11 @@ def goal_medal_id_for(medal_id: str) -> str:
     return GOAL_ALIAS_BY_MEDAL_ID.get(mid, mid)
 
 
-def ensure_medal_explanations_file(path: Path, goals_df: pd.DataFrame) -> None:
-    if path.exists():
-        return
-    medal_ids: list[str] = []
-    if not goals_df.empty and "medal_id" in goals_df.columns:
-        medal_ids = [
-            goal_medal_id_for(mid)
-            for mid in goals_df["medal_id"].astype(str).str.strip().str.lower().tolist()
-            if str(mid).strip()
-        ]
-        medal_ids = [m for m in list(dict.fromkeys(medal_ids)) if m and m not in EXCLUDED_MANUAL_MEDAL_IDS]
-    out = pd.DataFrame({"medal_id": medal_ids, "explanation": [""] * len(medal_ids)})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(path, index=False, encoding="utf-8-sig")
-
-
-def load_medal_explanations(path: Path) -> dict[str, str]:
-    if not path.exists():
+def medal_explanation_map_from_goals(goals_df: pd.DataFrame) -> dict[str, str]:
+    if goals_df.empty or not {"medal_id", "explanation"}.issubset(goals_df.columns):
         return {}
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig", sep=None, engine="python")
-    except Exception:
-        try:
-            df = pd.read_csv(path, encoding="utf-8-sig")
-        except Exception:
-            return {}
-    if "medal_id" not in df.columns:
-        return {}
-    if "explanation" not in df.columns:
-        df = df.copy()
-        df["explanation"] = ""
-    df = df[["medal_id", "explanation"]].copy()
-    df["medal_id"] = df["medal_id"].fillna("").astype(str).str.strip().str.lower()
-    df["medal_id"] = df["medal_id"].map(goal_medal_id_for)
+    df = goals_df[["medal_id", "explanation"]].copy()
+    df["medal_id"] = df["medal_id"].fillna("").astype(str).str.strip().str.lower().map(goal_medal_id_for)
     df["explanation"] = df["explanation"].fillna("").astype(str).str.strip()
     df["explanation_lc"] = df["explanation"].str.lower()
     df = df[
@@ -285,7 +256,6 @@ def load_medal_explanations(path: Path) -> dict[str, str]:
         & (df["explanation"] != "")
         & (~df["explanation_lc"].isin({"nan", "none", "null"}))
     ].copy()
-    df = df.drop(columns=["explanation_lc"])
     return dict(zip(df["medal_id"].tolist(), df["explanation"].tolist()))
 
 
@@ -771,52 +741,45 @@ def add_goal_days_status_annotation(
 
 
 def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    ranges = df.groupby("Spieler")["Date"].agg(["min", "max"])
-    if ranges.empty:
-        return df.copy()
+    return restrict_to_max_data_start_interval(df, date_col="Date", group_col="Spieler")
 
-    events: list[tuple[pd.Timestamp, int]] = []
-    for _, r in ranges.iterrows():
-        start = pd.to_datetime(r["min"], errors="coerce")
-        end = pd.to_datetime(r["max"], errors="coerce")
-        if pd.isna(start) or pd.isna(end) or start > end:
-            continue
-        events.append((pd.Timestamp(start), 1))
-        events.append((pd.Timestamp(end) + pd.Timedelta(nanoseconds=1), -1))
-    if not events:
-        return df.iloc[0:0].copy()
 
-    events.sort(key=lambda x: x[0])
-    idx = 0
-    active = 0
-    prev_time: pd.Timestamp | None = None
-    segments: list[tuple[pd.Timestamp, pd.Timestamp, int]] = []
-    while idx < len(events):
-        current_time = events[idx][0]
-        if prev_time is not None and current_time > prev_time and active > 0:
-            segments.append((prev_time, current_time, active))
-        while idx < len(events) and events[idx][0] == current_time:
-            active += int(events[idx][1])
-            idx += 1
-        prev_time = current_time
+def _chart_dates_in_range(series_df: pd.DataFrame, visible_start: pd.Timestamp, visible_end: pd.Timestamp) -> list[pd.Timestamp]:
+    if series_df.empty:
+        return []
+    d = series_df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date"]).copy()
+    d = d[(d["date"] >= pd.Timestamp(visible_start)) & (d["date"] <= pd.Timestamp(visible_end))].copy()
+    return sorted(pd.Timestamp(dt) for dt in d["date"].dropna().unique().tolist())
 
-    if not segments:
-        return df.copy().sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
-    # Pick the interval that keeps the most rows ("most data"), not just most active players.
-    scored_segments: list[tuple[pd.Timestamp, pd.Timestamp, int, int]] = []
-    for start, end_exclusive, active_count in segments:
-        row_count = int(((df["Date"] >= start) & (df["Date"] < end_exclusive)).sum())
-        scored_segments.append((start, end_exclusive, active_count, row_count))
-
-    best_start, best_end_exclusive, _active, _rows = max(
-        scored_segments,
-        key=lambda seg: (seg[3], seg[2], seg[1] - seg[0], -seg[0].value),
+def _carry_forward_chart_rows(
+    series_df: pd.DataFrame,
+    chart_dates: list[pd.Timestamp],
+    value_cols: list[str],
+) -> pd.DataFrame:
+    return carry_forward_value_rows(
+        series_df,
+        date_col="date",
+        group_col="account",
+        value_cols=value_cols,
+        chart_dates=chart_dates,
     )
-    out = df[(df["Date"] >= best_start) & (df["Date"] < best_end_exclusive)].copy()
-    return out.sort_values(["Date", "Spieler"]).reset_index(drop=True)
+
+
+def _carry_forward_xp_chart_rows(xp_df: pd.DataFrame, chart_dates: list[pd.Timestamp]) -> pd.DataFrame:
+    cols = ["Date", "Spieler", "Total XP"]
+    out = carry_forward_value_rows(
+        xp_df,
+        date_col="Date",
+        group_col="Spieler",
+        value_cols=["Total XP"],
+        chart_dates=chart_dates,
+    )
+    if out.empty:
+        return pd.DataFrame(columns=cols)
+    return out[cols].sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
 
 def build_rank_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -1525,19 +1488,43 @@ def select_date_range(
     min_date: date,
     max_date: date,
     key: str | None = None,
+    show_reset: bool = False,
 ) -> tuple[date, date]:
     if min_date >= max_date:
         st.caption(f"{label}: only one snapshot date available ({min_date.isoformat()}).")
         return min_date, max_date
+    default_range = (min_date, max_date)
+    if key and key in st.session_state:
+        current = st.session_state.get(key)
+        if isinstance(current, (tuple, list)) and len(current) == 2:
+            current_start, current_end = current
+            if isinstance(current_start, date) and isinstance(current_end, date):
+                clamped_start = min(max(current_start, min_date), max_date)
+                clamped_end = min(max(current_end, min_date), max_date)
+                if clamped_start > clamped_end:
+                    clamped_start, clamped_end = min_date, max_date
+                st.session_state[key] = (clamped_start, clamped_end)
+    slider_parent = st
+    if show_reset and key:
+        slider_col, reset_col = st.columns([0.86, 0.14], gap="small")
+        if reset_col.button(
+            "Reset",
+            key=f"{key}_reset",
+            icon=":material/restart_alt:",
+            help=f"Reset {label.lower()} to the computed full window.",
+            use_container_width=True,
+        ):
+            st.session_state[key] = default_range
+        slider_parent = slider_col
     slider_kwargs: dict[str, object] = {
         "label": label,
         "min_value": min_date,
         "max_value": max_date,
-        "value": (min_date, max_date),
+        "value": default_range,
     }
     if key:
         slider_kwargs["key"] = key
-    return st.slider(**slider_kwargs)
+    return slider_parent.slider(**slider_kwargs)
 
 
 def render_xp_explorer_section(
@@ -1582,34 +1569,51 @@ def _render_xp_explorer_section_impl(
         default=player_options,
         key=f"{key_prefix}_players",
     )
-    common_interval_only = st.checkbox(
-        "Use max-data interval (most selected-player rows)",
-        value=True,
-        key=f"{key_prefix}_common_interval",
-    )
-
     df_source = xp_subset_df[xp_subset_df["Spieler"].isin(selected_players)].copy()
     if df_source.empty:
         st.warning("No rows for selected filters.")
         return
     account_color_map = build_account_color_map(selected_players, df_source)
 
-    min_date = df_source["Date"].min().date()
-    max_date = df_source["Date"].max().date()
+    interval_source = restrict_to_common_interval(df_source)
+    if interval_source.empty:
+        st.warning("No rows after interval filtering.")
+        return
+
+    min_ts = pd.to_datetime(interval_source["Date"], errors="coerce").min()
+    max_ts = pd.to_datetime(df_source["Date"], errors="coerce").max()
+    if pd.isna(min_ts) or pd.isna(max_ts):
+        st.warning("No valid dates after interval filtering.")
+        return
+    min_date = pd.Timestamp(min_ts).date()
+    max_date = pd.Timestamp(max_ts).date()
     d_start, d_end = select_date_range(
         label="Date range",
         min_date=min_date,
         max_date=max_date,
         key=f"{key_prefix}_date_range",
+        show_reset=True,
     )
-    df_range = df_source[(df_source["Date"] >= pd.Timestamp(d_start)) & (df_source["Date"] <= pd.Timestamp(d_end))].copy()
+    visible_start = pd.Timestamp(d_start)
+    visible_end = pd.Timestamp(d_end)
+    df_range = df_source[(df_source["Date"] >= visible_start) & (df_source["Date"] <= visible_end)].copy()
     if df_range.empty:
         st.warning("No rows in selected date range.")
         return
 
-    df = restrict_to_common_interval(df_range) if common_interval_only else df_range.copy()
-    if df.empty:
+    chart_seed_df = interval_source[
+        (interval_source["Date"] >= visible_start) & (interval_source["Date"] <= visible_end)
+    ].copy()
+    if chart_seed_df.empty:
         st.warning("No rows in selected date range after interval filtering.")
+        return
+    chart_dates = sorted(
+        pd.Timestamp(dt) for dt in pd.to_datetime(chart_seed_df["Date"], errors="coerce").dropna().unique().tolist()
+    )
+    carry_source_df = df_source[df_source["Date"] <= visible_end].copy()
+    df = _carry_forward_xp_chart_rows(carry_source_df, chart_dates)
+    if df.empty:
+        st.warning("No rows in selected date range after carry-forward.")
         return
 
     # Recalculate trend projection defaults whenever the date range/player scope changes.
@@ -1617,7 +1621,7 @@ def _render_xp_explorer_section_impl(
         [
             pd.Timestamp(d_start).date().isoformat(),
             pd.Timestamp(d_end).date().isoformat(),
-            "common" if bool(common_interval_only) else "full",
+            "max-data",
             ",".join(sorted([str(p).strip() for p in selected_players if str(p).strip()])),
         ]
     )
@@ -2229,8 +2233,16 @@ def _render_xp_explorer_section_impl(
                     visible_start = pd.Timestamp(d_start)
                 if pd.isna(visible_end):
                     visible_end = pd.Timestamp(d_end)
-                d = d[(d["date"] >= pd.Timestamp(visible_start)) & (d["date"] <= pd.Timestamp(visible_end))].copy()
-                return d.sort_values(["account", "date"]).reset_index(drop=True)
+                d = d[d["date"] <= pd.Timestamp(visible_end)].copy()
+                metric_dates = _chart_dates_in_range(d, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
+                activity_dates = sorted(
+                    set(metric_dates).union(
+                        pd.Timestamp(dt)
+                        for dt in chart_dates
+                        if pd.Timestamp(visible_start) <= pd.Timestamp(dt) <= pd.Timestamp(visible_end)
+                    )
+                )
+                return _carry_forward_chart_rows(d, activity_dates, ["value"])
 
             def _build_activity_gain_series(series_df: pd.DataFrame) -> pd.DataFrame:
                 visible_start = pd.to_datetime(df["Date"].min(), errors="coerce")
@@ -2247,26 +2259,35 @@ def _render_xp_explorer_section_impl(
                 base = base[base["date"] <= pd.Timestamp(visible_end)].copy()
                 if base.empty:
                     return base
-                first_dates = (
-                    base.sort_values(["account", "date"])
-                    .groupby("account", as_index=False)["date"]
-                    .min()
+                metric_dates = _chart_dates_in_range(base, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
+                activity_dates = sorted(
+                    set(metric_dates).union(
+                        pd.Timestamp(dt)
+                        for dt in chart_dates
+                        if pd.Timestamp(visible_start) <= pd.Timestamp(dt) <= pd.Timestamp(visible_end)
+                    )
                 )
-                if first_dates.empty:
+                if not activity_dates:
                     return base.iloc[0:0].copy()
-                overlap_start = pd.to_datetime(first_dates["date"].max(), errors="coerce")
-                if pd.isna(overlap_start):
-                    overlap_start = pd.Timestamp(visible_start)
-                anchor_start = max(pd.Timestamp(visible_start), pd.Timestamp(overlap_start))
-                return build_cumulative_gain_df(
+                accounts_with_anchor_baseline = set(
+                    base[base["date"] <= pd.Timestamp(visible_start)]["account"].astype(str).str.strip().tolist()
+                )
+                gained = build_cumulative_gain_df(
                     base,
                     date_col="date",
                     group_col="account",
                     value_col="value",
                     gain_col="gain_value",
-                    anchor_date=pd.Timestamp(anchor_start),
+                    anchor_date=pd.Timestamp(visible_start),
                     include_anchor_row=True,
                 )
+                gained = gained[gained["date"] >= pd.Timestamp(visible_start)].copy()
+                synthetic_anchor_mask = (
+                    (gained["date"] == pd.Timestamp(visible_start))
+                    & ~gained["account"].astype(str).str.strip().isin(accounts_with_anchor_baseline)
+                )
+                gained = gained[~synthetic_anchor_mask].copy()
+                return _carry_forward_chart_rows(gained, activity_dates, ["value", "gain_value"])
 
             battles_plot = _build_activity_gain_series(battles_series)
             caught_plot = _build_activity_gain_series(caught_series)
@@ -3940,11 +3961,19 @@ def _build_dashboard_export_payload(
                 columns={"xp_gain": "XP Gain", "xp_per_day": "XP/Day"}
             )
 
+    xp_explorer_chart_dates: list[pd.Timestamp] = []
     xp_explorer_df = dash_xp_df.copy()
     if not xp_explorer_df.empty:
-        xp_explorer_df = restrict_to_common_interval(xp_explorer_df)
+        xp_interval_df = restrict_to_common_interval(xp_explorer_df)
+        if xp_interval_df.empty:
+            xp_interval_df = dash_xp_df.copy()
+        xp_explorer_chart_dates = sorted(
+            pd.Timestamp(dt)
+            for dt in pd.to_datetime(xp_interval_df["Date"], errors="coerce").dropna().unique().tolist()
+        )
+        xp_explorer_df = _carry_forward_xp_chart_rows(dash_xp_df, xp_explorer_chart_dates)
         if xp_explorer_df.empty:
-            xp_explorer_df = dash_xp_df.copy()
+            xp_explorer_df = xp_interval_df.copy()
         xp_explorer_df = xp_explorer_df.sort_values(["Date", "Spieler"]).copy()
 
         gain_over_time_df = build_xp_gain_over_time_df(xp_explorer_df)
@@ -4416,10 +4445,23 @@ def _build_dashboard_export_payload(
             d["date"] = pd.to_datetime(d["date"], errors="coerce")
             d = d.dropna(subset=["date"]).copy()
             if pd.notna(visible_start):
-                d = d[d["date"] >= pd.Timestamp(visible_start)].copy()
+                visible_start_ts = pd.Timestamp(visible_start)
+            else:
+                visible_start_ts = pd.Timestamp(d["date"].min())
             if pd.notna(visible_end):
-                d = d[d["date"] <= pd.Timestamp(visible_end)].copy()
-            return d.sort_values(["account", "date"]).reset_index(drop=True)
+                visible_end_ts = pd.Timestamp(visible_end)
+            else:
+                visible_end_ts = pd.Timestamp(d["date"].max())
+            d = d[d["date"] <= visible_end_ts].copy()
+            metric_dates = _chart_dates_in_range(d, visible_start_ts, visible_end_ts)
+            activity_dates = sorted(
+                set(metric_dates).union(
+                    pd.Timestamp(dt)
+                    for dt in xp_explorer_chart_dates
+                    if visible_start_ts <= pd.Timestamp(dt) <= visible_end_ts
+                )
+            )
+            return _carry_forward_chart_rows(d, activity_dates, ["value"])
 
         def _build_activity_gain_series(series_df: pd.DataFrame) -> pd.DataFrame:
             base = series_df.copy()
@@ -4431,26 +4473,40 @@ def _build_dashboard_export_payload(
                 base = base[base["date"] <= pd.Timestamp(visible_end)].copy()
             if base.empty:
                 return base
-            first_dates = (
-                base.sort_values(["account", "date"])
-                .groupby("account", as_index=False)["date"]
-                .min()
+            visible_start_ts = pd.Timestamp(visible_start) if pd.notna(visible_start) else pd.Timestamp(base["date"].min())
+            visible_end_ts = pd.Timestamp(visible_end) if pd.notna(visible_end) else pd.Timestamp(base["date"].max())
+            metric_dates = _chart_dates_in_range(base, visible_start_ts, visible_end_ts)
+            activity_dates = sorted(
+                set(metric_dates).union(
+                    pd.Timestamp(dt)
+                    for dt in xp_explorer_chart_dates
+                    if visible_start_ts <= pd.Timestamp(dt) <= visible_end_ts
+                )
             )
-            if first_dates.empty:
+            if not activity_dates:
                 return base.iloc[0:0].copy()
-            overlap_start = pd.to_datetime(first_dates["date"].max(), errors="coerce")
-            anchor_start = pd.Timestamp(overlap_start) if pd.notna(overlap_start) else pd.Timestamp(base["date"].min())
+            accounts_with_anchor_baseline = set()
             if pd.notna(visible_start):
-                anchor_start = max(pd.Timestamp(visible_start), pd.Timestamp(anchor_start))
-            return build_cumulative_gain_df(
+                accounts_with_anchor_baseline = set(
+                    base[base["date"] <= pd.Timestamp(visible_start)]["account"].astype(str).str.strip().tolist()
+                )
+            gained = build_cumulative_gain_df(
                 base,
                 date_col="date",
                 group_col="account",
                 value_col="value",
                 gain_col="gain_value",
-                anchor_date=pd.Timestamp(anchor_start),
+                anchor_date=pd.Timestamp(visible_start) if pd.notna(visible_start) else None,
                 include_anchor_row=True,
             )
+            if pd.notna(visible_start):
+                gained = gained[gained["date"] >= pd.Timestamp(visible_start)].copy()
+                synthetic_anchor_mask = (
+                    (gained["date"] == pd.Timestamp(visible_start))
+                    & ~gained["account"].astype(str).str.strip().isin(accounts_with_anchor_baseline)
+                )
+                gained = gained[~synthetic_anchor_mask].copy()
+            return _carry_forward_chart_rows(gained, activity_dates, ["value", "gain_value"])
 
         battles_series = pd.DataFrame(columns=["date", "account", "value"])
         if not additional_source.empty and activity_accounts:
@@ -4861,8 +4917,7 @@ medal_df = load_medal_snapshots(
     excluded_manual_medal_ids=EXCLUDED_MANUAL_MEDAL_IDS,
 )
 goals_df = load_medal_goals(medals_config_path())
-ensure_medal_explanations_file(medal_explanations_path(), goals_df)
-medal_explanations_map = load_medal_explanations(medal_explanations_path())
+medal_explanations_map = medal_explanation_map_from_goals(goals_df)
 display_medal_df = with_derived_platinum_rows(medal_df, goals_df)
 all_accounts = account_options_from_data(xp_input_df, medal_df)
 latest_xp_df = latest_xp_snapshot(xp_input_df)
@@ -5610,7 +5665,38 @@ if page == "Data Input":
             max_level_accounts = set(
                 latest_actual_xp[latest_actual_xp["Lvl"].astype(int) >= int(xp_level_max)]["Spieler"].astype(str).tolist()
             )
-        available_xp_accounts = [a for a in all_players if a not in xp_on_date and a not in max_level_accounts]
+        battles_on_date: set[str] = set()
+        if not additional_activity_df.empty:
+            battles_on_date = set(
+                additional_activity_df[additional_activity_df["date"].dt.date == xp_date]["account"]
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+        distance_on_date: set[str] = set()
+        caught_on_date: set[str] = set()
+        if not medal_df.empty:
+            same_day_activity = medal_df[medal_df["date"].dt.date == xp_date].copy()
+            if not same_day_activity.empty:
+                same_day_activity["account"] = same_day_activity["account"].astype(str).str.strip()
+                same_day_activity["medal_id"] = (
+                    same_day_activity["medal_id"].astype(str).str.strip().str.lower().map(goal_medal_id_for)
+                )
+                distance_medal_id = XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"]
+                caught_medal_id = XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"]
+                distance_on_date = set(
+                    same_day_activity[same_day_activity["medal_id"] == distance_medal_id]["account"].tolist()
+                )
+                caught_on_date = set(
+                    same_day_activity[same_day_activity["medal_id"] == caught_medal_id]["account"].tolist()
+                )
+        activity_complete_on_date = battles_on_date & distance_on_date & caught_on_date
+        missing_xp_accounts = [a for a in all_players if a not in xp_on_date and a not in max_level_accounts]
+        max_level_activity_accounts = [
+            a for a in all_players if a in max_level_accounts and a not in activity_complete_on_date
+        ]
+        available_account_set = set(missing_xp_accounts) | set(max_level_activity_accounts)
+        available_xp_accounts = [a for a in all_players if a in available_account_set]
 
         if xp_on_date:
             st.caption(f"Already entered for this date: {', '.join(sorted(xp_on_date))}")
@@ -5618,17 +5704,22 @@ if page == "Data Input":
             st.caption(
                 f"No XP input needed after max level {xp_level_max}: {', '.join(sorted(max_level_accounts))}"
             )
-        if available_xp_accounts:
-            st.caption(f"Missing for this date: {', '.join(available_xp_accounts)}")
+        if missing_xp_accounts:
+            st.caption(f"Missing XP/activity for this date: {', '.join(missing_xp_accounts)}")
+        if max_level_activity_accounts:
+            st.caption(
+                "Missing activity only for this date after max level: "
+                f"{', '.join(max_level_activity_accounts)}"
+            )
 
         selected_xp_accounts = st.multiselect(
-            "Accounts to update (missing only for selected date)",
+            "Accounts to update (missing XP or activity for selected date)",
             options=available_xp_accounts,
             default=available_xp_accounts,
             key="xp_batch_accounts",
         )
         if not available_xp_accounts:
-            st.success("XP snapshot complete for selected date. No missing accounts.")
+            st.success("XP/activity snapshot complete for selected date. No missing accounts.")
         elif not selected_xp_accounts:
             st.info("Select at least one missing account.")
         else:
@@ -5687,6 +5778,7 @@ if page == "Data Input":
                         "xp_bar_last": int(xp_default),
                         "lvl": lvl_default,
                         "xp_bar": xp_default,
+                        "xp_locked": str(acc) in max_level_accounts,
                         "battles_last": battles_default,
                         "distance_last": distance_default,
                         "caught_last": caught_default,
@@ -5750,6 +5842,7 @@ if page == "Data Input":
 
             for row in xp_editor_rows:
                 acc = str(row["account"])
+                xp_locked = bool(row.get("xp_locked", False))
                 c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14 = xp_input_col.columns(col_widths, gap="small")
                 account_slot = c1.empty()
                 c2.markdown(f"`{int(row['lvl_last'])}`")
@@ -5772,6 +5865,7 @@ if page == "Data Input":
                     help="Decrease level",
                     icon=":material/remove:",
                     use_container_width=True,
+                    disabled=xp_locked,
                 )
                 if dec_clicked:
                     st.session_state[lvl_state_key] = max(1, int(st.session_state[lvl_state_key]) - 1)
@@ -5781,6 +5875,7 @@ if page == "Data Input":
                     help="Increase level",
                     icon=":material/add:",
                     use_container_width=True,
+                    disabled=xp_locked,
                 )
                 if inc_clicked:
                     st.session_state[lvl_state_key] = min(xp_level_max, int(st.session_state[lvl_state_key]) + 1)
@@ -5792,12 +5887,14 @@ if page == "Data Input":
                     format="%d",
                     key=lvl_state_key,
                     label_visibility="collapsed",
+                    disabled=xp_locked,
                 )
                 xp_bar_value = c7.text_input(
                     "XP Bar",
                     value=str(int(row["xp_bar"])),
                     key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
                     label_visibility="collapsed",
+                    disabled=xp_locked,
                 )
                 battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
                 distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
@@ -5825,11 +5922,13 @@ if page == "Data Input":
                 battles_num = _parse_float_loose(battles_value)
                 distance_num = _parse_float_loose(distance_value)
                 caught_num = _parse_float_loose(caught_value)
-                row_changed = int(lvl_value) != int(row["lvl_last"])
-                if pd.isna(xp_bar_num):
-                    row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
-                else:
-                    row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
+                row_changed = False
+                if not xp_locked:
+                    row_changed = int(lvl_value) != int(row["lvl_last"])
+                    if pd.isna(xp_bar_num):
+                        row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
+                    else:
+                        row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
                 if not pd.isna(battles_num):
                     row_changed = row_changed or (float(battles_num) != float(row.get("battles_last", 0.0)))
                 if not pd.isna(distance_num):
@@ -5842,7 +5941,9 @@ if page == "Data Input":
                     f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
                     unsafe_allow_html=True,
                 )
-                if pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
+                if xp_locked:
+                    pass
+                elif pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
                     row_errors.append("XP Bar must be a number >= 0.")
                 else:
                     row_df = pd.DataFrame(
@@ -5911,6 +6012,7 @@ if page == "Data Input":
                         "account": acc,
                         "lvl": int(lvl_value),
                         "xp_bar": xp_bar_value,
+                        "xp_locked": xp_locked,
                         "battles_won": battles_value,
                         "distance_walked": distance_value,
                         "pokemon_caught": caught_value,
@@ -5919,7 +6021,7 @@ if page == "Data Input":
 
             if inline_xp_errors:
                 st.caption("Fix row errors to enable saving.")
-            if st.button("Save XP snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
+            if st.button("Save XP/activity snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
                 rows_to_write: list[dict[str, object]] = []
                 additional_rows_to_write: list[dict[str, object]] = []
                 medal_rows_to_write: list[dict[str, object]] = []
@@ -5928,16 +6030,17 @@ if page == "Data Input":
                     acc = str(r.get("account", "")).strip()
                     lvl = pd.to_numeric(r.get("lvl"), errors="coerce")
                     xp_bar = pd.to_numeric(r.get("xp_bar"), errors="coerce")
+                    xp_locked = bool(r.get("xp_locked", False))
                     battles_won = _parse_float_loose(r.get("battles_won"))
                     distance_walked = _parse_float_loose(r.get("distance_walked"))
                     pokemon_caught = _parse_float_loose(r.get("pokemon_caught"))
                     if not acc:
                         errors.append("Missing account value.")
                         continue
-                    if pd.isna(lvl) or int(lvl) < 1 or int(lvl) > xp_level_max:
+                    if not xp_locked and (pd.isna(lvl) or int(lvl) < 1 or int(lvl) > xp_level_max):
                         errors.append(f"{acc}: invalid level.")
                         continue
-                    if pd.isna(xp_bar) or int(xp_bar) < 0:
+                    if not xp_locked and (pd.isna(xp_bar) or int(xp_bar) < 0):
                         errors.append(f"{acc}: invalid XP Bar.")
                         continue
                     if pd.isna(battles_won) or float(battles_won) < 0:
@@ -5949,14 +6052,15 @@ if page == "Data Input":
                     if pd.isna(pokemon_caught) or float(pokemon_caught) < 0:
                         errors.append(f"{acc}: invalid Pokemon Caught.")
                         continue
-                    rows_to_write.append(
-                        {
-                            "Date": xp_date.isoformat(),
-                            "Spieler": acc,
-                            "Lvl": int(lvl),
-                            "XP Bar": int(xp_bar),
-                        }
-                    )
+                    if not xp_locked:
+                        rows_to_write.append(
+                            {
+                                "Date": xp_date.isoformat(),
+                                "Spieler": acc,
+                                "Lvl": int(lvl),
+                                "XP Bar": int(xp_bar),
+                            }
+                        )
                     additional_rows_to_write.append(
                         {
                             "date": xp_date.isoformat(),
@@ -5991,7 +6095,7 @@ if page == "Data Input":
                         st.error(str(e))
                     else:
                         st.success(
-                            f"Saved XP snapshot rows: {written}. "
+                            f"Saved XP rows: {written}. "
                             f"Saved battles rows: {written_additional}. "
                             f"Saved activity medal rows: {written_medals} "
                             "(Distance Walked, Pokemon Caught)."

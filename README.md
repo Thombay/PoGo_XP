@@ -12,7 +12,7 @@ Two projects now live in one repo, with shared input files:
 inputs/
   config/
     player_groups.csv
-    medal_goals.csv
+    medal_goals.csv          (goal values + medal explanations)
     medal_input_order.csv   (created by web app when you save medal input order)
   data/
     medal_snapshots.csv
@@ -134,7 +134,7 @@ Dashboard pages:
   - platinum progress graph ignores dates before medal tracking start per account
 - `Data Input`:
   - XP snapshot input for multiple accounts in one save
-  - accounts whose latest XP row is already at the highest configured level (currently `80`) are skipped in XP input because no further visible XP input is expected
+  - accounts whose latest XP row is already at the highest configured level (currently `80`) keep activity inputs enabled, while level/XP bar are locked
   - for selected date, accounts already entered are hidden so you only see missing accounts
   - medal snapshot input account-wise (`Thombay`, `Cerius`, `Thomzay`) with one-save full medal list
   - for selected date, accounts already entered are hidden so you only see missing accounts
@@ -202,7 +202,7 @@ Current scaffold is in place. `medal-tracker/tools/generate_report.py` already:
 `medal-tracker/tools/append_from_xlsx.py` now:
 
 - extracts medal progress rows into `inputs/data/medal_snapshots.csv`
-- extracts shared goals into `inputs/config/medal_goals.csv` (once, not per account)
+- extracts shared goals into `inputs/config/medal_goals.csv` (once, not per account) and preserves the existing `explanation` column
 - excludes `total_xp` from medal snapshots
 - generates `inputs/templates/medal_snapshots_template.csv` without `total_xp` rows
 - for legacy/manual imports, keep `distance_walked/pokemon_caught/pokestops_visited` aligned with `jogger/collector/backpacker`

@@ -1,74 +1,74 @@
-﻿medal_id,display_name,goal_value
-ace_trainer,Ace Trainer,2000
-alola,Alola,86
-backpacker,Backpacker,50000
-battle_girl,Battle Girl,4000
-battle_legend,Battle Legend,2000
-berry_master,Berry Master,15000
-best_buddy,Best Buddy,200
-breeder,Breeder,2500
-bug,Bug,2500
-cameraman,Cameraman,400
-champion,Champion,2000
-collector,Collector,50000
-community_member,Community Member,100
-dark,Dark,2500
-dragon,Dragon,2500
-electric,Electric,2500
-expert_navigator,Expert Navigator,600
-fairy,Fairy,2500
-fighting,Fighting,2500
-fire,Fire,2500
-fisher,Fisher,1000
-flying,Flying,2500
-friend_finder,Friend Finder,50
-galar,Galar,89
-gentleman,Gentleman,2500
-ghost,Ghost,2500
-grass,Grass,2500
-great_league_veteran,Great League Veteran,1000
-ground,Ground,2500
-gym_leader,Gym Leader,15000
-hero,Hero,2000
-hisui,Hisui,7
-hoenn,Hoenn,135
-ice,Ice,2500
-idol,Idol,20
-jogger,Jogger,10000
-johto,Johto,100
-jumbo_pokemon_collector,Jumbo Pokemon Collector,500
-kalos,Kalos,72
-kanto,Kanto,151
-life_of_a_party,Life of a Party,200
-master_league_veteran,Master League Veteran,1000
-mega_evolution_guru,Mega Evolution Guru,46
-normal,Normal,2500
-paldea,Paldea,103
-picnicker,Picnicker,2500
-pikachu_fan,Pikachu Fan,1000
-pilot,Pilot,10000000
-platinum_medals,Platinum Medals,50
-poison,Poison,2500
-pokemon_ranger,Pokemon Ranger,2500
-psychic,Psychic,2500
-purifier,Purifier,1000
-raid_expert,Raid Expert,500
-rising_star,Rising Star,150
-rising_star_duo,Rising Star Duo,2000
-rock,Rock,2500
-scientist,Scientist,2000
-showcase_star,Showcase Star,100
-sightseer,Sightseer,2000
-sinnoh,Sinnoh,107
-steel,Steel,2500
-successor,Successor,1000
-tiny_pokemon_collector,Tiny Pokemon Collector,500
-total_xp,Total XP,203353000
-triathlete,Triathlete,100
-ultra_hero,Ultra Hero,50
-ultra_league_veteran,Ultra League Veteran,1000
-unova,Unova,156
-unown,Unown,28
-water,Water,2500
-wayfarer,Wayfarer,1500
-youngster,Youngster,1000
+medal_id,display_name,goal_value,explanation
+ace_trainer,Ace Trainer,2000,Team Leader Battles won
+alola,Alola,86,Alola Pokédex entries registered
+backpacker,Backpacker,50000,PokéStops visited
+battle_girl,Battle Girl,4000,Gym Battles won
+battle_legend,Battle Legend,2000,Legendary Raid Battles won (Ultra Beast counts)
+berry_master,Berry Master,15000,Berries fed at Gyms
+best_buddy,Best Buddy,200,Have Buddy Pokémon at Best Buddy level
+breeder,Breeder,2500,Pokémon Eggs hatched
+bug,Bug,2500,Bug-type caught
+cameraman,Cameraman,400,GO Snapshot photobombs
+champion,Champion,2000,Non-legendary Raid Battles won
+collector,Collector,50000,Pokémon caught
+community_member,Community Member,100,Check-in with Community Ambassadors during events hosted on Campfire
+dark,Dark,2500,Dark-type caught
+dragon,Dragon,2500,Dragon-type caught
+electric,Electric,2500,Electric-type caught
+expert_navigator,Expert Navigator,600,Complete Routes
+fairy,Fairy,2500,Fairy-type caught
+fighting,Fighting,2500,Fighting-type caught
+fire,Fire,2500,Fire-type caught
+fisher,Fisher,1000,Big (13.13 kg or heavier) Magikarp caught
+flying,Flying,2500,Flying-type caught
+friend_finder,Friend Finder,50,Refer 50 Trainers
+galar,Galar,89,Galar Pokédex entries registered
+gentleman,Gentleman,2500,Pokémon trades
+ghost,Ghost,2500,Ghost-type caught
+grass,Grass,2500,Grass-type caught
+great_league_veteran,Great League Veteran,1000,Win Trainer Battles in the Great League
+ground,Ground,2500,Ground-type caught
+gym_leader,Gym Leader,15000,Hours of defending Gyms
+hero,Hero,2000,Defeat Team GO Rocket members
+hisui,Hisui,7,Hisui Pokédex entries registered
+hoenn,Hoenn,135,Hoenn Pokédex entries registered
+ice,Ice,2500,Ice-type caught
+idol,Idol,20,Become Best Friends with Trainers
+jogger,Jogger,10000,Kilometers walked
+johto,Johto,100,Johto Pokédex entries registered
+jumbo_pokemon_collector,Jumbo Pokemon Collector,500,Catch XXL (height) Pokémon
+kalos,Kalos,72,Kalos Pokédex entries registered
+kanto,Kanto,151,Kanto Pokédex entries registered
+life_of_a_party,Life of a Party,200,Complete Party Challenges
+master_league_veteran,Master League Veteran,1000,Win Trainer Battles in the Master League
+mega_evolution_guru,Mega Evolution Guru,46,Mega Evolve unique Pokémon
+normal,Normal,2500,Normal-type caught
+paldea,Paldea,103,Paldea Pokédex entries registered
+picnicker,Picnicker,2500,Pokémon caught by other Trainers at your PokéStop Lures
+pikachu_fan,Pikachu Fan,1000,Pikachu caught
+pilot,Pilot,10000000,Earned km across the distance of all Pokémon trades
+platinum_medals,Platinum Medals,50,Platinum Medals
+poison,Poison,2500,Poison-type caught
+pokemon_ranger,Pokemon Ranger,2500,Field Research tasks completed
+psychic,Psychic,2500,Psychic-type caught
+purifier,Purifier,1000,Shadow Pokémon purified
+raid_expert,Raid Expert,500,Earn Raid Battle Trainer Achievements
+rising_star,Rising Star,150,Unique Raid bosses defeated
+rising_star_duo,Rising Star Duo,2000,Raids won with a friend
+rock,Rock,2500,Rock-type caught
+scientist,Scientist,2000,Pokémon evolved
+showcase_star,Showcase Star,100,Win contests at PokéStop Showcase
+sightseer,Sightseer,2000,Unique PokéStops visited
+sinnoh,Sinnoh,107,Sinnoh Pokédex entries registered
+steel,Steel,2500,Steel-type caught
+successor,Successor,1000,Mega Evolve Pokémon
+tiny_pokemon_collector,Tiny Pokemon Collector,500,Catch XXS (height) Pokémon
+total_xp,Total XP,203353000,Total XP
+triathlete,Triathlete,100,Complete 7-day streaks
+ultra_hero,Ultra Hero,50,Defeat the Team GO Rocket Boss
+ultra_league_veteran,Ultra League Veteran,1000,Win Trainer Battles in the Ultra League
+unova,Unova,156,Unova Pokédex entries registered
+unown,Unown,28,Unique Unown caught
+water,Water,2500,Water-type caught
+wayfarer,Wayfarer,1500,Earn Wayfarer agreements
+youngster,Youngster,1000,Tiny (2.41 kg or lighter) Rattata caught

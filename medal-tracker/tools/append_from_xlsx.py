@@ -223,6 +223,22 @@ def _ordered_medal_ids_for_template(goals: pd.DataFrame) -> list[str]:
     return [mid for mid in ordered_ids if mid not in EXCLUDED_MANUAL_MEDAL_IDS]
 
 
+def _load_existing_goal_explanations(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        existing = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return {}
+    if not {"medal_id", "explanation"}.issubset(existing.columns):
+        return {}
+    d = existing[["medal_id", "explanation"]].copy()
+    d["medal_id"] = d["medal_id"].fillna("").astype(str).str.strip().str.lower()
+    d["explanation"] = d["explanation"].fillna("").astype(str).str.strip()
+    d = d[(d["medal_id"] != "") & (d["explanation"] != "")].copy()
+    return dict(zip(d["medal_id"].tolist(), d["explanation"].tolist()))
+
+
 def main():
     workbook = inputs_dir() / "templates" / "Pogo Medals.xlsx"
     out_csv = medal_snapshots_path()
@@ -264,7 +280,9 @@ def main():
                 print(f"  - {mid}: {vals}")
 
         goals = goals.sort_values(["medal_id", "sheet"]).drop_duplicates(subset=["medal_id"], keep="first")
-        goals = goals[["medal_id", "display_name", "goal_value"]].reset_index(drop=True)
+        explanations = _load_existing_goal_explanations(goals_csv)
+        goals["explanation"] = goals["medal_id"].astype(str).str.strip().str.lower().map(explanations).fillna("")
+        goals = goals[["medal_id", "display_name", "goal_value", "explanation"]].reset_index(drop=True)
         goals.to_csv(goals_csv, index=False, encoding="utf-8-sig")
         print(f"Saved: {goals_csv}")
         print(f"Extracted goals: {len(goals)}")

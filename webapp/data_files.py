@@ -176,16 +176,22 @@ def load_medal_snapshots(
 
 
 def load_medal_goals(path: Path) -> pd.DataFrame:
-    cols = ["medal_id", "display_name", "goal_value"]
+    base_cols = ["medal_id", "display_name", "goal_value"]
+    cols = [*base_cols, "explanation"]
     if not path.exists():
         return pd.DataFrame(columns=cols)
     df = pd.read_csv(path, encoding="utf-8-sig")
-    if not set(cols).issubset(df.columns):
+    if not set(base_cols).issubset(df.columns):
         return pd.DataFrame(columns=cols)
     df = df.copy()
+    if "explanation" not in df.columns:
+        df["explanation"] = ""
     df["medal_id"] = df["medal_id"].astype(str).str.strip().str.lower()
+    df["display_name"] = df["display_name"].fillna("").astype(str).str.strip()
     df["goal_value"] = pd.to_numeric(df["goal_value"], errors="coerce")
+    df["explanation"] = df["explanation"].fillna("").astype(str).str.strip()
     df = df.dropna(subset=["medal_id", "display_name", "goal_value"]).copy()
+    df = df[(df["medal_id"] != "") & (df["display_name"] != "")].copy()
     return df[cols].drop_duplicates(subset=["medal_id"]).sort_values(["display_name", "medal_id"]).reset_index(
         drop=True
     )
