@@ -438,6 +438,7 @@ def build_dashboard_export_html(
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{escape(dashboard_title)} - {escape(selected_group)}</title>
   <style>
     :root {{
@@ -475,10 +476,10 @@ def build_dashboard_export_html(
     h1, h2 {{ margin:0 0 10px 0; }}
     p {{ color:var(--muted); }}
     .meta {{ margin-bottom:12px; }}
-    .switch-row {{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }}
+    .switch-row {{ display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; }}
     .switch-label {{ color:var(--muted); font-size:13px; }}
-    .window-switch, .theme-switch {{ display:flex; gap:8px; }}
-    .window-btn, .theme-btn {{ background:var(--card-bg); color:var(--font); border:1px solid var(--border); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px; }}
+    .window-switch, .theme-switch {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .window-btn, .theme-btn {{ background:var(--card-bg); color:var(--font); border:1px solid var(--border); border-radius:8px; padding:7px 12px; cursor:pointer; font-size:13px; min-height:34px; }}
     .window-btn.active, .theme-btn.active {{ background:var(--table-head); border-color:var(--line); font-weight:600; }}
     .metrics {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin:14px 0 18px 0; }}
     .metric-group {{ margin-bottom:18px; }}
@@ -505,7 +506,11 @@ def build_dashboard_export_html(
     @media (max-width: 520px) {{
       body {{ margin:10px; }}
       .metrics {{ grid-template-columns:1fr; }}
-      .window-switch, .theme-switch {{ flex-wrap:wrap; }}
+      .switch-row {{ align-items:stretch; gap:6px; }}
+      .switch-label {{ flex-basis:100%; }}
+      .window-switch, .theme-switch {{ width:100%; }}
+      .window-btn, .theme-btn {{ flex:1 1 7rem; padding:10px 12px; font-size:15px; }}
+      section {{ overflow-x:hidden; }}
     }}
   </style>
 </head>
@@ -617,7 +622,8 @@ def build_dashboard_export_png(
     accounts_text = str(payload["accounts_text"])
     generated_at = str(payload["generated_at"])
 
-    width = 900 if str(export_mode).strip().lower() == "smartphone" else 1800
+    is_smartphone = str(export_mode).strip().lower() == "smartphone"
+    width = 1242 if is_smartphone else 1800
     pad = 20
     bg = str(theme["body_bg"])
     fg = str(theme["font"])
@@ -725,7 +731,9 @@ def build_dashboard_export_png(
         if not cards:
             return Image.new("RGB", (width, 1), bg)
 
-        if width >= 1600:
+        if is_smartphone:
+            cols = 1
+        elif width >= 1600:
             cols = 4
         elif width >= 1100:
             cols = 3
@@ -828,6 +836,151 @@ def build_dashboard_export_png(
             y += row_height + card_gap
         return img
 
+    def _plotly_color(value: object, fallback: str) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return fallback
+
+    def _render_basic_chart_image(fig: go.Figure, chart_height: int) -> "Image.Image":
+        img = Image.new("RGB", (width, chart_height), str(theme["plot_bg"]))
+        draw = ImageDraw.Draw(img)
+        title = str(getattr(getattr(fig.layout, "title", None), "text", "") or "").strip()
+        if title:
+            draw.text((pad, pad), title, fill=fg, font=font_section)
+
+        plot_left = pad + 90
+        plot_top = pad + 70
+        legend_w = 260 if width >= 1000 else 190
+        plot_right = width - pad - legend_w
+        plot_bottom = chart_height - pad - 65
+        if plot_right <= plot_left or plot_bottom <= plot_top:
+            return text_block(title or "Chart", ["Chart area is too small to render."], title_color=fg)
+
+        palette = [str(c) for c in theme["colorway"]]
+        grid_color = str(theme["grid"])
+        axis_color = str(theme["line"])
+        draw.rectangle([(plot_left, plot_top), (plot_right, plot_bottom)], outline=axis_color, width=1)
+        for i in range(1, 5):
+            y = plot_top + int((plot_bottom - plot_top) * i / 5)
+            draw.line([(plot_left, y), (plot_right, y)], fill=grid_color, width=1)
+
+        traces = [tr for tr in fig.data if str(getattr(tr, "type", "")).lower() in {"scatter", "scattergl", "bar"}]
+        if not traces:
+            return text_block(title or "Chart", ["No plottable chart data."], title_color=fg)
+
+        is_horizontal_bar = any(
+            str(getattr(tr, "type", "")).lower() == "bar" and str(getattr(tr, "orientation", "")).lower() == "h"
+            for tr in traces
+        )
+
+        if is_horizontal_bar:
+            labels: list[str] = []
+            values: list[tuple[str, float, str]] = []
+            for idx, tr in enumerate(traces):
+                marker = getattr(tr, "marker", None)
+                color = _plotly_color(getattr(marker, "color", None) if marker is not None else None, palette[idx % len(palette)])
+                xs = list(getattr(tr, "x", []) or [])
+                ys = list(getattr(tr, "y", []) or [])
+                for x_val, y_val in zip(xs, ys):
+                    num = pd.to_numeric(pd.Series([x_val]), errors="coerce").iloc[0]
+                    if pd.notna(num):
+                        label = str(y_val)
+                        labels.append(label)
+                        values.append((label, float(num), color))
+            if not values:
+                return text_block(title or "Chart", ["No numeric bar data."], title_color=fg)
+            max_val = max(v for _, v, _ in values) or 1.0
+            row_h = max(16, int((plot_bottom - plot_top) / max(1, len(values))))
+            for i, (label, val, color) in enumerate(values):
+                y_mid = plot_top + i * row_h + row_h // 2
+                bar_w = int((plot_right - plot_left - 8) * max(0.0, val) / max_val)
+                draw.rectangle([(plot_left, y_mid - 5), (plot_left + bar_w, y_mid + 5)], fill=color)
+                draw.text((pad, y_mid - 9), label[:18], fill=fg, font=font_metric_delta)
+            return img
+
+        points_by_trace: list[tuple[str, list[tuple[float, float]], str]] = []
+        x_values: list[float] = []
+        y_values: list[float] = []
+        x_datetimes: list[pd.Timestamp] = []
+        for idx, tr in enumerate(traces):
+            xs_raw = list(getattr(tr, "x", []) or [])
+            ys_raw = list(getattr(tr, "y", []) or [])
+            if not xs_raw or not ys_raw:
+                continue
+            x_dt = pd.to_datetime(pd.Series(xs_raw), errors="coerce")
+            use_dates = bool(x_dt.notna().sum() >= max(1, len(xs_raw) // 2))
+            if use_dates:
+                xs = [float(pd.Timestamp(v).value) for v in x_dt if pd.notna(v)]
+                x_datetimes.extend(pd.Timestamp(v) for v in x_dt if pd.notna(v))
+                valid_pairs = [(float(pd.Timestamp(x).value), y) for x, y in zip(x_dt, ys_raw) if pd.notna(x)]
+            else:
+                numeric_x = pd.to_numeric(pd.Series(xs_raw), errors="coerce")
+                valid_pairs = [(float(x), y) for x, y in zip(numeric_x, ys_raw) if pd.notna(x)]
+                xs = [x for x, _ in valid_pairs]
+            pts: list[tuple[float, float]] = []
+            for x, y in valid_pairs:
+                num_y = pd.to_numeric(pd.Series([y]), errors="coerce").iloc[0]
+                if pd.notna(num_y):
+                    pts.append((float(x), float(num_y)))
+            if not pts:
+                continue
+            line = getattr(tr, "line", None)
+            marker = getattr(tr, "marker", None)
+            color = _plotly_color(
+                getattr(line, "color", None) if line is not None else None,
+                _plotly_color(getattr(marker, "color", None) if marker is not None else None, palette[idx % len(palette)]),
+            )
+            name = str(getattr(tr, "name", "") or f"Series {idx + 1}")
+            points_by_trace.append((name, pts, color))
+            x_values.extend(xs)
+            y_values.extend(y for _, y in pts)
+
+        if not points_by_trace or not x_values or not y_values:
+            return text_block(title or "Chart", ["No numeric line data."], title_color=fg)
+
+        x_min, x_max = min(x_values), max(x_values)
+        y_min, y_max = min(y_values), max(y_values)
+        if x_min == x_max:
+            x_max = x_min + 1.0
+        if y_min == y_max:
+            y_max = y_min + 1.0
+        y_pad = (y_max - y_min) * 0.08
+        y_min -= y_pad
+        y_max += y_pad
+
+        def to_px(point: tuple[float, float]) -> tuple[int, int]:
+            x, y = point
+            px = plot_left + int((x - x_min) / (x_max - x_min) * (plot_right - plot_left))
+            py = plot_bottom - int((y - y_min) / (y_max - y_min) * (plot_bottom - plot_top))
+            return px, py
+
+        for name, pts, color in points_by_trace:
+            px_pts = [to_px(pt) for pt in sorted(pts)]
+            if len(px_pts) >= 2:
+                draw.line(px_pts, fill=color, width=3)
+            for px, py in px_pts:
+                draw.ellipse([(px - 4, py - 4), (px + 4, py + 4)], fill=color)
+
+        for i in range(5):
+            val = y_min + (y_max - y_min) * i / 4
+            py = plot_bottom - int((val - y_min) / (y_max - y_min) * (plot_bottom - plot_top))
+            draw.text((pad, py - 9), f"{val:,.0f}", fill=fg, font=font_metric_delta)
+        if x_datetimes:
+            date_min = pd.Timestamp(min(x_datetimes)).strftime("%b %-d" if sys.platform != "win32" else "%b %#d")
+            date_max = pd.Timestamp(max(x_datetimes)).strftime("%b %-d" if sys.platform != "win32" else "%b %#d")
+            draw.text((plot_left, plot_bottom + 14), date_min, fill=fg, font=font_metric_delta)
+            draw.text((plot_right - 80, plot_bottom + 14), date_max, fill=fg, font=font_metric_delta)
+
+        legend_x = plot_right + 24
+        legend_y = plot_top
+        draw.text((legend_x, legend_y), "account", fill=fg, font=font_metric_delta)
+        legend_y += 26
+        for name, _, color in points_by_trace[:18]:
+            draw.line([(legend_x, legend_y + 8), (legend_x + 26, legend_y + 8)], fill=color, width=3)
+            draw.text((legend_x + 34, legend_y), name[:24], fill=fg, font=font_metric_delta)
+            legend_y += 22
+        return img
+
     blocks: list["Image.Image"] = []
     header_lines = [
         f"Group: {selected_group}",
@@ -844,25 +997,37 @@ def build_dashboard_export_png(
             return True, None
         sort_legend_by_latest_y(fig)
         _style_export_figure(fig, export_mode)
-        h = int(fig.layout.height) if getattr(fig.layout, "height", None) else 520
+        h = int(fig.layout.height) if getattr(fig.layout, "height", None) else (680 if is_smartphone else 520)
+        chart_height = max(560 if is_smartphone else 320, h)
+        render_scale = 2
+        if is_smartphone:
+            blocks.append(_render_basic_chart_image(fig, chart_height))
+            return True, None
+        png_bytes: bytes | None = None
         try:
-            png_bytes = fig.to_image(format="png", width=width, height=max(320, h), scale=2)
+            png_bytes = fig.to_image(format="png", width=width, height=chart_height, scale=render_scale)
         except Exception as e:
             msg = str(e).strip()
-            if "broadcast_args_to_dicts" in msg or "plotly.io._utils" in msg:
-                png_bytes, sub_err = _figure_to_png_via_subprocess(fig, width=width, height=max(320, h), scale=2)
+            should_retry_subprocess = (
+                "broadcast_args_to_dicts" in msg
+                or "plotly.io._utils" in msg
+                or "did you set 0 or less tabs" in msg.lower()
+                or "kaleido" in msg.lower()
+            )
+            if should_retry_subprocess:
+                png_bytes, _sub_err = _figure_to_png_via_subprocess(fig, width=width, height=chart_height, scale=render_scale)
                 if not png_bytes:
-                    detail = f" ({sub_err})" if sub_err else ""
-                    return False, (
-                        "Picture export failed due to mixed Plotly/Kaleido runtime. "
-                        f"Restart Streamlit after dependency updates (`python run_server.py`).{detail}"
-                    )
+                    blocks.append(_render_basic_chart_image(fig, chart_height))
+                    return True, None
             elif "Chrome" in msg or "chrom" in msg.lower():
-                return False, "Picture export needs Chrome for Kaleido v1. Install Chrome and retry."
+                blocks.append(_render_basic_chart_image(fig, chart_height))
+                return True, None
             elif msg:
-                return False, f"Picture export failed: {msg}"
+                blocks.append(_render_basic_chart_image(fig, chart_height))
+                return True, None
             else:
-                return False, "Picture export failed while rendering Plotly images."
+                blocks.append(_render_basic_chart_image(fig, chart_height))
+                return True, None
         chart_img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         if chart_img.width != width:
             new_h = int(chart_img.height * (width / chart_img.width))

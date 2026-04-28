@@ -13,6 +13,7 @@ def render_xp_explorer_section_view(
     additional_subset_df: Any = None,
     show_global_activity_trends: bool = False,
     activity_window_days: int = 7,
+    leader_preference_key: str | None = None,
 ) -> None:
     render_impl(
         xp_subset_df=xp_subset_df,
@@ -22,4 +23,5 @@ def render_xp_explorer_section_view(
         additional_subset_df=additional_subset_df,
         show_global_activity_trends=show_global_activity_trends,
         activity_window_days=activity_window_days,
+        leader_preference_key=leader_preference_key,
     )

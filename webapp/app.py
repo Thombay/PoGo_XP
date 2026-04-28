@@ -106,6 +106,7 @@ SPECIAL_PLATINUM_MEDALS = [
 ]
 UI_PREFERENCES_PATH = config_dir() / "ui_preferences.json"
 UI_PREF_DASHBOARD_WINDOW_DAYS = "dashboard_window_days"
+UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP = "dashboard_gap_leader_by_group"
 ACCOUNT_COLORWAY = [
     "#4FA3FF",
     "#FF9F1C",
@@ -744,14 +745,68 @@ def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
     return restrict_to_max_data_start_interval(df, date_col="Date", group_col="Spieler")
 
 
-def _chart_dates_in_range(series_df: pd.DataFrame, visible_start: pd.Timestamp, visible_end: pd.Timestamp) -> list[pd.Timestamp]:
+def _activity_chart_dates(
+    series_df: pd.DataFrame,
+    visible_start: pd.Timestamp,
+    visible_end: pd.Timestamp,
+    chart_dates: list[pd.Timestamp],
+    start_date: pd.Timestamp | None = None,
+) -> list[pd.Timestamp]:
+    visible_start_ts = pd.Timestamp(visible_start)
+    visible_end_ts = pd.Timestamp(visible_end)
+    start_ts = pd.Timestamp(start_date) if start_date is not None else visible_start_ts
+    if start_ts < visible_start_ts:
+        start_ts = visible_start_ts
+    if start_ts > visible_end_ts:
+        start_ts = visible_end_ts
+    shared_dates = {
+        pd.Timestamp(dt)
+        for dt in chart_dates
+        if start_ts <= pd.Timestamp(dt) <= visible_end_ts
+    }
+    shared_dates.add(start_ts)
     if series_df.empty:
-        return []
+        return sorted(shared_dates)
     d = series_df.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce")
-    d = d.dropna(subset=["date"]).copy()
-    d = d[(d["date"] >= pd.Timestamp(visible_start)) & (d["date"] <= pd.Timestamp(visible_end))].copy()
-    return sorted(pd.Timestamp(dt) for dt in d["date"].dropna().unique().tolist())
+    d["account"] = d["account"].astype(str).str.strip()
+    d = d.dropna(subset=["date", "account"]).copy()
+    d = d[(d["date"] >= start_ts) & (d["date"] <= visible_end_ts)].copy()
+    if d.empty:
+        return sorted(shared_dates)
+    first_visible_dates = d.groupby("account")["date"].min().dropna().tolist()
+    return sorted(shared_dates.union(pd.Timestamp(dt) for dt in first_visible_dates))
+
+
+def _activity_mode_start_date(
+    series_df: pd.DataFrame,
+    visible_start: pd.Timestamp,
+    visible_end: pd.Timestamp,
+) -> pd.Timestamp:
+    visible_start_ts = pd.Timestamp(visible_start)
+    visible_end_ts = pd.Timestamp(visible_end)
+    if series_df.empty:
+        return visible_start_ts
+    d = series_df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d["account"] = d["account"].astype(str).str.strip()
+    d = d.dropna(subset=["date", "account"]).copy()
+    d = d[d["date"] <= visible_end_ts].copy()
+    if d.empty:
+        return visible_start_ts
+    first_dates = d.groupby("account")["date"].min().dt.normalize()
+    if first_dates.empty:
+        return visible_start_ts
+    counts = first_dates.value_counts()
+    max_count = int(counts.max()) if not counts.empty else 0
+    if max_count <= 0:
+        return visible_start_ts
+    mode_start = pd.Timestamp(counts[counts == max_count].index.min())
+    if mode_start < visible_start_ts:
+        return visible_start_ts
+    if mode_start > visible_end_ts:
+        return visible_end_ts
+    return mode_start
 
 
 def _carry_forward_chart_rows(
@@ -1494,8 +1549,11 @@ def select_date_range(
         st.caption(f"{label}: only one snapshot date available ({min_date.isoformat()}).")
         return min_date, max_date
     default_range = (min_date, max_date)
+    has_session_value = False
     if key and key in st.session_state:
+        has_session_value = True
         current = st.session_state.get(key)
+        clamped_range = default_range
         if isinstance(current, (tuple, list)) and len(current) == 2:
             current_start, current_end = current
             if isinstance(current_start, date) and isinstance(current_end, date):
@@ -1503,7 +1561,8 @@ def select_date_range(
                 clamped_end = min(max(current_end, min_date), max_date)
                 if clamped_start > clamped_end:
                     clamped_start, clamped_end = min_date, max_date
-                st.session_state[key] = (clamped_start, clamped_end)
+                clamped_range = (clamped_start, clamped_end)
+        st.session_state[key] = clamped_range
     slider_parent = st
     if show_reset and key:
         slider_col, reset_col = st.columns([0.86, 0.14], gap="small")
@@ -1520,10 +1579,13 @@ def select_date_range(
         "label": label,
         "min_value": min_date,
         "max_value": max_date,
-        "value": default_range,
     }
     if key:
         slider_kwargs["key"] = key
+        if not has_session_value:
+            slider_kwargs["value"] = default_range
+    else:
+        slider_kwargs["value"] = default_range
     return slider_parent.slider(**slider_kwargs)
 
 
@@ -1535,6 +1597,7 @@ def render_xp_explorer_section(
     additional_subset_df: pd.DataFrame | None = None,
     show_global_activity_trends: bool = False,
     activity_window_days: int = 7,
+    leader_preference_key: str | None = None,
 ) -> None:
     render_xp_explorer_section_view(
         render_impl=_render_xp_explorer_section_impl,
@@ -1545,6 +1608,7 @@ def render_xp_explorer_section(
         additional_subset_df=additional_subset_df,
         show_global_activity_trends=show_global_activity_trends,
         activity_window_days=activity_window_days,
+        leader_preference_key=leader_preference_key,
     )
 
 
@@ -1556,6 +1620,7 @@ def _render_xp_explorer_section_impl(
     additional_subset_df: pd.DataFrame | None = None,
     show_global_activity_trends: bool = False,
     activity_window_days: int = 7,
+    leader_preference_key: str | None = None,
 ) -> None:
     st.subheader("XP Explorer")
     if xp_subset_df.empty:
@@ -1686,20 +1751,26 @@ def _render_xp_explorer_section_impl(
     if not leader_options:
         st.warning("No valid leader available for selected rows.")
         return
-    default_leader = infer_default_gap_leader(df)
+    inferred_default_leader = infer_default_gap_leader(df)
+    saved_leader = load_saved_dashboard_gap_leader(leader_preference_key, leader_options) if leader_preference_key else None
+    default_leader = saved_leader or inferred_default_leader
     default_idx = leader_options.index(default_leader) if default_leader in leader_options else 0
     leader_key = f"{key_prefix}_gap_leader"
     leader_scope_key = f"{key_prefix}_gap_leader_scope_sig"
     catchup_key = f"{key_prefix}_show_catchup_trends"
     prior_leader_scope_sig = str(st.session_state.get(leader_scope_key, ""))
+    current_session_leader = str(st.session_state.get(leader_key, "")).strip()
     if prior_leader_scope_sig != trend_scope_sig:
-        st.session_state[leader_key] = leader_options[default_idx]
         st.session_state[leader_scope_key] = trend_scope_sig
-    elif leader_key not in st.session_state or st.session_state.get(leader_key) not in leader_options:
-        st.session_state[leader_key] = leader_options[default_idx]
+        if leader_key in st.session_state:
+            del st.session_state[leader_key]
+        current_session_leader = ""
+    elif current_session_leader and current_session_leader not in leader_options:
+        del st.session_state[leader_key]
+        current_session_leader = ""
     if catchup_key not in st.session_state:
         st.session_state[catchup_key] = True
-    selected_leader = str(st.session_state.get(leader_key, leader_options[default_idx]))
+    selected_leader = current_session_leader if current_session_leader in leader_options else leader_options[default_idx]
 
     gap_df = build_gap_change_df(df, leader=selected_leader)
 
@@ -1755,12 +1826,16 @@ def _render_xp_explorer_section_impl(
 
     controls_left, controls_right = st.columns([1.35, 1.0])
     with controls_left:
-        selected_leader = st.selectbox(
-            "Gap/Trend Leader",
-            options=leader_options,
-            index=leader_options.index(selected_leader) if selected_leader in leader_options else default_idx,
-            key=leader_key,
-        )
+        leader_select_kwargs: dict[str, object] = {
+            "label": "Gap/Trend Leader",
+            "options": leader_options,
+            "key": leader_key,
+        }
+        if leader_key not in st.session_state:
+            leader_select_kwargs["index"] = leader_options.index(selected_leader) if selected_leader in leader_options else default_idx
+        selected_leader = st.selectbox(**leader_select_kwargs)
+        if leader_preference_key:
+            save_dashboard_gap_leader(leader_preference_key, selected_leader)
     with controls_right:
         show_catchup_trends = st.checkbox(
             "Show catch-up trendlines",
@@ -2234,13 +2309,13 @@ def _render_xp_explorer_section_impl(
                 if pd.isna(visible_end):
                     visible_end = pd.Timestamp(d_end)
                 d = d[d["date"] <= pd.Timestamp(visible_end)].copy()
-                metric_dates = _chart_dates_in_range(d, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
-                activity_dates = sorted(
-                    set(metric_dates).union(
-                        pd.Timestamp(dt)
-                        for dt in chart_dates
-                        if pd.Timestamp(visible_start) <= pd.Timestamp(dt) <= pd.Timestamp(visible_end)
-                    )
+                activity_start = _activity_mode_start_date(d, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
+                activity_dates = _activity_chart_dates(
+                    d,
+                    pd.Timestamp(visible_start),
+                    pd.Timestamp(visible_end),
+                    chart_dates,
+                    start_date=activity_start,
                 )
                 return _carry_forward_chart_rows(d, activity_dates, ["value"])
 
@@ -2259,18 +2334,18 @@ def _render_xp_explorer_section_impl(
                 base = base[base["date"] <= pd.Timestamp(visible_end)].copy()
                 if base.empty:
                     return base
-                metric_dates = _chart_dates_in_range(base, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
-                activity_dates = sorted(
-                    set(metric_dates).union(
-                        pd.Timestamp(dt)
-                        for dt in chart_dates
-                        if pd.Timestamp(visible_start) <= pd.Timestamp(dt) <= pd.Timestamp(visible_end)
-                    )
+                activity_start = _activity_mode_start_date(base, pd.Timestamp(visible_start), pd.Timestamp(visible_end))
+                activity_dates = _activity_chart_dates(
+                    base,
+                    pd.Timestamp(visible_start),
+                    pd.Timestamp(visible_end),
+                    chart_dates,
+                    start_date=activity_start,
                 )
                 if not activity_dates:
                     return base.iloc[0:0].copy()
                 accounts_with_anchor_baseline = set(
-                    base[base["date"] <= pd.Timestamp(visible_start)]["account"].astype(str).str.strip().tolist()
+                    base[base["date"] <= activity_start]["account"].astype(str).str.strip().tolist()
                 )
                 gained = build_cumulative_gain_df(
                     base,
@@ -2278,12 +2353,12 @@ def _render_xp_explorer_section_impl(
                     group_col="account",
                     value_col="value",
                     gain_col="gain_value",
-                    anchor_date=pd.Timestamp(visible_start),
+                    anchor_date=activity_start,
                     include_anchor_row=True,
                 )
-                gained = gained[gained["date"] >= pd.Timestamp(visible_start)].copy()
+                gained = gained[gained["date"] >= activity_start].copy()
                 synthetic_anchor_mask = (
-                    (gained["date"] == pd.Timestamp(visible_start))
+                    (gained["date"] == activity_start)
                     & ~gained["account"].astype(str).str.strip().isin(accounts_with_anchor_baseline)
                 )
                 gained = gained[~synthetic_anchor_mask].copy()
@@ -3184,6 +3259,34 @@ def save_dashboard_window_days(window_days: int, path: Path = UI_PREFERENCES_PAT
     save_ui_preferences(prefs, path)
 
 
+def load_saved_dashboard_gap_leader(group_key: object, valid_leaders: Sequence[str], path: Path = UI_PREFERENCES_PATH) -> str | None:
+    key = str(group_key).strip()
+    if not key:
+        return None
+    prefs = load_ui_preferences(path)
+    raw_by_group = prefs.get(UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP)
+    if not isinstance(raw_by_group, dict):
+        return None
+    saved = str(raw_by_group.get(key, "")).strip()
+    valid = {str(leader).strip() for leader in valid_leaders if str(leader).strip()}
+    return saved if saved in valid else None
+
+
+def save_dashboard_gap_leader(group_key: object, leader: object, path: Path = UI_PREFERENCES_PATH) -> None:
+    key = str(group_key).strip()
+    saved_leader = str(leader).strip()
+    if not key or not saved_leader:
+        return
+    prefs = load_ui_preferences(path)
+    raw_by_group = prefs.get(UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP)
+    by_group = dict(raw_by_group) if isinstance(raw_by_group, dict) else {}
+    if by_group.get(key) == saved_leader:
+        return
+    by_group[key] = saved_leader
+    prefs[UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP] = by_group
+    save_ui_preferences(prefs, path)
+
+
 def format_kpi_number(value: object, suffix: str = "") -> str:
     n = pd.to_numeric(value, errors="coerce")
     if pd.isna(n):
@@ -3632,6 +3735,9 @@ def _build_dashboard_export_payload(
     curve_map: dict[int, int],
     show_medals: bool,
     window_days: int,
+    selected_gap_leader: str | None = None,
+    xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
+    xp_explorer_players: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     w = int(window_days)
     w_label = f"{w}d"
@@ -3701,6 +3807,15 @@ def _build_dashboard_export_payload(
         else pd.DataFrame()
     )
     export_account_color_map = build_account_color_map(selected_accounts, dash_xp_df)
+    selected_account_set = {str(a).strip() for a in selected_accounts if str(a).strip()}
+    explorer_accounts = [
+        str(a).strip()
+        for a in (list(xp_explorer_players) if xp_explorer_players is not None else selected_accounts)
+        if str(a).strip() and str(a).strip() in selected_account_set
+    ]
+    if not explorer_accounts:
+        explorer_accounts = [str(a).strip() for a in selected_accounts if str(a).strip()]
+    explorer_color_map = build_account_color_map(explorer_accounts, dash_xp_df)
 
     def _headline_export_card(
         label: str,
@@ -3962,18 +4077,47 @@ def _build_dashboard_export_payload(
             )
 
     xp_explorer_chart_dates: list[pd.Timestamp] = []
-    xp_explorer_df = dash_xp_df.copy()
+    xp_explorer_df = dash_xp_df[dash_xp_df["Spieler"].isin(explorer_accounts)].copy()
     if not xp_explorer_df.empty:
         xp_interval_df = restrict_to_common_interval(xp_explorer_df)
         if xp_interval_df.empty:
-            xp_interval_df = dash_xp_df.copy()
+            xp_interval_df = xp_explorer_df.copy()
+        min_ts = pd.to_datetime(xp_interval_df["Date"], errors="coerce").min()
+        max_ts = pd.to_datetime(xp_explorer_df["Date"], errors="coerce").max()
+        visible_start_ts = pd.Timestamp(min_ts) if pd.notna(min_ts) else None
+        visible_end_ts = pd.Timestamp(max_ts) if pd.notna(max_ts) else None
+        if (
+            xp_explorer_date_range is not None
+            and isinstance(xp_explorer_date_range, (tuple, list))
+            and len(xp_explorer_date_range) == 2
+            and visible_start_ts is not None
+            and visible_end_ts is not None
+        ):
+            raw_start, raw_end = xp_explorer_date_range
+            selected_start = pd.to_datetime(raw_start, errors="coerce")
+            selected_end = pd.to_datetime(raw_end, errors="coerce")
+            if pd.notna(selected_start) and pd.notna(selected_end):
+                visible_start_ts = min(max(pd.Timestamp(selected_start), visible_start_ts), visible_end_ts)
+                visible_end_ts = min(max(pd.Timestamp(selected_end), visible_start_ts), visible_end_ts)
+                if visible_start_ts > visible_end_ts:
+                    visible_start_ts = pd.Timestamp(min_ts)
+                    visible_end_ts = pd.Timestamp(max_ts)
+        chart_seed_df = xp_interval_df.copy()
+        if visible_start_ts is not None and visible_end_ts is not None:
+            chart_seed_df = chart_seed_df[
+                (chart_seed_df["Date"] >= visible_start_ts)
+                & (chart_seed_df["Date"] <= visible_end_ts)
+            ].copy()
         xp_explorer_chart_dates = sorted(
             pd.Timestamp(dt)
-            for dt in pd.to_datetime(xp_interval_df["Date"], errors="coerce").dropna().unique().tolist()
+            for dt in pd.to_datetime(chart_seed_df["Date"], errors="coerce").dropna().unique().tolist()
         )
-        xp_explorer_df = _carry_forward_xp_chart_rows(dash_xp_df, xp_explorer_chart_dates)
+        carry_source_df = xp_explorer_df.copy()
+        if visible_end_ts is not None:
+            carry_source_df = carry_source_df[carry_source_df["Date"] <= visible_end_ts].copy()
+        xp_explorer_df = _carry_forward_xp_chart_rows(carry_source_df, xp_explorer_chart_dates)
         if xp_explorer_df.empty:
-            xp_explorer_df = xp_interval_df.copy()
+            xp_explorer_df = chart_seed_df.copy() if not chart_seed_df.empty else xp_interval_df.copy()
         xp_explorer_df = xp_explorer_df.sort_values(["Date", "Spieler"]).copy()
 
         gain_over_time_df = build_xp_gain_over_time_df(xp_explorer_df)
@@ -3982,7 +4126,7 @@ def _build_dashboard_export_payload(
             x="Date",
             y="XP Gain",
             color="Spieler",
-            color_discrete_map=export_account_color_map,
+            color_discrete_map=explorer_color_map,
             markers=True,
             title="XP Gain Over Time",
         )
@@ -3992,7 +4136,7 @@ def _build_dashboard_export_payload(
             x="Date",
             y="Total XP",
             color="Spieler",
-            color_discrete_map=export_account_color_map,
+            color_discrete_map=explorer_color_map,
             markers=True,
             title="Total XP Over Time",
         )
@@ -4008,8 +4152,8 @@ def _build_dashboard_export_payload(
                         mode="lines+markers",
                         line_shape="hv",
                         name=player,
-                        line=dict(color=export_account_color_map.get(str(player))),
-                        marker=dict(color=export_account_color_map.get(str(player))),
+                        line=dict(color=explorer_color_map.get(str(player))),
+                        marker=dict(color=explorer_color_map.get(str(player))),
                     )
                 )
             fig_rank.update_layout(title="Rank Over Time (Step)", legend_title="Player")
@@ -4025,21 +4169,26 @@ def _build_dashboard_export_payload(
                     showarrow=False,
                 )
 
-        gap_df = build_gap_change_df(xp_explorer_df)
+        export_gap_leader = str(selected_gap_leader).strip() if selected_gap_leader is not None else ""
+        if export_gap_leader and export_gap_leader not in set(xp_explorer_df["Spieler"].astype(str).str.strip()):
+            export_gap_leader = ""
+        if not export_gap_leader:
+            export_gap_leader = infer_default_gap_leader(xp_explorer_df) or ""
+        gap_df = build_gap_change_df(xp_explorer_df, leader=export_gap_leader or None)
         if not gap_df.empty:
             fig_gap = px.line(
                 gap_df,
                 x="Date",
                 y="Gap Change",
                 color="Spieler",
-                color_discrete_map=export_account_color_map,
+                color_discrete_map=explorer_color_map,
                 markers=True,
                 title="Gap Change Since First Snapshot",
             )
             fig_gap.add_hline(
                 y=0,
                 line_dash="dash",
-                annotation_text=gap_baseline_annotation_text(gap_df),
+                annotation_text=gap_baseline_annotation_text(gap_df, leader=export_gap_leader or None),
                 annotation_position="bottom right",
             )
 
@@ -4050,7 +4199,7 @@ def _build_dashboard_export_payload(
                 x="Date",
                 y="XP/day",
                 color="Spieler",
-                color_discrete_map=export_account_color_map,
+                color_discrete_map=explorer_color_map,
                 markers=True,
                 title="Interval Pace (XP/day)",
             )
@@ -4058,8 +4207,8 @@ def _build_dashboard_export_payload(
     activity_chart_items: list[tuple[str, go.Figure | None]] = []
     activity_sections: list[tuple[str, pd.DataFrame]] = []
     if not show_medals:
-        activity_accounts = [str(a).strip() for a in selected_accounts if str(a).strip()]
-        activity_color_map = build_account_color_map(activity_accounts, dash_xp_df)
+        activity_accounts = [str(a).strip() for a in explorer_accounts if str(a).strip()]
+        activity_color_map = explorer_color_map
         medal_source = dash_medal_df.copy()
         additional_source = dash_additional_df.copy()
 
@@ -4453,13 +4602,13 @@ def _build_dashboard_export_payload(
             else:
                 visible_end_ts = pd.Timestamp(d["date"].max())
             d = d[d["date"] <= visible_end_ts].copy()
-            metric_dates = _chart_dates_in_range(d, visible_start_ts, visible_end_ts)
-            activity_dates = sorted(
-                set(metric_dates).union(
-                    pd.Timestamp(dt)
-                    for dt in xp_explorer_chart_dates
-                    if visible_start_ts <= pd.Timestamp(dt) <= visible_end_ts
-                )
+            activity_start = _activity_mode_start_date(d, visible_start_ts, visible_end_ts)
+            activity_dates = _activity_chart_dates(
+                d,
+                visible_start_ts,
+                visible_end_ts,
+                xp_explorer_chart_dates,
+                start_date=activity_start,
             )
             return _carry_forward_chart_rows(d, activity_dates, ["value"])
 
@@ -4475,20 +4624,20 @@ def _build_dashboard_export_payload(
                 return base
             visible_start_ts = pd.Timestamp(visible_start) if pd.notna(visible_start) else pd.Timestamp(base["date"].min())
             visible_end_ts = pd.Timestamp(visible_end) if pd.notna(visible_end) else pd.Timestamp(base["date"].max())
-            metric_dates = _chart_dates_in_range(base, visible_start_ts, visible_end_ts)
-            activity_dates = sorted(
-                set(metric_dates).union(
-                    pd.Timestamp(dt)
-                    for dt in xp_explorer_chart_dates
-                    if visible_start_ts <= pd.Timestamp(dt) <= visible_end_ts
-                )
+            activity_start = _activity_mode_start_date(base, visible_start_ts, visible_end_ts)
+            activity_dates = _activity_chart_dates(
+                base,
+                visible_start_ts,
+                visible_end_ts,
+                xp_explorer_chart_dates,
+                start_date=activity_start,
             )
             if not activity_dates:
                 return base.iloc[0:0].copy()
             accounts_with_anchor_baseline = set()
-            if pd.notna(visible_start):
+            if pd.notna(activity_start):
                 accounts_with_anchor_baseline = set(
-                    base[base["date"] <= pd.Timestamp(visible_start)]["account"].astype(str).str.strip().tolist()
+                    base[base["date"] <= activity_start]["account"].astype(str).str.strip().tolist()
                 )
             gained = build_cumulative_gain_df(
                 base,
@@ -4496,16 +4645,15 @@ def _build_dashboard_export_payload(
                 group_col="account",
                 value_col="value",
                 gain_col="gain_value",
-                anchor_date=pd.Timestamp(visible_start) if pd.notna(visible_start) else None,
+                anchor_date=activity_start,
                 include_anchor_row=True,
             )
-            if pd.notna(visible_start):
-                gained = gained[gained["date"] >= pd.Timestamp(visible_start)].copy()
-                synthetic_anchor_mask = (
-                    (gained["date"] == pd.Timestamp(visible_start))
-                    & ~gained["account"].astype(str).str.strip().isin(accounts_with_anchor_baseline)
-                )
-                gained = gained[~synthetic_anchor_mask].copy()
+            gained = gained[gained["date"] >= activity_start].copy()
+            synthetic_anchor_mask = (
+                (gained["date"] == activity_start)
+                & ~gained["account"].astype(str).str.strip().isin(accounts_with_anchor_baseline)
+            )
+            gained = gained[~synthetic_anchor_mask].copy()
             return _carry_forward_chart_rows(gained, activity_dates, ["value", "gain_value"])
 
         battles_series = pd.DataFrame(columns=["date", "account", "value"])
@@ -4704,6 +4852,9 @@ def build_dashboard_export_html(
     show_medals: bool,
     export_mode: str,
     window_days: int,
+    selected_gap_leader: str | None = None,
+    xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
+    xp_explorer_players: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     def _build_payload_for_window(window_days_inner: int) -> dict[str, object]:
         return _build_dashboard_export_payload(
@@ -4716,6 +4867,9 @@ def build_dashboard_export_html(
             curve_map=curve_map,
             show_medals=show_medals,
             window_days=int(window_days_inner),
+            selected_gap_leader=selected_gap_leader,
+            xp_explorer_date_range=xp_explorer_date_range,
+            xp_explorer_players=xp_explorer_players,
         )
 
     return build_dashboard_export_html_impl(
@@ -4742,6 +4896,9 @@ def build_dashboard_export_png(
     show_medals: bool,
     export_mode: str,
     window_days: int,
+    selected_gap_leader: str | None = None,
+    xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
+    xp_explorer_players: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[bytes | None, str | None]:
     def _build_payload_for_window(window_days_inner: int) -> dict[str, object]:
         return _build_dashboard_export_payload(
@@ -4754,6 +4911,9 @@ def build_dashboard_export_png(
             curve_map=curve_map,
             show_medals=show_medals,
             window_days=int(window_days_inner),
+            selected_gap_leader=selected_gap_leader,
+            xp_explorer_date_range=xp_explorer_date_range,
+            xp_explorer_players=xp_explorer_players,
         )
 
     return build_dashboard_export_png_impl(
@@ -4779,6 +4939,9 @@ def render_dashboard_export_button(
     show_medals: bool,
     window_days: int,
     key: str,
+    selected_gap_leader: str | None = None,
+    xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
+    xp_explorer_players: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     mode_options = ["Dark", "Light", "WhatsApp", "Smartphone"]
     mode_col, fmt_col, action_col = st.columns([1.2, 1.3, 1.2])
@@ -4820,6 +4983,9 @@ def render_dashboard_export_button(
             show_medals=show_medals,
             export_mode=export_mode,
             window_days=window_days,
+            selected_gap_leader=selected_gap_leader,
+            xp_explorer_date_range=xp_explorer_date_range,
+            xp_explorer_players=xp_explorer_players,
         )
         if png_err:
             st.warning(png_err)
@@ -4848,6 +5014,9 @@ def render_dashboard_export_button(
         show_medals=show_medals,
         export_mode=export_mode,
         window_days=window_days,
+        selected_gap_leader=selected_gap_leader,
+        xp_explorer_date_range=xp_explorer_date_range,
+        xp_explorer_players=xp_explorer_players,
     )
     with action_col:
         st.caption("Export")
@@ -5002,21 +5171,7 @@ if page == "Dashboard Global":
         with header_left:
             st.subheader("Dashboard Global")
         with header_right:
-            with st.container(key="pogo_export_header_global"):
-                render_dashboard_export_button(
-                    dashboard_title="Dashboard Global",
-                    selected_group=selected_dashboard_group,
-                    selected_accounts=dashboard_accounts,
-                    dash_xp_df=dash_xp_df,
-                    dash_medal_df=dash_medal_df,
-                    dash_additional_df=dash_additional_df,
-                    dash_display_medal_df=dash_display_medal_df,
-                    goals_df=goals_df,
-                    curve_map=curve_map,
-                    show_medals=False,
-                    window_days=selected_window_days,
-                    key="export_dashboard_global",
-                )
+            export_slot = st.empty()
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -5038,7 +5193,27 @@ if page == "Dashboard Global":
             additional_subset_df=dash_additional_df,
             show_global_activity_trends=True,
             activity_window_days=selected_window_days,
+            leader_preference_key=f"global:{selected_dashboard_group}",
         )
+        with export_slot.container():
+            with st.container(key="pogo_export_header_global"):
+                render_dashboard_export_button(
+                    dashboard_title="Dashboard Global",
+                    selected_group=selected_dashboard_group,
+                    selected_accounts=dashboard_accounts,
+                    dash_xp_df=dash_xp_df,
+                    dash_medal_df=dash_medal_df,
+                    dash_additional_df=dash_additional_df,
+                    dash_display_medal_df=dash_display_medal_df,
+                    goals_df=goals_df,
+                    curve_map=curve_map,
+                    show_medals=False,
+                    window_days=selected_window_days,
+                    key="export_dashboard_global",
+                    selected_gap_leader=st.session_state.get("dashboard_global_xp_explorer_gap_leader"),
+                    xp_explorer_date_range=st.session_state.get("dashboard_global_xp_explorer_date_range"),
+                    xp_explorer_players=st.session_state.get("dashboard_global_xp_explorer_players"),
+                )
 
 if page == "Dashboard Personal":
     if not personal_dashboard_group_options:
@@ -5105,21 +5280,7 @@ if page == "Dashboard Personal":
         with header_left:
             st.subheader("Dashboard Personal")
         with header_right:
-            with st.container(key="pogo_export_header_personal"):
-                render_dashboard_export_button(
-                    dashboard_title="Dashboard Personal",
-                    selected_group=selected_dashboard_group,
-                    selected_accounts=dashboard_accounts,
-                    dash_xp_df=dash_xp_df,
-                    dash_medal_df=dash_medal_df,
-                    dash_additional_df=dash_additional_df,
-                    dash_display_medal_df=dash_display_medal_df,
-                    goals_df=goals_df,
-                    curve_map=curve_map,
-                    show_medals=True,
-                    window_days=selected_window_days,
-                    key="export_dashboard_personal",
-                )
+            export_slot = st.empty()
         render_dashboard_content(
             dash_xp_df=dash_xp_df,
             dash_medal_df=dash_medal_df,
@@ -5141,7 +5302,27 @@ if page == "Dashboard Personal":
             additional_subset_df=dash_additional_df,
             show_global_activity_trends=False,
             activity_window_days=selected_window_days,
+            leader_preference_key=f"personal:{selected_dashboard_group}",
         )
+        with export_slot.container():
+            with st.container(key="pogo_export_header_personal"):
+                render_dashboard_export_button(
+                    dashboard_title="Dashboard Personal",
+                    selected_group=selected_dashboard_group,
+                    selected_accounts=dashboard_accounts,
+                    dash_xp_df=dash_xp_df,
+                    dash_medal_df=dash_medal_df,
+                    dash_additional_df=dash_additional_df,
+                    dash_display_medal_df=dash_display_medal_df,
+                    goals_df=goals_df,
+                    curve_map=curve_map,
+                    show_medals=True,
+                    window_days=selected_window_days,
+                    key="export_dashboard_personal",
+                    selected_gap_leader=st.session_state.get("dashboard_personal_xp_explorer_gap_leader"),
+                    xp_explorer_date_range=st.session_state.get("dashboard_personal_xp_explorer_date_range"),
+                    xp_explorer_players=st.session_state.get("dashboard_personal_xp_explorer_players"),
+                )
 if page not in {"Dashboard Global", "Dashboard Personal"}:
     with group_slot.container():
         st.caption("Group")
