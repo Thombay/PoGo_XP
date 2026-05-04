@@ -181,6 +181,7 @@ SPECIAL_PLATINUM_MEDALS = [
 UI_PREFERENCES_PATH = config_dir() / "ui_preferences.json"
 UI_PREF_DASHBOARD_WINDOW_DAYS = "dashboard_window_days"
 UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP = "dashboard_gap_leader_by_group"
+UI_PREF_DATA_INPUT_INACTIVE = "data_input_inactive"
 ACCOUNT_COLORWAY = [
     "#4FA3FF",
     "#FF9F1C",
@@ -2694,6 +2695,52 @@ def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: 
         f.write(f"{row_date.isoformat()};{account};{level};{xp_bar}\n")
 
 
+def build_xp_activity_snapshot_rows(
+    row_date: object,
+    account: str,
+    level: int,
+    xp_bar: int,
+    xp_locked: bool,
+    battles_won: float,
+    distance_walked: float,
+    pokemon_caught: float,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    row_date_text = _input_inactive_date_key(row_date)
+    account_name = str(account).strip()
+    xp_rows: list[dict[str, object]] = []
+    if not bool(xp_locked):
+        xp_rows.append(
+            {
+                "Date": row_date_text,
+                "Spieler": account_name,
+                "Lvl": int(level),
+                "XP Bar": int(xp_bar),
+            }
+        )
+    additional_rows = [
+        {
+            "date": row_date_text,
+            "account": account_name,
+            "battles_won": float(battles_won),
+        }
+    ]
+    medal_rows = [
+        {
+            "date": row_date_text,
+            "account": account_name,
+            "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+            "value": float(distance_walked),
+        },
+        {
+            "date": row_date_text,
+            "account": account_name,
+            "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+            "value": float(pokemon_caught),
+        },
+    ]
+    return xp_rows, additional_rows, medal_rows
+
+
 def _validate_xp_rows_non_decreasing(
     existing_df: pd.DataFrame,
     new_df: pd.DataFrame,
@@ -3037,6 +3084,43 @@ def _pokedex_entry_config_errors(
         if max_value is not None and float(value) > float(max_value):
             errors.append(f"{label}: {float(value):g} is above configured max {float(max_value):g}.")
     return errors
+
+
+def build_pokedex_category_snapshot_rows(
+    row_date: object,
+    account: str,
+    entry_type: str,
+    region_values: dict[str, object],
+    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    entry_type_key = str(entry_type).strip().lower()
+    account_name = str(account).strip()
+    row_date_text = _input_inactive_date_key(row_date)
+    config = entry_config or {}
+    rows: list[dict[str, object]] = []
+    for raw_region, raw_value in region_values.items():
+        region = str(raw_region).strip().lower()
+        if (
+            entry_type_key not in POKEDEX_ENTRY_TYPES
+            or region not in POKEDEX_REGIONS
+            or _is_medal_derived_pokedex_cell(entry_type_key, region)
+            or _is_overall_pokedex_cell(region)
+            or bool(config.get((entry_type_key, region), {}).get("locked", False))
+        ):
+            continue
+        value = pd.to_numeric(raw_value, errors="coerce")
+        if pd.isna(value):
+            continue
+        rows.append(
+            {
+                "date": row_date_text,
+                "account": account_name,
+                "entry_type": entry_type_key,
+                "region": region,
+                "value": float(value),
+            }
+        )
+    return rows
 
 
 def _validate_pokedex_entry_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
@@ -3612,6 +3696,99 @@ def load_ui_preferences(path: Path = UI_PREFERENCES_PATH) -> dict[str, object]:
 def save_ui_preferences(prefs: dict[str, object], path: Path = UI_PREFERENCES_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(prefs, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _input_inactive_date_key(row_date: object) -> str:
+    parsed = pd.to_datetime(row_date, errors="coerce")
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).date().isoformat()
+    return str(row_date).strip()
+
+
+def load_input_inactive_marker(
+    input_type: str,
+    row_date: object,
+    account: str,
+    category: str | None = None,
+    path: Path = UI_PREFERENCES_PATH,
+) -> bool:
+    prefs = load_ui_preferences(path)
+    raw_root = prefs.get(UI_PREF_DATA_INPUT_INACTIVE)
+    if not isinstance(raw_root, dict):
+        return False
+    type_scope = raw_root.get(str(input_type).strip().lower())
+    if not isinstance(type_scope, dict):
+        return False
+    date_scope = type_scope.get(_input_inactive_date_key(row_date))
+    if not isinstance(date_scope, dict):
+        return False
+    account_key = str(account).strip()
+    if category is None:
+        return bool(date_scope.get(account_key, False))
+    account_scope = date_scope.get(account_key)
+    if not isinstance(account_scope, dict):
+        return False
+    return bool(account_scope.get(str(category).strip().lower(), False))
+
+
+def save_input_inactive_marker(
+    input_type: str,
+    row_date: object,
+    account: str,
+    inactive: bool,
+    category: str | None = None,
+    path: Path = UI_PREFERENCES_PATH,
+) -> None:
+    input_key = str(input_type).strip().lower()
+    account_key = str(account).strip()
+    date_key = _input_inactive_date_key(row_date)
+    if not input_key or not account_key or not date_key:
+        return
+
+    prefs = load_ui_preferences(path)
+    raw_root = prefs.get(UI_PREF_DATA_INPUT_INACTIVE)
+    root = dict(raw_root) if isinstance(raw_root, dict) else {}
+    type_scope = dict(root.get(input_key)) if isinstance(root.get(input_key), dict) else {}
+    date_scope = dict(type_scope.get(date_key)) if isinstance(type_scope.get(date_key), dict) else {}
+
+    if category is None:
+        if inactive:
+            date_scope[account_key] = True
+        else:
+            date_scope.pop(account_key, None)
+    else:
+        category_key = str(category).strip().lower()
+        if not category_key:
+            return
+        account_scope = dict(date_scope.get(account_key)) if isinstance(date_scope.get(account_key), dict) else {}
+        if inactive:
+            account_scope[category_key] = True
+        else:
+            account_scope.pop(category_key, None)
+        if account_scope:
+            date_scope[account_key] = account_scope
+        else:
+            date_scope.pop(account_key, None)
+
+    if date_scope:
+        type_scope[date_key] = date_scope
+    else:
+        type_scope.pop(date_key, None)
+    if type_scope:
+        root[input_key] = type_scope
+    else:
+        root.pop(input_key, None)
+    if root:
+        prefs[UI_PREF_DATA_INPUT_INACTIVE] = root
+    else:
+        prefs.pop(UI_PREF_DATA_INPUT_INACTIVE, None)
+    if prefs == load_ui_preferences(path):
+        return
+    save_ui_preferences(prefs, path)
+
+
+def mark_session_flag(key: str) -> None:
+    st.session_state[str(key)] = True
 
 
 def load_saved_dashboard_window_days(fallback: int, path: Path = UI_PREFERENCES_PATH) -> int:
@@ -6412,7 +6589,7 @@ if page == "Data Input":
             h11.markdown("**Distance Walked**")
             h12.markdown("**Caught (last)**")
             h13.markdown("**Pokemon Caught**")
-            h14.markdown("**Save**")
+            h14.markdown("**Inactive / Status**")
 
             xp_existing_for_validation = (
                 xp_input_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy()
@@ -6452,10 +6629,14 @@ if page == "Data Input":
             for row in xp_editor_rows:
                 acc = str(row["account"])
                 xp_locked = bool(row.get("xp_locked", False))
-                with xp_input_col.form(
-                    key=f"xp_account_form_{xp_date.isoformat()}_{acc}",
-                    clear_on_submit=False,
-                ):
+                draft_key = f"xp_draft_{xp_date.isoformat()}_{acc}"
+                status_key = f"xp_draft_status_{xp_date.isoformat()}_{acc}"
+                inactive_key = f"xp_inactive_{xp_date.isoformat()}_{acc}"
+                refresh_key = f"xp_draft_refresh_{xp_date.isoformat()}_{acc}"
+                if inactive_key not in st.session_state:
+                    st.session_state[inactive_key] = load_input_inactive_marker("xp", xp_date, acc)
+                inactive_current = bool(st.session_state.get(inactive_key, False))
+                with xp_input_col.container():
                     c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14 = st.columns(
                         col_widths,
                         gap="small",
@@ -6485,14 +6666,14 @@ if page == "Data Input":
                         format="%d",
                         key=lvl_state_key,
                         label_visibility="collapsed",
-                        disabled=xp_locked,
+                        disabled=xp_locked or inactive_current,
                     )
                     xp_bar_value = c7.text_input(
                         "XP Bar",
                         value=str(int(row["xp_bar"])),
                         key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
                         label_visibility="collapsed",
-                        disabled=xp_locked,
+                        disabled=xp_locked or inactive_current,
                     )
                     battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
                     distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
@@ -6502,18 +6683,23 @@ if page == "Data Input":
                         value=battles_default,
                         key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
                         label_visibility="collapsed",
+                        disabled=inactive_current,
                     )
                     distance_value = c11.text_input(
                         "Distance Walked",
                         value=distance_default,
                         key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
                         label_visibility="collapsed",
+                        disabled=inactive_current,
                     )
                     caught_value = c13.text_input(
                         "Pokemon Caught",
                         value=caught_default,
                         key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
                         label_visibility="collapsed",
+                        disabled=inactive_current,
+                        on_change=mark_session_flag,
+                        args=(refresh_key,),
                     )
                     xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
                     battles_num = _parse_float_loose(battles_value)
@@ -6532,21 +6718,35 @@ if page == "Data Input":
                         row_changed = row_changed or (float(distance_num) != float(row.get("distance_last", 0.0)))
                     if not pd.isna(caught_num):
                         row_changed = row_changed or (float(caught_num) != float(row.get("caught_last", 0.0)))
+                    inactive_value = c14.checkbox(
+                        "Inactive",
+                        key=inactive_key,
+                        help="Document unchanged values for this date on final save.",
+                        on_change=mark_session_flag,
+                        args=(refresh_key,),
+                    )
+                    if inactive_value:
+                        c5.markdown("<span style='color:#9ca3af'>inactive</span>", unsafe_allow_html=True)
                     account_color = "#9ca3af" if row_changed else "inherit"
                     account_slot.markdown(
                         f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
                         unsafe_allow_html=True,
                     )
 
-                    submitted = c14.form_submit_button("Save", use_container_width=True)
-                    if submitted:
+                    if bool(st.session_state.pop(refresh_key, False)):
                         row_errors: list[str] = []
-                        rows_to_write: list[dict[str, object]] = []
-                        additional_rows_to_write: list[dict[str, object]] = []
-                        medal_rows_to_write: list[dict[str, object]] = []
+                        draft_level = int(row["lvl_last"]) if inactive_value or xp_locked else int(lvl_value)
+                        draft_xp_bar_raw = int(row["xp_bar_last"]) if inactive_value or xp_locked else xp_bar_value
+                        draft_battles_raw = row.get("battles_last", 0.0) if inactive_value else battles_value
+                        draft_distance_raw = row.get("distance_last", 0.0) if inactive_value else distance_value
+                        draft_caught_raw = row.get("caught_last", 0.0) if inactive_value else caught_value
+                        draft_xp_bar = pd.to_numeric(draft_xp_bar_raw, errors="coerce")
+                        draft_battles = _parse_float_loose(draft_battles_raw)
+                        draft_distance = _parse_float_loose(draft_distance_raw)
+                        draft_caught = _parse_float_loose(draft_caught_raw)
                         if xp_locked:
                             pass
-                        elif pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
+                        elif pd.isna(draft_xp_bar) or int(draft_xp_bar) < 0:
                             row_errors.append("XP Bar must be a number >= 0.")
                         else:
                             row_df = pd.DataFrame(
@@ -6554,17 +6754,17 @@ if page == "Data Input":
                                     {
                                         "Date": pd.Timestamp(xp_date),
                                         "Spieler": acc,
-                                        "Lvl": int(lvl_value),
-                                        "XP Bar": int(xp_bar_num),
+                                        "Lvl": int(draft_level),
+                                        "XP Bar": int(draft_xp_bar),
                                     }
                                 ]
                             )
                             row_errors.extend(_validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map))
-                        if battles_num is None or float(battles_num) < 0:
+                        if draft_battles is None or float(draft_battles) < 0:
                             row_errors.append("Battles Won must be a number >= 0.")
-                        if distance_num is None or float(distance_num) < 0:
+                        if draft_distance is None or float(draft_distance) < 0:
                             row_errors.append("Distance Walked must be a number >= 0.")
-                        if caught_num is None or float(caught_num) < 0:
+                        if draft_caught is None or float(draft_caught) < 0:
                             row_errors.append("Pokemon Caught must be a number >= 0.")
                         if not row_errors:
                             additional_row_df = pd.DataFrame(
@@ -6572,7 +6772,7 @@ if page == "Data Input":
                                     {
                                         "date": pd.Timestamp(xp_date),
                                         "account": acc,
-                                        "battles_won": float(battles_num),
+                                        "battles_won": float(draft_battles),
                                     }
                                 ]
                             )
@@ -6589,66 +6789,137 @@ if page == "Data Input":
                                         "date": pd.Timestamp(xp_date),
                                         "account": acc,
                                         "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
-                                        "value": float(distance_num),
+                                        "value": float(draft_distance),
                                     },
                                     {
                                         "date": pd.Timestamp(xp_date),
                                         "account": acc,
                                         "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
-                                        "value": float(caught_num),
+                                        "value": float(draft_caught),
                                     },
                                 ]
                             )
                             row_errors.extend(_validate_medal_rows_non_decreasing(medal_existing_for_validation, medal_row_df))
-                        if row_errors:
-                            st.error(f"{acc}: " + "\n".join(row_errors))
-                        else:
-                            if not xp_locked:
-                                rows_to_write.append(
-                                    {
-                                        "Date": xp_date.isoformat(),
-                                        "Spieler": acc,
-                                        "Lvl": int(lvl_value),
-                                        "XP Bar": int(xp_bar_num),
-                                    }
-                                )
-                            additional_rows_to_write.append(
-                                {
-                                    "date": xp_date.isoformat(),
-                                    "account": acc,
-                                    "battles_won": float(battles_num),
-                                }
-                            )
-                            medal_rows_to_write.extend(
-                                [
-                                    {
-                                        "date": xp_date.isoformat(),
-                                        "account": acc,
-                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
-                                        "value": float(distance_num),
-                                    },
-                                    {
-                                        "date": xp_date.isoformat(),
-                                        "account": acc,
-                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
-                                        "value": float(caught_num),
-                                    },
-                                ]
-                            )
-                            try:
-                                written = upsert_xp_rows(xp_history_path(), rows_to_write)
-                                written_additional = upsert_additional_activity_rows(
-                                    additional_activity_path(),
-                                    additional_rows_to_write,
-                                )
-                                written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
-                            except ValueError as e:
-                                st.error(str(e))
+                        row_changed_for_draft = False
+                        if not xp_locked:
+                            if pd.isna(draft_xp_bar):
+                                row_changed_for_draft = str(draft_xp_bar_raw).strip() != str(int(row["xp_bar_last"]))
                             else:
-                                st.success(
-                                    f"Saved {acc}: XP rows {written}, battles rows {written_additional}, "
-                                    f"activity medal rows {written_medals}."
+                                row_changed_for_draft = (
+                                    int(draft_level) != int(row["lvl_last"])
+                                    or int(draft_xp_bar) != int(row["xp_bar_last"])
                                 )
+                        row_changed_for_draft = row_changed_for_draft or float(draft_battles or 0) != float(row.get("battles_last", 0.0))
+                        row_changed_for_draft = row_changed_for_draft or float(draft_distance or 0) != float(row.get("distance_last", 0.0))
+                        row_changed_for_draft = row_changed_for_draft or float(draft_caught or 0) != float(row.get("caught_last", 0.0))
+                        st.session_state[draft_key] = {
+                            "account": acc,
+                            "lvl": int(draft_level),
+                            "xp_bar": None if pd.isna(draft_xp_bar) else int(draft_xp_bar),
+                            "xp_locked": xp_locked,
+                            "battles_won": draft_battles,
+                            "distance_walked": draft_distance,
+                            "pokemon_caught": draft_caught,
+                            "inactive": bool(inactive_value),
+                            "changed": bool(row_changed_for_draft),
+                            "valid": not bool(row_errors),
+                            "errors": row_errors,
+                        }
+                        st.session_state[status_key] = {
+                            "valid": not bool(row_errors),
+                            "inactive": bool(inactive_value),
+                            "changed": bool(row_changed_for_draft),
+                            "errors": row_errors,
+                        }
+                        save_input_inactive_marker("xp", xp_date, acc, bool(inactive_value))
+                        if row_errors:
+                            pass
+                        else:
+                            if inactive_value:
+                                pass
+                            elif row_changed_for_draft:
+                                pass
+                            else:
+                                pass
+                    current_status = st.session_state.get(status_key)
+                    if isinstance(current_status, dict):
+                        if not bool(current_status.get("valid", False)):
+                            c14.caption("Draft error")
+                        elif bool(current_status.get("inactive", False)):
+                            c14.caption("Inactive draft")
+                        elif bool(current_status.get("changed", False)):
+                            c14.caption("Draft OK")
+                        else:
+                            c14.caption("Unchanged")
+
+            if st.button("Save all XP/activity changes", key="xp_batch_final_save"):
+                rows_to_write: list[dict[str, object]] = []
+                additional_rows_to_write: list[dict[str, object]] = []
+                medal_rows_to_write: list[dict[str, object]] = []
+                final_errors: list[str] = []
+                skipped_unchanged: list[str] = []
+                for row in xp_editor_rows:
+                    acc = str(row["account"])
+                    xp_locked = bool(row.get("xp_locked", False))
+                    draft_key = f"xp_draft_{xp_date.isoformat()}_{acc}"
+                    draft = st.session_state.get(draft_key)
+                    inactive_saved = load_input_inactive_marker("xp", xp_date, acc)
+                    if isinstance(draft, dict):
+                        if not bool(draft.get("valid", False)):
+                            final_errors.extend([f"{acc}: {err}" for err in draft.get("errors", [])])
+                            continue
+                        should_write = bool(draft.get("changed", False)) or bool(draft.get("inactive", False))
+                        if not should_write:
+                            skipped_unchanged.append(acc)
+                            continue
+                        xp_rows, activity_rows, activity_medal_rows = build_xp_activity_snapshot_rows(
+                            xp_date,
+                            acc,
+                            int(draft.get("lvl", row["lvl_last"])),
+                            int(draft.get("xp_bar", row["xp_bar_last"])),
+                            bool(draft.get("xp_locked", xp_locked)),
+                            float(draft.get("battles_won", row.get("battles_last", 0.0))),
+                            float(draft.get("distance_walked", row.get("distance_last", 0.0))),
+                            float(draft.get("pokemon_caught", row.get("caught_last", 0.0))),
+                        )
+                    elif inactive_saved:
+                        xp_rows, activity_rows, activity_medal_rows = build_xp_activity_snapshot_rows(
+                            xp_date,
+                            acc,
+                            int(row["lvl_last"]),
+                            int(row["xp_bar_last"]),
+                            xp_locked,
+                            float(row.get("battles_last", 0.0)),
+                            float(row.get("distance_last", 0.0)),
+                            float(row.get("caught_last", 0.0)),
+                        )
+                    else:
+                        skipped_unchanged.append(acc)
+                        continue
+                    rows_to_write.extend(xp_rows)
+                    additional_rows_to_write.extend(activity_rows)
+                    medal_rows_to_write.extend(activity_medal_rows)
+                if final_errors:
+                    st.error("Fix draft errors before saving:\n" + "\n".join(final_errors[:12]))
+                elif not rows_to_write and not additional_rows_to_write and not medal_rows_to_write:
+                    st.info("No changed or inactive XP/activity rows to save.")
+                else:
+                    try:
+                        written = upsert_xp_rows(xp_history_path(), rows_to_write)
+                        written_additional = upsert_additional_activity_rows(
+                            additional_activity_path(),
+                            additional_rows_to_write,
+                        )
+                        written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(
+                            f"Saved XP rows: {written}. Saved battles rows: {written_additional}. "
+                            f"Saved activity medal rows: {written_medals}."
+                        )
+                        if skipped_unchanged:
+                            st.caption(f"Unchanged without inactive marker stayed open: {', '.join(skipped_unchanged)}")
 
         if all_players:
             st.markdown("Input order for XP accounts")
@@ -7088,6 +7359,39 @@ if page == "Data Input":
                     return str(int(num_float))
                 return f"{num_float:.2f}".rstrip("0").rstrip(".")
 
+            complete_pokedex_entry_types_on_date: set[str] = set()
+            if not pokedex_df.empty:
+                account_day_pokedex = pokedex_df[
+                    (pokedex_df["date"].dt.date == pokedex_date)
+                    & (pokedex_df["account"].astype(str).str.strip() == str(pokedex_account).strip())
+                ].copy()
+                if not account_day_pokedex.empty:
+                    account_day_pokedex["entry_type"] = (
+                        account_day_pokedex["entry_type"].astype(str).str.strip().str.lower()
+                    )
+                    account_day_pokedex["region"] = account_day_pokedex["region"].astype(str).str.strip().str.lower()
+                    for entry_type in POKEDEX_ENTRY_TYPES:
+                        required_regions = {
+                            region
+                            for cell_entry_type, region in editable_cells
+                            if cell_entry_type == entry_type
+                        }
+                        present_regions = set(
+                            account_day_pokedex[account_day_pokedex["entry_type"] == entry_type]["region"].tolist()
+                        )
+                        if required_regions and required_regions.issubset(present_regions):
+                            complete_pokedex_entry_types_on_date.add(entry_type)
+            visible_pokedex_entry_types = [
+                entry_type for entry_type in POKEDEX_ENTRY_TYPES if entry_type not in complete_pokedex_entry_types_on_date
+            ]
+            if complete_pokedex_entry_types_on_date:
+                completed_labels = [
+                    POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)
+                    for entry_type in POKEDEX_ENTRY_TYPES
+                    if entry_type in complete_pokedex_entry_types_on_date
+                ]
+                st.caption(f"Already saved categories for this date: {', '.join(completed_labels)}")
+
             st.markdown(f"Full Pokédex entries snapshot for `{pokedex_account}`")
             st.caption(
                 "Grey Pokemon region values are derived from medal inputs. Locked cells and max values come from "
@@ -7100,21 +7404,38 @@ if page == "Data Input":
             header_cols[0].markdown("**Type**")
             for idx, region in enumerate(POKEDEX_REGIONS, start=1):
                 header_cols[idx].markdown(f"**{POKEDEX_REGION_LABELS.get(region, region)}**")
-            header_cols[-1].markdown("**Save**")
+            header_cols[-1].markdown("**Inactive / Status**")
 
             pokedex_existing_for_validation = (
                 pokedex_df[["date", "account", "entry_type", "region", "value"]].copy()
                 if not pokedex_df.empty
                 else pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"])
             )
-            for entry_type in POKEDEX_ENTRY_TYPES:
-                with pokedex_input_col.form(
-                    key=f"pokedex_category_form_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}",
-                    clear_on_submit=False,
-                ):
+            for entry_type in visible_pokedex_entry_types:
+                category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
+                category_status_key = f"pokedex_draft_status_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
+                category_inactive_key = f"pokedex_inactive_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
+                category_refresh_key = f"pokedex_draft_refresh_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
+                if category_inactive_key not in st.session_state:
+                    st.session_state[category_inactive_key] = load_input_inactive_marker(
+                        "pokedex",
+                        pokedex_date,
+                        pokedex_account,
+                        entry_type,
+                    )
+                category_inactive_current = bool(st.session_state.get(category_inactive_key, False))
+                with pokedex_input_col.container():
                     row_cols = st.columns(col_widths, gap="small")
                     row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
                     row_inputs: list[dict[str, object]] = []
+                    editable_regions_for_entry = [
+                        region
+                        for region in POKEDEX_REGIONS
+                        if not _is_overall_pokedex_cell(region)
+                        and not _is_medal_derived_pokedex_cell(entry_type, region)
+                        and not bool(_pokedex_cell_config(entry_type, region).get("locked", False))
+                    ]
+                    last_editable_region = editable_regions_for_entry[-1] if editable_regions_for_entry else None
                     for idx, region in enumerate(POKEDEX_REGIONS, start=1):
                         last_value = latest_vals.get((entry_type, region), 0.0)
                         is_overall = _is_overall_pokedex_cell(region)
@@ -7153,24 +7474,38 @@ if page == "Data Input":
                             key=input_key,
                             label_visibility="collapsed",
                             help=" | ".join(help_parts) if help_parts else None,
+                            disabled=category_inactive_current,
+                            on_change=mark_session_flag if region == last_editable_region else None,
+                            args=(category_refresh_key,) if region == last_editable_region else None,
                         )
                         row_inputs.append(
                             {
                                 "entry_type": entry_type,
                                 "region": region,
                                 "value": value_input,
+                                "last_value": last_value,
                                 "max_value": max_value,
                             }
                         )
 
-                    submitted = row_cols[-1].form_submit_button("Save", use_container_width=True)
-                    if submitted:
+                    inactive_value = row_cols[-1].checkbox(
+                        "Inactive",
+                        key=category_inactive_key,
+                        help="Document unchanged values for this category on final save.",
+                        on_change=mark_session_flag,
+                        args=(category_refresh_key,),
+                    )
+                    if bool(st.session_state.pop(category_refresh_key, False)):
                         rows_to_write: list[dict[str, object]] = []
                         errors: list[str] = []
+                        region_values: dict[str, object] = {}
+                        category_changed = False
                         for r in row_inputs:
                             row_entry_type = str(r.get("entry_type", "")).strip().lower()
                             region = str(r.get("region", "")).strip().lower()
-                            value = _parse_float_loose_value(r.get("value"))
+                            last_value = pd.to_numeric(r.get("last_value"), errors="coerce")
+                            raw_value = last_value if inactive_value else r.get("value")
+                            value = _parse_float_loose_value(raw_value)
                             max_value = r.get("max_value")
                             region_label = POKEDEX_REGION_LABELS.get(region, region)
                             if row_entry_type not in POKEDEX_ENTRY_TYPES:
@@ -7188,6 +7523,9 @@ if page == "Data Input":
                             if max_value is not None and float(value) > float(max_value):
                                 errors.append(f"{region_label} must be <= {_fmt_pokedex_value(max_value)}.")
                                 continue
+                            if pd.notna(last_value) and float(value) != float(last_value):
+                                category_changed = True
+                            region_values[region] = float(value)
                             row_df = pd.DataFrame(
                                 [
                                     {
@@ -7206,34 +7544,108 @@ if page == "Data Input":
                             if row_mono_errors:
                                 errors.append(row_mono_errors[0])
                                 continue
-                            rows_to_write.append(
-                                {
-                                    "date": pokedex_date.isoformat(),
-                                    "account": pokedex_account,
-                                    "entry_type": row_entry_type,
-                                    "region": region,
-                                    "value": float(value),
-                                }
+                        if not errors:
+                            rows_to_write = build_pokedex_category_snapshot_rows(
+                                pokedex_date,
+                                pokedex_account,
+                                entry_type,
+                                region_values,
+                                entry_config=pokedex_entry_config,
                             )
+                        st.session_state[category_draft_key] = {
+                            "account": pokedex_account,
+                            "entry_type": entry_type,
+                            "rows": rows_to_write,
+                            "inactive": bool(inactive_value),
+                            "changed": bool(category_changed),
+                            "valid": not bool(errors),
+                            "errors": errors,
+                        }
+                        st.session_state[category_status_key] = {
+                            "valid": not bool(errors),
+                            "inactive": bool(inactive_value),
+                            "changed": bool(category_changed),
+                            "errors": errors,
+                        }
+                        save_input_inactive_marker("pokedex", pokedex_date, pokedex_account, bool(inactive_value), entry_type)
                         if errors:
-                            st.error(
-                                f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}:\n"
-                                + "\n".join([f"- {err}" for err in errors])
-                            )
+                            pass
                         else:
-                            try:
-                                written = upsert_pokedex_entry_rows(
-                                    pokedex_entry_snapshots_path(),
-                                    rows_to_write,
-                                    entry_config=pokedex_entry_config,
-                                )
-                            except ValueError as e:
-                                st.error(str(e))
+                            if inactive_value:
+                                pass
+                            elif category_changed:
+                                pass
                             else:
-                                st.success(
-                                    f"Saved {POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} "
-                                    f"Pokédex rows: {written} for {pokedex_account}"
-                                )
+                                pass
+                    current_status = st.session_state.get(category_status_key)
+                    if isinstance(current_status, dict):
+                        if not bool(current_status.get("valid", False)):
+                            row_cols[-1].caption("Draft error")
+                        elif bool(current_status.get("inactive", False)):
+                            row_cols[-1].caption("Inactive draft")
+                        elif bool(current_status.get("changed", False)):
+                            row_cols[-1].caption("Draft OK")
+                        else:
+                            row_cols[-1].caption("Unchanged")
+
+            if st.button("Save all Pokédex changes", key="pokedex_final_save"):
+                rows_to_write: list[dict[str, object]] = []
+                final_errors: list[str] = []
+                skipped_unchanged: list[str] = []
+                for entry_type in visible_pokedex_entry_types:
+                    category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
+                    draft = st.session_state.get(category_draft_key)
+                    inactive_saved = load_input_inactive_marker("pokedex", pokedex_date, pokedex_account, entry_type)
+                    if isinstance(draft, dict):
+                        if not bool(draft.get("valid", False)):
+                            final_errors.extend(
+                                [
+                                    f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: {err}"
+                                    for err in draft.get("errors", [])
+                                ]
+                            )
+                            continue
+                        should_write = bool(draft.get("changed", False)) or bool(draft.get("inactive", False))
+                        if not should_write:
+                            skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
+                            continue
+                        rows_to_write.extend(list(draft.get("rows", [])))
+                    elif inactive_saved:
+                        latest_region_values = {
+                            region: latest_vals.get((entry_type, region), 0.0)
+                            for region in POKEDEX_REGIONS
+                        }
+                        rows_to_write.extend(
+                            build_pokedex_category_snapshot_rows(
+                                pokedex_date,
+                                pokedex_account,
+                                entry_type,
+                                latest_region_values,
+                                entry_config=pokedex_entry_config,
+                            )
+                        )
+                    else:
+                        skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
+                if final_errors:
+                    st.error("Fix Pokédex draft errors before saving:\n" + "\n".join(final_errors[:12]))
+                elif not rows_to_write:
+                    st.info("No changed or inactive Pokédex categories to save.")
+                else:
+                    try:
+                        written = upsert_pokedex_entry_rows(
+                            pokedex_entry_snapshots_path(),
+                            rows_to_write,
+                            entry_config=pokedex_entry_config,
+                        )
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(f"Saved Pokédex entry rows: {written} for {pokedex_account}")
+                        if skipped_unchanged:
+                            st.caption(
+                                "Unchanged without inactive marker stayed open: "
+                                + ", ".join(skipped_unchanged)
+                            )
 
         with st.expander("Pokemon Catalog (1-1025)", expanded=False):
             st.caption("Reference data comes from `inputs/reference/pokemon_catalog.csv`; edit availability or notes in the CSV.")

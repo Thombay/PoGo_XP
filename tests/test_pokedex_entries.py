@@ -4,10 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from webapp.app import (
     accounts_for_data_input,
+    build_pokedex_category_snapshot_rows,
+    build_xp_activity_snapshot_rows,
+    load_input_inactive_marker,
+    save_input_inactive_marker,
     upsert_pokedex_entry_rows,
     with_derived_pokedex_overall_rows,
     with_medal_derived_pokedex_rows,
@@ -16,6 +20,57 @@ from webapp.data_files import load_pokedex_entry_snapshots
 
 
 class PokedexEntriesTest(unittest.TestCase):
+    def test_input_inactive_marker_round_trips_xp_and_pokedex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ui_preferences.json"
+
+            save_input_inactive_marker("xp", "2026-01-01", "Thombay", True, path=path)
+            save_input_inactive_marker("pokedex", "2026-01-01", "Thombay", True, "shiny", path=path)
+
+            self.assertTrue(load_input_inactive_marker("xp", "2026-01-01", "Thombay", path=path))
+            self.assertTrue(load_input_inactive_marker("pokedex", "2026-01-01", "Thombay", "shiny", path=path))
+
+            save_input_inactive_marker("xp", "2026-01-01", "Thombay", False, path=path)
+            save_input_inactive_marker("pokedex", "2026-01-01", "Thombay", False, "shiny", path=path)
+
+            self.assertFalse(load_input_inactive_marker("xp", "2026-01-01", "Thombay", path=path))
+            self.assertFalse(load_input_inactive_marker("pokedex", "2026-01-01", "Thombay", "shiny", path=path))
+
+    def test_build_xp_activity_snapshot_rows_can_document_unchanged_inactive_row(self):
+        xp_rows, activity_rows, medal_rows = build_xp_activity_snapshot_rows(
+            "2026-01-01",
+            "Thombay",
+            50,
+            12345,
+            False,
+            1000,
+            12.5,
+            250,
+        )
+
+        self.assertEqual(xp_rows[0]["Date"], "2026-01-01")
+        self.assertEqual(xp_rows[0]["Spieler"], "Thombay")
+        self.assertEqual(xp_rows[0]["Lvl"], 50)
+        self.assertEqual(xp_rows[0]["XP Bar"], 12345)
+        self.assertEqual(activity_rows[0]["battles_won"], 1000.0)
+        self.assertEqual({row["medal_id"] for row in medal_rows}, {"jogger", "collector"})
+
+    def test_build_pokedex_category_snapshot_rows_skips_derived_and_locked_cells(self):
+        rows = build_pokedex_category_snapshot_rows(
+            "2026-01-01",
+            "Thombay",
+            "shiny",
+            {
+                "overall": 99,
+                "kanto": 10,
+                "johto": 5,
+                "hisui": 1,
+            },
+            entry_config={("shiny", "hisui"): {"locked": True, "max_value": 0, "notes": ""}},
+        )
+
+        self.assertEqual([(row["region"], row["value"]) for row in rows], [("kanto", 10.0), ("johto", 5.0)])
+
     def test_accounts_for_data_input_uses_enabled_config_rows(self):
         config = pd.DataFrame(
             [

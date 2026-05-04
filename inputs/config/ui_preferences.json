@@ -1,8 +1,18 @@
 {
   "dashboard_gap_leader_by_group": {
     "global:All": "AnSaCruiser",
-    "global:Bekannte": "AnSaCruiser",
+    "global:Bekannte": "Tastef",
+    "global:Family": "Martin",
     "global:Papiermuehlgasse": "Tastef"
   },
-  "dashboard_window_days": 7
+  "dashboard_window_days": 7,
+  "data_input_inactive": {
+    "xp": {
+      "2026-05-04": {
+        "Babsi": true,
+        "Gloria": true,
+        "LuanY3lloW2023": true
+      }
+    }
+  }
 }
