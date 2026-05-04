@@ -21,10 +21,14 @@ if str(REPO_ROOT) not in sys.path:
 from shared.paths import (
     additional_activity_path,
     config_dir,
+    data_input_accounts_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
     player_groups_path,
+    pokedex_entry_config_path,
+    pokedex_entry_snapshots_path,
+    pokemon_catalog_path,
     total_xp_curve_path,
     xp_history_path,
 )
@@ -41,10 +45,15 @@ from webapp.data_files import (
     add_account_to_groups,
     accounts_for_selected_group,
     load_curve_map,
+    load_data_input_accounts,
     load_medal_goals,
     load_medal_snapshots,
+    load_pokedex_entry_config,
+    load_pokedex_entry_snapshots,
+    load_pokemon_catalog,
     load_xp_history,
     parse_groups,
+    save_data_input_account_types,
     to_int_series,
 )
 from webapp.exporting import (
@@ -59,6 +68,7 @@ ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
 MEDAL_INPUT_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
 MEDAL_EXPLORER_CORE_ACCOUNTS = ["Thombay", "Cerius", "Thomzay"]
 DERIVED_MEDAL_ID = "platinum_medals"
+DATA_INPUT_TYPES = {"xp", "medal", "pokedex"}
 DASHBOARD_WINDOW_OPTIONS = [7, 30]
 MIN_ELIGIBLE_FOR_30D_DEFAULT = 2
 TREND_MIN_DATE = pd.Timestamp("2025-01-01")
@@ -89,6 +99,70 @@ MEDAL_SORT_DEFAULT_DIRECTION_BY_METRIC = {
 XP_TAB_ACTIVITY_MEDAL_IDS = {
     "distance_walked": "jogger",
     "pokemon_caught": "collector",
+}
+POKEDEX_ENTRY_TYPES = [
+    "pokemon",
+    "shiny",
+    "lucky",
+    "xxl",
+    "xxs",
+    "gmax",
+    "mega",
+    "shadow",
+    "purified",
+    "hundo",
+]
+POKEDEX_ENTRY_TYPE_LABELS = {
+    "pokemon": "Pokemon",
+    "shiny": "Shiny",
+    "lucky": "Lucky",
+    "xxl": "XXL",
+    "xxs": "XXS",
+    "gmax": "G-Max",
+    "mega": "Mega",
+    "shadow": "Shadow",
+    "purified": "Purified",
+    "hundo": "100%",
+}
+POKEDEX_REGIONS = [
+    "overall",
+    "kanto",
+    "johto",
+    "hoenn",
+    "sinnoh",
+    "unova",
+    "kalos",
+    "alola",
+    "galar",
+    "hisui",
+    "paldea",
+    "unidentified",
+]
+POKEDEX_REGION_LABELS = {
+    "overall": "Overall",
+    "kanto": "Kanto",
+    "johto": "Johto",
+    "hoenn": "Hoenn",
+    "sinnoh": "Sinnoh",
+    "unova": "Unova",
+    "kalos": "Kalos",
+    "alola": "Alola",
+    "galar": "Galar",
+    "hisui": "Hisui",
+    "paldea": "Paldea",
+    "unidentified": "Unidentified",
+}
+POKEDEX_MEDAL_REGION_IDS = {
+    "kanto",
+    "johto",
+    "hoenn",
+    "sinnoh",
+    "unova",
+    "kalos",
+    "alola",
+    "galar",
+    "hisui",
+    "paldea",
 }
 SPECIAL_PLATINUM_MEDALS = [
     {
@@ -2827,6 +2901,274 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     return int(len(new_df))
 
 
+def with_medal_derived_pokedex_rows(pokedex_df: pd.DataFrame, source_medal_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["date", "account", "entry_type", "region", "value"]
+    base = pokedex_df[cols].copy() if not pokedex_df.empty else pd.DataFrame(columns=cols)
+    if source_medal_df.empty:
+        return with_derived_pokedex_overall_rows(base)
+
+    derived = source_medal_df[["date", "account", "medal_id", "value"]].copy()
+    derived["date"] = pd.to_datetime(derived["date"], errors="coerce")
+    derived["account"] = derived["account"].astype(str).str.strip()
+    derived["region"] = derived["medal_id"].astype(str).str.strip().str.lower()
+    derived["value"] = pd.to_numeric(derived["value"], errors="coerce")
+    derived = derived[derived["region"].isin(POKEDEX_MEDAL_REGION_IDS)].copy()
+    derived = derived.dropna(subset=["date", "account", "region", "value"]).copy()
+    if derived.empty:
+        return base
+    derived["entry_type"] = "pokemon"
+    derived = derived[cols].copy()
+
+    combined = derived.copy() if base.empty else pd.concat([base, derived], ignore_index=True)
+    combined["_source_order"] = combined["entry_type"].eq("pokemon") & combined["region"].isin(POKEDEX_MEDAL_REGION_IDS)
+    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
+    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
+    combined = combined.sort_values(
+        ["date", "_acc_order", "account", "entry_type", "region", "_source_order"]
+    ).drop_duplicates(["date", "account", "entry_type", "region"], keep="last")
+    combined = combined.drop(columns=["_source_order", "_acc_order"]).reset_index(drop=True)
+    return with_derived_pokedex_overall_rows(combined)
+
+
+def with_derived_pokedex_overall_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["date", "account", "entry_type", "region", "value"]
+    base = pokedex_df[cols].copy() if not pokedex_df.empty else pd.DataFrame(columns=cols)
+    if base.empty:
+        return base
+
+    base["date"] = pd.to_datetime(base["date"], errors="coerce")
+    base["account"] = base["account"].astype(str).str.strip()
+    base["entry_type"] = base["entry_type"].astype(str).str.strip().str.lower()
+    base["region"] = base["region"].astype(str).str.strip().str.lower()
+    base["value"] = pd.to_numeric(base["value"], errors="coerce")
+    base = base.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
+    regional = base[base["region"] != "overall"].copy()
+    manual_without_overall = base[base["region"] != "overall"].copy()
+    if regional.empty:
+        return manual_without_overall.reset_index(drop=True)
+
+    overall = (
+        regional.groupby(["date", "account", "entry_type"], as_index=False)["value"]
+        .sum()
+        .assign(region="overall")
+    )
+    combined = pd.concat([manual_without_overall, overall[cols]], ignore_index=True)
+    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
+    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
+    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
+    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
+    combined = combined.sort_values(
+        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
+    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
+    return combined.reset_index(drop=True)
+
+
+def _is_medal_derived_pokedex_cell(entry_type: str, region: str) -> bool:
+    return str(entry_type).strip().lower() == "pokemon" and str(region).strip().lower() in POKEDEX_MEDAL_REGION_IDS
+
+
+def _is_overall_pokedex_cell(region: str) -> bool:
+    return str(region).strip().lower() == "overall"
+
+
+def _parse_float_loose_value(raw: object) -> float | None:
+    s = str(raw).strip()
+    if not s:
+        return None
+    s = s.replace(" ", "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s and "." not in s:
+        if s.count(",") == 1:
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        s = s.replace(",", "")
+    val = pd.to_numeric(pd.Series([s]), errors="coerce").iloc[0]
+    return None if pd.isna(val) else float(val)
+
+
+def pokedex_entry_config_map(config_df: pd.DataFrame) -> dict[tuple[str, str], dict[str, object]]:
+    if config_df.empty:
+        return {}
+    required = {"entry_type", "region", "max_value", "locked", "notes"}
+    if not required.issubset(config_df.columns):
+        return {}
+    cfg = config_df.copy()
+    cfg["entry_type"] = cfg["entry_type"].astype(str).str.strip().str.lower()
+    cfg["region"] = cfg["region"].astype(str).str.strip().str.lower()
+    cfg["max_value"] = pd.to_numeric(cfg["max_value"], errors="coerce")
+    locked_text = cfg["locked"].fillna("").astype(str).str.strip().str.lower()
+    cfg["locked"] = locked_text.isin({"1", "true", "yes", "y", "locked"})
+    cfg["notes"] = cfg["notes"].fillna("").astype(str).str.strip()
+    return {
+        (str(row["entry_type"]), str(row["region"])): {
+            "max_value": None if pd.isna(row["max_value"]) else float(row["max_value"]),
+            "locked": bool(row["locked"]),
+            "notes": str(row["notes"]),
+        }
+        for _, row in cfg.iterrows()
+    }
+
+
+def _pokedex_entry_config_errors(
+    rows_df: pd.DataFrame,
+    config: dict[tuple[str, str], dict[str, object]],
+) -> list[str]:
+    errors: list[str] = []
+    if rows_df.empty or not config:
+        return errors
+    for _, row in rows_df.iterrows():
+        entry_type = str(row.get("entry_type", "")).strip().lower()
+        region = str(row.get("region", "")).strip().lower()
+        value = pd.to_numeric(row.get("value"), errors="coerce")
+        if pd.isna(value):
+            continue
+        cfg = config.get((entry_type, region), {})
+        label = f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}"
+        if bool(cfg.get("locked", False)):
+            errors.append(f"{label} is locked in `inputs/config/pokedex_entry_config.csv`.")
+            continue
+        max_value = cfg.get("max_value")
+        if max_value is not None and float(value) > float(max_value):
+            errors.append(f"{label}: {float(value):g} is above configured max {float(max_value):g}.")
+    return errors
+
+
+def _validate_pokedex_entry_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    if new_df.empty:
+        return errors
+
+    cols = ["date", "account", "entry_type", "region", "value"]
+    existing = existing_df[cols].copy() if set(cols).issubset(existing_df.columns) else pd.DataFrame(columns=cols)
+    if not existing.empty:
+        existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
+        existing["account"] = existing["account"].astype(str).str.strip()
+        existing["entry_type"] = existing["entry_type"].astype(str).str.strip().str.lower()
+        existing["region"] = existing["region"].astype(str).str.strip().str.lower()
+        existing["value"] = pd.to_numeric(existing["value"], errors="coerce")
+        existing = existing.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
+        existing = existing.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+
+    rows = new_df[cols].copy()
+    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
+    rows["account"] = rows["account"].astype(str).str.strip()
+    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
+    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
+    rows["value"] = pd.to_numeric(rows["value"], errors="coerce")
+    rows = rows.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
+    rows = rows.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+
+    for _, row in rows.iterrows():
+        dt = pd.to_datetime(row["date"], errors="coerce")
+        account = str(row["account"]).strip()
+        entry_type = str(row["entry_type"]).strip().lower()
+        region = str(row["region"]).strip().lower()
+        value = pd.to_numeric(row["value"], errors="coerce")
+        if pd.isna(dt) or not account or not entry_type or not region or pd.isna(value):
+            continue
+
+        hist = existing[
+            (existing["account"] == account)
+            & (existing["entry_type"] == entry_type)
+            & (existing["region"] == region)
+        ].copy()
+        if hist.empty:
+            continue
+        hist = hist[hist["date"] != dt].copy()
+
+        label = f"{account} {POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}"
+        prev_rows = hist[hist["date"] < dt].sort_values("date")
+        if not prev_rows.empty:
+            prev = prev_rows.iloc[-1]
+            prev_value = float(prev["value"])
+            if float(value) < prev_value:
+                prev_date = pd.to_datetime(prev["date"], errors="coerce")
+                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
+                errors.append(
+                    f"{label} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is below previous "
+                    f"{prev_value:g} on {prev_date_txt}."
+                )
+
+        next_rows = hist[hist["date"] > dt].sort_values("date")
+        if not next_rows.empty:
+            nxt = next_rows.iloc[0]
+            next_value = float(nxt["value"])
+            if float(value) > next_value:
+                next_date = pd.to_datetime(nxt["date"], errors="coerce")
+                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
+                errors.append(
+                    f"{label} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is above next "
+                    f"{next_value:g} on {next_date_txt}."
+                )
+    return errors
+
+
+def upsert_pokedex_entry_rows(
+    path: Path,
+    rows: list[dict[str, object]],
+    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
+) -> int:
+    if not rows:
+        return 0
+
+    existing = load_pokedex_entry_snapshots(
+        path,
+        account_order=ACCOUNT_ORDER,
+        valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+        valid_regions=set(POKEDEX_REGIONS),
+    )
+    new_df = pd.DataFrame(rows)
+    new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
+    new_df["account"] = new_df["account"].astype(str).str.strip()
+    new_df["entry_type"] = new_df["entry_type"].astype(str).str.strip().str.lower()
+    new_df["region"] = new_df["region"].astype(str).str.strip().str.lower()
+    new_df["value"] = pd.to_numeric(new_df["value"], errors="coerce")
+    new_df = new_df.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
+    new_df = new_df[new_df["entry_type"].isin(POKEDEX_ENTRY_TYPES) & new_df["region"].isin(POKEDEX_REGIONS)].copy()
+    new_df = new_df[
+        ~new_df.apply(
+            lambda r: _is_medal_derived_pokedex_cell(r["entry_type"], r["region"])
+            or _is_overall_pokedex_cell(r["region"]),
+            axis=1,
+        )
+    ].copy()
+    new_df = new_df.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+    if new_df.empty:
+        return 0
+
+    config_errors = _pokedex_entry_config_errors(new_df, entry_config or {})
+    if config_errors:
+        details = "\n".join(config_errors[:12])
+        extra = f"\n... and {len(config_errors) - 12} more issue(s)." if len(config_errors) > 12 else ""
+        raise ValueError("Pokédex input rejected: values must match configured availability.\n" + details + extra)
+
+    monotonic_errors = _validate_pokedex_entry_rows_non_decreasing(existing, new_df)
+    if monotonic_errors:
+        details = "\n".join(monotonic_errors[:12])
+        extra = f"\n... and {len(monotonic_errors) - 12} more issue(s)." if len(monotonic_errors) > 12 else ""
+        raise ValueError("Pokédex input rejected: values must be non-decreasing over time.\n" + details + extra)
+
+    combined = new_df.copy() if existing.empty else pd.concat([existing, new_df], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
+    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
+    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
+    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
+    combined = combined.sort_values(
+        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
+    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
+    combined["date"] = combined["date"].dt.date.astype(str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    combined[["date", "account", "entry_type", "region", "value"]].to_csv(path, index=False, encoding="utf-8-sig")
+    return int(len(new_df))
+
+
 def load_additional_activity(path: Path) -> pd.DataFrame:
     cols = ["date", "account", "battles_won"]
     if not path.exists():
@@ -3067,9 +3409,14 @@ def run_repo_command(args: list[str]) -> tuple[int, str]:
     return proc.returncode, output
 
 
-def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame) -> list[str]:
+def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame, pokedex_df: pd.DataFrame | None = None) -> list[str]:
     players = set(xp_df["Spieler"].dropna().astype(str).tolist())
     accounts = set(medal_df["account"].dropna().astype(str).tolist())
+    pokedex_accounts = (
+        set(pokedex_df["account"].dropna().astype(str).tolist())
+        if pokedex_df is not None and not pokedex_df.empty and "account" in pokedex_df.columns
+        else set()
+    )
     configured_groups = parse_groups(player_groups_path())
     group_accounts: set[str] = set()
     for names in configured_groups.values():
@@ -3078,10 +3425,32 @@ def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame) -> li
             if name:
                 group_accounts.add(name)
 
-    all_names = sorted(players | accounts | group_accounts | set(ACCOUNT_ORDER))
+    all_names = sorted(players | accounts | pokedex_accounts | group_accounts | set(ACCOUNT_ORDER))
     ordered = [a for a in ACCOUNT_ORDER if a in all_names]
     fallback_order = ordered + [a for a in all_names if a not in ordered]
     return load_xp_input_order(fallback_order)
+
+
+def accounts_for_data_input(
+    input_type: str,
+    all_accounts: list[str],
+    config_df: pd.DataFrame,
+    fallback_accounts: list[str] | None = None,
+) -> list[str]:
+    input_key = str(input_type).strip().lower()
+    available = [str(a).strip() for a in all_accounts if str(a).strip()]
+    fallback = [str(a).strip() for a in (fallback_accounts or available) if str(a).strip()]
+    if not input_key or config_df.empty or not {"input_type", "account", "enabled"}.issubset(config_df.columns):
+        return [a for a in fallback if a in set(available)]
+
+    scoped = config_df[config_df["input_type"].astype(str).str.strip().str.lower() == input_key].copy()
+    if scoped.empty:
+        return []
+    scoped["account"] = scoped["account"].astype(str).str.strip()
+    scoped["enabled"] = scoped["enabled"].fillna(False).astype(bool)
+    enabled = scoped[scoped["enabled"]]["account"].tolist()
+    enabled_set = set(enabled)
+    return [a for a in available if a in enabled_set]
 
 
 def latest_xp_snapshot(xp_df: pd.DataFrame) -> pd.DataFrame:
@@ -5088,7 +5457,35 @@ medal_df = load_medal_snapshots(
 goals_df = load_medal_goals(medals_config_path())
 medal_explanations_map = medal_explanation_map_from_goals(goals_df)
 display_medal_df = with_derived_platinum_rows(medal_df, goals_df)
-all_accounts = account_options_from_data(xp_input_df, medal_df)
+pokedex_df = load_pokedex_entry_snapshots(
+    pokedex_entry_snapshots_path(),
+    account_order=ACCOUNT_ORDER,
+    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+    valid_regions=set(POKEDEX_REGIONS),
+)
+pokedex_entry_config_df = load_pokedex_entry_config(
+    pokedex_entry_config_path(),
+    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+    valid_regions=set(POKEDEX_REGIONS),
+)
+pokedex_entry_config = pokedex_entry_config_map(pokedex_entry_config_df)
+display_pokedex_df = with_medal_derived_pokedex_rows(pokedex_df, medal_df)
+pokemon_catalog_df = load_pokemon_catalog(pokemon_catalog_path())
+all_accounts = account_options_from_data(xp_input_df, medal_df, display_pokedex_df)
+data_input_accounts_df = load_data_input_accounts(data_input_accounts_path(), valid_input_types=DATA_INPUT_TYPES)
+xp_input_accounts = accounts_for_data_input("xp", all_accounts, data_input_accounts_df, fallback_accounts=all_accounts)
+medal_input_accounts = accounts_for_data_input(
+    "medal",
+    all_accounts,
+    data_input_accounts_df,
+    fallback_accounts=MEDAL_INPUT_CORE_ACCOUNTS,
+)
+pokedex_input_accounts = accounts_for_data_input(
+    "pokedex",
+    all_accounts,
+    data_input_accounts_df,
+    fallback_accounts=all_accounts,
+)
 latest_xp_df = latest_xp_snapshot(xp_input_df)
 
 pages = [
@@ -5791,6 +6188,19 @@ if page == "Last Inputs":
         latest_medal_dates = latest_medal_dates.sort_values(["latest_medal_date", "account"], ascending=[False, True])
         st.dataframe(latest_medal_dates, use_container_width=True, hide_index=True)
 
+    st.markdown("Latest Pokédex Entry Snapshot per Account")
+    if display_pokedex_df.empty:
+        st.warning("No Pokédex entry history found.")
+    else:
+        latest_pokedex_dates = display_pokedex_df.groupby("account", as_index=False)["date"].max()
+        latest_pokedex_dates = latest_pokedex_dates.rename(columns={"date": "latest_pokedex_date"})
+        counts = display_pokedex_df.groupby(["account", "date"], as_index=False).size().rename(columns={"size": "rows"})
+        latest_pokedex_dates = latest_pokedex_dates.merge(
+            counts, left_on=["account", "latest_pokedex_date"], right_on=["account", "date"], how="left"
+        ).drop(columns=["date"])
+        latest_pokedex_dates = latest_pokedex_dates.sort_values(["latest_pokedex_date", "account"], ascending=[False, True])
+        st.dataframe(latest_pokedex_dates, use_container_width=True, hide_index=True)
+
 if page == "Data Input":
     st.subheader("Data Input")
     with st.expander("Add New Account", expanded=False):
@@ -5804,6 +6214,11 @@ if page == "Data Input":
             default=default_group_selection,
             key="new_account_target_groups",
         )
+        st.caption("Enable this account for Data Input tabs")
+        input_xp_col, input_medal_col, input_pokedex_col = st.columns(3)
+        enable_new_account_xp = input_xp_col.checkbox("XP", value=True, key="new_account_enable_xp")
+        enable_new_account_medal = input_medal_col.checkbox("Medal", value=False, key="new_account_enable_medal")
+        enable_new_account_pokedex = input_pokedex_col.checkbox("Pokédex", value=False, key="new_account_enable_pokedex")
         add_account_clicked = st.button("Add Account", key="add_new_account")
         if add_account_clicked:
             account_name = str(new_account_name).strip()
@@ -5821,20 +6236,35 @@ if page == "Data Input":
                         account_name,
                         selected_target_groups,
                     )
-                    ensure_account_in_xp_order(account_name, known_accounts=all_accounts)
+                    selected_input_types = []
+                    if enable_new_account_xp:
+                        selected_input_types.append("xp")
+                        ensure_account_in_xp_order(account_name, known_accounts=all_accounts)
+                    if enable_new_account_medal:
+                        selected_input_types.append("medal")
+                    if enable_new_account_pokedex:
+                        selected_input_types.append("pokedex")
+                    save_data_input_account_types(
+                        data_input_accounts_path(),
+                        account_name,
+                        selected_input_types,
+                        type_order=["xp", "medal", "pokedex"],
+                    )
                 except Exception as exc:
                     st.error(f"Failed to add account: {exc}")
                 else:
                     group_label = ", ".join(applied_groups) if applied_groups else "All"
-                    st.success(f"Added account `{account_name}` (groups: {group_label}).")
+                    input_label = ", ".join(selected_input_types) if selected_input_types else "none"
+                    st.success(f"Added account `{account_name}` (groups: {group_label}; inputs: {input_label}).")
                     st.rerun()
 
-    tab_xp, tab_medal = st.tabs(["XP Snapshot Input", "Medal Snapshot Input"])
+    tab_xp, tab_medal, tab_pokedex = st.tabs(["XP Snapshot Input", "Medal Snapshot Input", "Pokédex Entries Input"])
 
     with tab_xp:
         st.caption("Enter one snapshot date and update multiple accounts at once.")
+        st.caption("Available XP accounts are controlled by `inputs/config/data_input_accounts.csv`.")
         xp_date = st.date_input("XP Date", value=date.today(), key="xp_batch_date")
-        raw_players = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
+        raw_players = list(xp_input_accounts) if xp_input_accounts else list(ACCOUNT_ORDER)
         all_players = load_xp_input_order(raw_players)
         xp_on_date = set()
         if not xp_input_df.empty:
@@ -5972,9 +6402,9 @@ if page == "Data Input":
             h1.markdown("**Account**")
             h2.markdown("**Level (last Data)**")
             h3.markdown("**XPBar (last Data)**")
-            h4.markdown("**-**")
+            h4.caption("")
             h5.markdown("**Level**")
-            h6.markdown("**+**")
+            h6.caption("")
             h7.markdown("**XP Bar**")
             h8.markdown("**Battles (last)**")
             h9.markdown("**Battles Won**")
@@ -5982,10 +6412,8 @@ if page == "Data Input":
             h11.markdown("**Distance Walked**")
             h12.markdown("**Caught (last)**")
             h13.markdown("**Pokemon Caught**")
-            h14.markdown("**Error**")
+            h14.markdown("**Save**")
 
-            xp_inputs: list[dict[str, object]] = []
-            inline_xp_errors: list[str] = []
             xp_existing_for_validation = (
                 xp_input_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy()
                 if not xp_input_df.empty
@@ -6024,263 +6452,203 @@ if page == "Data Input":
             for row in xp_editor_rows:
                 acc = str(row["account"])
                 xp_locked = bool(row.get("xp_locked", False))
-                c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14 = xp_input_col.columns(col_widths, gap="small")
-                account_slot = c1.empty()
-                c2.markdown(f"`{int(row['lvl_last'])}`")
-                c3.markdown(f"`{int(row['xp_bar_last']):,}`")
-                c8.markdown(f"`{_fmt_input_default(row.get('battles_last', 0.0), 0)}`")
-                c10.markdown(f"`{_fmt_input_default(row.get('distance_last', 0.0), 1)}`")
-                c12.markdown(f"`{_fmt_input_default(row.get('caught_last', 0.0), 0)}`")
-                lvl_state_key = f"xp_level_input_{xp_date.isoformat()}_{acc}"
-                if lvl_state_key not in st.session_state:
-                    st.session_state[lvl_state_key] = int(row["lvl"])
-                else:
-                    try:
-                        current_lvl = int(st.session_state[lvl_state_key])
-                    except Exception:
-                        current_lvl = int(row["lvl"])
-                    st.session_state[lvl_state_key] = max(1, min(xp_level_max, current_lvl))
-                dec_clicked = c4.button(
-                    " ",
-                    key=f"{lvl_state_key}_dec",
-                    help="Decrease level",
-                    icon=":material/remove:",
-                    use_container_width=True,
-                    disabled=xp_locked,
-                )
-                if dec_clicked:
-                    st.session_state[lvl_state_key] = max(1, int(st.session_state[lvl_state_key]) - 1)
-                inc_clicked = c6.button(
-                    " ",
-                    key=f"{lvl_state_key}_inc",
-                    help="Increase level",
-                    icon=":material/add:",
-                    use_container_width=True,
-                    disabled=xp_locked,
-                )
-                if inc_clicked:
-                    st.session_state[lvl_state_key] = min(xp_level_max, int(st.session_state[lvl_state_key]) + 1)
-                lvl_value = c5.number_input(
-                    "Level",
-                    min_value=1,
-                    max_value=xp_level_max,
-                    step=1,
-                    format="%d",
-                    key=lvl_state_key,
-                    label_visibility="collapsed",
-                    disabled=xp_locked,
-                )
-                xp_bar_value = c7.text_input(
-                    "XP Bar",
-                    value=str(int(row["xp_bar"])),
-                    key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
-                    label_visibility="collapsed",
-                    disabled=xp_locked,
-                )
-                battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
-                distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
-                caught_default = _fmt_input_default(row.get("caught_last", 0.0), 0)
-                battles_value = c9.text_input(
-                    "Battles Won",
-                    value=battles_default,
-                    key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
-                    label_visibility="collapsed",
-                )
-                distance_value = c11.text_input(
-                    "Distance Walked",
-                    value=distance_default,
-                    key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
-                    label_visibility="collapsed",
-                )
-                caught_value = c13.text_input(
-                    "Pokemon Caught",
-                    value=caught_default,
-                    key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
-                    label_visibility="collapsed",
-                )
-                row_errors: list[str] = []
-                xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
-                battles_num = _parse_float_loose(battles_value)
-                distance_num = _parse_float_loose(distance_value)
-                caught_num = _parse_float_loose(caught_value)
-                row_changed = False
-                if not xp_locked:
-                    row_changed = int(lvl_value) != int(row["lvl_last"])
-                    if pd.isna(xp_bar_num):
-                        row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
+                with xp_input_col.form(
+                    key=f"xp_account_form_{xp_date.isoformat()}_{acc}",
+                    clear_on_submit=False,
+                ):
+                    c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14 = st.columns(
+                        col_widths,
+                        gap="small",
+                    )
+                    account_slot = c1.empty()
+                    c2.markdown(f"`{int(row['lvl_last'])}`")
+                    c3.markdown(f"`{int(row['xp_bar_last']):,}`")
+                    c4.caption("")
+                    c6.caption("")
+                    c8.markdown(f"`{_fmt_input_default(row.get('battles_last', 0.0), 0)}`")
+                    c10.markdown(f"`{_fmt_input_default(row.get('distance_last', 0.0), 1)}`")
+                    c12.markdown(f"`{_fmt_input_default(row.get('caught_last', 0.0), 0)}`")
+                    lvl_state_key = f"xp_level_input_{xp_date.isoformat()}_{acc}"
+                    if lvl_state_key not in st.session_state:
+                        st.session_state[lvl_state_key] = int(row["lvl"])
                     else:
-                        row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
-                if not pd.isna(battles_num):
-                    row_changed = row_changed or (float(battles_num) != float(row.get("battles_last", 0.0)))
-                if not pd.isna(distance_num):
-                    row_changed = row_changed or (float(distance_num) != float(row.get("distance_last", 0.0)))
-                if not pd.isna(caught_num):
-                    row_changed = row_changed or (float(caught_num) != float(row.get("caught_last", 0.0)))
-
-                account_color = "#9ca3af" if row_changed else "inherit"
-                account_slot.markdown(
-                    f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
-                    unsafe_allow_html=True,
-                )
-                if xp_locked:
-                    pass
-                elif pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
-                    row_errors.append("XP Bar must be a number >= 0.")
-                else:
-                    row_df = pd.DataFrame(
-                        [
-                            {
-                                "Date": pd.Timestamp(xp_date),
-                                "Spieler": acc,
-                                "Lvl": int(lvl_value),
-                                "XP Bar": int(xp_bar_num),
-                            }
-                        ]
+                        try:
+                            current_lvl = int(st.session_state[lvl_state_key])
+                        except Exception:
+                            current_lvl = int(row["lvl"])
+                        st.session_state[lvl_state_key] = max(1, min(xp_level_max, current_lvl))
+                    lvl_value = c5.number_input(
+                        "Level",
+                        min_value=1,
+                        max_value=xp_level_max,
+                        step=1,
+                        format="%d",
+                        key=lvl_state_key,
+                        label_visibility="collapsed",
+                        disabled=xp_locked,
                     )
-                    monotonic_errors = _validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map)
-                    row_errors.extend(monotonic_errors)
-                if pd.isna(battles_num) or float(battles_num) < 0:
-                    row_errors.append("Battles Won must be a number >= 0.")
-                if pd.isna(distance_num) or float(distance_num) < 0:
-                    row_errors.append("Distance Walked must be a number >= 0.")
-                if pd.isna(caught_num) or float(caught_num) < 0:
-                    row_errors.append("Pokemon Caught must be a number >= 0.")
-                if not row_errors:
-                    additional_row_df = pd.DataFrame(
-                        [
-                            {
-                                "date": pd.Timestamp(xp_date),
-                                "account": acc,
-                                "battles_won": float(battles_num),
-                            }
-                        ]
+                    xp_bar_value = c7.text_input(
+                        "XP Bar",
+                        value=str(int(row["xp_bar"])),
+                        key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
+                        label_visibility="collapsed",
+                        disabled=xp_locked,
                     )
-                    additional_mono_errors = _validate_additional_activity_rows_non_decreasing(
-                        additional_existing_for_validation,
-                        additional_row_df,
+                    battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
+                    distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
+                    caught_default = _fmt_input_default(row.get("caught_last", 0.0), 0)
+                    battles_value = c9.text_input(
+                        "Battles Won",
+                        value=battles_default,
+                        key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
+                        label_visibility="collapsed",
                     )
-                    row_errors.extend(additional_mono_errors)
-                if not row_errors:
-                    medal_row_df = pd.DataFrame(
-                        [
-                            {
-                                "date": pd.Timestamp(xp_date),
-                                "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
-                                "value": float(distance_num),
-                            },
-                            {
-                                "date": pd.Timestamp(xp_date),
-                                "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
-                                "value": float(caught_num),
-                            },
-                        ]
+                    distance_value = c11.text_input(
+                        "Distance Walked",
+                        value=distance_default,
+                        key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
+                        label_visibility="collapsed",
                     )
-                    medal_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, medal_row_df)
-                    row_errors.extend(medal_mono_errors)
-
-                if row_errors:
-                    inline_xp_errors.extend(row_errors)
-                    c14.markdown(
-                        f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
+                    caught_value = c13.text_input(
+                        "Pokemon Caught",
+                        value=caught_default,
+                        key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
+                        label_visibility="collapsed",
+                    )
+                    xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
+                    battles_num = _parse_float_loose(battles_value)
+                    distance_num = _parse_float_loose(distance_value)
+                    caught_num = _parse_float_loose(caught_value)
+                    row_changed = False
+                    if not xp_locked:
+                        row_changed = int(lvl_value) != int(row["lvl_last"])
+                        if pd.isna(xp_bar_num):
+                            row_changed = row_changed or (str(xp_bar_value).strip() != str(int(row["xp_bar_last"])))
+                        else:
+                            row_changed = row_changed or (int(xp_bar_num) != int(row["xp_bar_last"]))
+                    if not pd.isna(battles_num):
+                        row_changed = row_changed or (float(battles_num) != float(row.get("battles_last", 0.0)))
+                    if not pd.isna(distance_num):
+                        row_changed = row_changed or (float(distance_num) != float(row.get("distance_last", 0.0)))
+                    if not pd.isna(caught_num):
+                        row_changed = row_changed or (float(caught_num) != float(row.get("caught_last", 0.0)))
+                    account_color = "#9ca3af" if row_changed else "inherit"
+                    account_slot.markdown(
+                        f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
                         unsafe_allow_html=True,
                     )
-                else:
-                    c14.caption("")
-                xp_inputs.append(
-                    {
-                        "account": acc,
-                        "lvl": int(lvl_value),
-                        "xp_bar": xp_bar_value,
-                        "xp_locked": xp_locked,
-                        "battles_won": battles_value,
-                        "distance_walked": distance_value,
-                        "pokemon_caught": caught_value,
-                    }
-                )
 
-            if inline_xp_errors:
-                st.caption("Fix row errors to enable saving.")
-            if st.button("Save XP/activity snapshot for selected accounts", key="xp_batch_save", disabled=bool(inline_xp_errors)):
-                rows_to_write: list[dict[str, object]] = []
-                additional_rows_to_write: list[dict[str, object]] = []
-                medal_rows_to_write: list[dict[str, object]] = []
-                errors: list[str] = []
-                for r in xp_inputs:
-                    acc = str(r.get("account", "")).strip()
-                    lvl = pd.to_numeric(r.get("lvl"), errors="coerce")
-                    xp_bar = pd.to_numeric(r.get("xp_bar"), errors="coerce")
-                    xp_locked = bool(r.get("xp_locked", False))
-                    battles_won = _parse_float_loose(r.get("battles_won"))
-                    distance_walked = _parse_float_loose(r.get("distance_walked"))
-                    pokemon_caught = _parse_float_loose(r.get("pokemon_caught"))
-                    if not acc:
-                        errors.append("Missing account value.")
-                        continue
-                    if not xp_locked and (pd.isna(lvl) or int(lvl) < 1 or int(lvl) > xp_level_max):
-                        errors.append(f"{acc}: invalid level.")
-                        continue
-                    if not xp_locked and (pd.isna(xp_bar) or int(xp_bar) < 0):
-                        errors.append(f"{acc}: invalid XP Bar.")
-                        continue
-                    if pd.isna(battles_won) or float(battles_won) < 0:
-                        errors.append(f"{acc}: invalid Battles Won.")
-                        continue
-                    if pd.isna(distance_walked) or float(distance_walked) < 0:
-                        errors.append(f"{acc}: invalid Distance Walked.")
-                        continue
-                    if pd.isna(pokemon_caught) or float(pokemon_caught) < 0:
-                        errors.append(f"{acc}: invalid Pokemon Caught.")
-                        continue
-                    if not xp_locked:
-                        rows_to_write.append(
-                            {
-                                "Date": xp_date.isoformat(),
-                                "Spieler": acc,
-                                "Lvl": int(lvl),
-                                "XP Bar": int(xp_bar),
-                            }
-                        )
-                    additional_rows_to_write.append(
-                        {
-                            "date": xp_date.isoformat(),
-                            "account": acc,
-                            "battles_won": float(battles_won),
-                        }
-                    )
-                    medal_rows_to_write.extend(
-                        [
-                            {
-                                "date": xp_date.isoformat(),
-                                "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
-                                "value": float(distance_walked),
-                            },
-                            {
-                                "date": xp_date.isoformat(),
-                                "account": acc,
-                                "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
-                                "value": float(pokemon_caught),
-                            },
-                        ]
-                    )
-                if errors:
-                    st.error("\n".join(errors))
-                else:
-                    try:
-                        written = upsert_xp_rows(xp_history_path(), rows_to_write)
-                        written_additional = upsert_additional_activity_rows(additional_activity_path(), additional_rows_to_write)
-                        written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
-                    except ValueError as e:
-                        st.error(str(e))
-                    else:
-                        st.success(
-                            f"Saved XP rows: {written}. "
-                            f"Saved battles rows: {written_additional}. "
-                            f"Saved activity medal rows: {written_medals} "
-                            "(Distance Walked, Pokemon Caught)."
-                        )
+                    submitted = c14.form_submit_button("Save", use_container_width=True)
+                    if submitted:
+                        row_errors: list[str] = []
+                        rows_to_write: list[dict[str, object]] = []
+                        additional_rows_to_write: list[dict[str, object]] = []
+                        medal_rows_to_write: list[dict[str, object]] = []
+                        if xp_locked:
+                            pass
+                        elif pd.isna(xp_bar_num) or int(xp_bar_num) < 0:
+                            row_errors.append("XP Bar must be a number >= 0.")
+                        else:
+                            row_df = pd.DataFrame(
+                                [
+                                    {
+                                        "Date": pd.Timestamp(xp_date),
+                                        "Spieler": acc,
+                                        "Lvl": int(lvl_value),
+                                        "XP Bar": int(xp_bar_num),
+                                    }
+                                ]
+                            )
+                            row_errors.extend(_validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map))
+                        if battles_num is None or float(battles_num) < 0:
+                            row_errors.append("Battles Won must be a number >= 0.")
+                        if distance_num is None or float(distance_num) < 0:
+                            row_errors.append("Distance Walked must be a number >= 0.")
+                        if caught_num is None or float(caught_num) < 0:
+                            row_errors.append("Pokemon Caught must be a number >= 0.")
+                        if not row_errors:
+                            additional_row_df = pd.DataFrame(
+                                [
+                                    {
+                                        "date": pd.Timestamp(xp_date),
+                                        "account": acc,
+                                        "battles_won": float(battles_num),
+                                    }
+                                ]
+                            )
+                            row_errors.extend(
+                                _validate_additional_activity_rows_non_decreasing(
+                                    additional_existing_for_validation,
+                                    additional_row_df,
+                                )
+                            )
+                        if not row_errors:
+                            medal_row_df = pd.DataFrame(
+                                [
+                                    {
+                                        "date": pd.Timestamp(xp_date),
+                                        "account": acc,
+                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+                                        "value": float(distance_num),
+                                    },
+                                    {
+                                        "date": pd.Timestamp(xp_date),
+                                        "account": acc,
+                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+                                        "value": float(caught_num),
+                                    },
+                                ]
+                            )
+                            row_errors.extend(_validate_medal_rows_non_decreasing(medal_existing_for_validation, medal_row_df))
+                        if row_errors:
+                            st.error(f"{acc}: " + "\n".join(row_errors))
+                        else:
+                            if not xp_locked:
+                                rows_to_write.append(
+                                    {
+                                        "Date": xp_date.isoformat(),
+                                        "Spieler": acc,
+                                        "Lvl": int(lvl_value),
+                                        "XP Bar": int(xp_bar_num),
+                                    }
+                                )
+                            additional_rows_to_write.append(
+                                {
+                                    "date": xp_date.isoformat(),
+                                    "account": acc,
+                                    "battles_won": float(battles_num),
+                                }
+                            )
+                            medal_rows_to_write.extend(
+                                [
+                                    {
+                                        "date": xp_date.isoformat(),
+                                        "account": acc,
+                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+                                        "value": float(distance_num),
+                                    },
+                                    {
+                                        "date": xp_date.isoformat(),
+                                        "account": acc,
+                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+                                        "value": float(caught_num),
+                                    },
+                                ]
+                            )
+                            try:
+                                written = upsert_xp_rows(xp_history_path(), rows_to_write)
+                                written_additional = upsert_additional_activity_rows(
+                                    additional_activity_path(),
+                                    additional_rows_to_write,
+                                )
+                                written_medals = append_medal_rows(medal_snapshots_path(), medal_rows_to_write)
+                            except ValueError as e:
+                                st.error(str(e))
+                            else:
+                                st.success(
+                                    f"Saved {acc}: XP rows {written}, battles rows {written_additional}, "
+                                    f"activity medal rows {written_medals}."
+                                )
 
         if all_players:
             st.markdown("Input order for XP accounts")
@@ -6328,20 +6696,8 @@ if page == "Data Input":
         st.caption("Enter one full medal snapshot per account.")
         st.caption("`Platinum Medals` is derived automatically from medals that reached their goal.")
         medal_date = st.date_input("Medal Date", value=date.today(), key="medal_full_date")
-        account_scope_label = st.selectbox(
-            "Medal input account scope",
-            options=[
-                "Core only (Thombay, Cerius, Thomzay)",
-                "All accounts",
-            ],
-            index=0,
-            key="medal_input_account_scope",
-        )
-        all_input_accounts = list(all_accounts) if all_accounts else list(ACCOUNT_ORDER)
-        if account_scope_label.startswith("Core only"):
-            allowed_accounts = list(dict.fromkeys([str(a).strip() for a in MEDAL_INPUT_CORE_ACCOUNTS if str(a).strip()]))
-        else:
-            allowed_accounts = all_input_accounts
+        allowed_accounts = list(medal_input_accounts) if medal_input_accounts else list(MEDAL_INPUT_CORE_ACCOUNTS)
+        st.caption("Available medal accounts are controlled by `inputs/config/data_input_accounts.csv`.")
         valid_manual_medal_ids = {
             str(m).strip().lower()
             for m in goals_df.get("medal_id", pd.Series(dtype="object")).astype(str).tolist()
@@ -6637,6 +6993,254 @@ if page == "Data Input":
                     new_order[idx], new_order[idx + 1] = new_order[idx + 1], new_order[idx]
                     save_medal_input_order(medal_account, new_order)
                     st.rerun()
+
+    with tab_pokedex:
+        st.caption("Enter counts by category and region. Pokemon region counts are read from medal snapshots.")
+        st.caption("Available Pokédex accounts are controlled by `inputs/config/data_input_accounts.csv`.")
+        pokedex_date = st.date_input("Pokédex Date", value=date.today(), key="pokedex_entry_date")
+        pokedex_accounts = list(pokedex_input_accounts) if pokedex_input_accounts else list(ACCOUNT_ORDER)
+
+        def _pokedex_cell_config(entry_type: str, region: str) -> dict[str, object]:
+            return pokedex_entry_config.get((str(entry_type).strip().lower(), str(region).strip().lower()), {})
+
+        def _is_locked_pokedex_cell(entry_type: str, region: str) -> bool:
+            return bool(_pokedex_cell_config(entry_type, region).get("locked", False))
+
+        editable_cells = [
+            (entry_type, region)
+            for entry_type in POKEDEX_ENTRY_TYPES
+            for region in POKEDEX_REGIONS
+            if not _is_overall_pokedex_cell(region)
+            and not _is_medal_derived_pokedex_cell(entry_type, region)
+            and not _is_locked_pokedex_cell(entry_type, region)
+        ]
+        expected_pokedex_count = len(editable_cells)
+        complete_pokedex_on_date: set[str] = set()
+        partial_pokedex_counts: dict[str, int] = {}
+        if not pokedex_df.empty and expected_pokedex_count > 0:
+            same_day_pokedex = pokedex_df[pokedex_df["date"].dt.date == pokedex_date].copy()
+            if not same_day_pokedex.empty:
+                same_day_pokedex["account"] = same_day_pokedex["account"].astype(str).str.strip()
+                same_day_pokedex["entry_type"] = same_day_pokedex["entry_type"].astype(str).str.strip().str.lower()
+                same_day_pokedex["region"] = same_day_pokedex["region"].astype(str).str.strip().str.lower()
+                same_day_pokedex = same_day_pokedex[
+                    same_day_pokedex.apply(
+                        lambda r: (str(r["entry_type"]), str(r["region"])) in set(editable_cells),
+                        axis=1,
+                    )
+                ].copy()
+                pokedex_counts = (
+                    same_day_pokedex.assign(cell=same_day_pokedex["entry_type"] + ":" + same_day_pokedex["region"])
+                    .groupby("account", as_index=False)["cell"]
+                    .nunique()
+                    .rename(columns={"cell": "entry_count"})
+                )
+                for _, row in pokedex_counts.iterrows():
+                    account_name = str(row["account"]).strip()
+                    entry_count = int(row["entry_count"])
+                    if entry_count >= expected_pokedex_count:
+                        complete_pokedex_on_date.add(account_name)
+                    elif entry_count > 0:
+                        partial_pokedex_counts[account_name] = entry_count
+
+        available_pokedex_accounts = [a for a in pokedex_accounts if a not in complete_pokedex_on_date]
+        if complete_pokedex_on_date:
+            st.caption(f"Already entered for this date: {', '.join(sorted(complete_pokedex_on_date))}")
+        if partial_pokedex_counts:
+            partial_label = ", ".join(
+                f"{acc} ({cnt}/{expected_pokedex_count})" for acc, cnt in sorted(partial_pokedex_counts.items())
+            )
+            st.caption(f"Partial Pokédex rows on this date: {partial_label}")
+        if available_pokedex_accounts:
+            st.caption(f"Missing for this date: {', '.join(available_pokedex_accounts)}")
+            pokedex_account = st.selectbox(
+                "Account (missing only for selected date)",
+                options=available_pokedex_accounts,
+                key="pokedex_entry_account",
+            )
+        else:
+            st.success("Pokédex entry snapshot complete for selected date. No missing accounts.")
+            pokedex_account = None
+
+        if pokedex_account is None:
+            st.info("Choose another date to enter new Pokédex counts.")
+        else:
+            latest_pokedex_rows = display_pokedex_df[display_pokedex_df["account"] == pokedex_account].copy()
+            latest_vals: dict[tuple[str, str], float] = {}
+            if not latest_pokedex_rows.empty:
+                latest_pokedex_rows = latest_pokedex_rows[
+                    pd.to_datetime(latest_pokedex_rows["date"], errors="coerce") <= pd.Timestamp(pokedex_date)
+                ].copy()
+                latest_pokedex_rows = latest_pokedex_rows.sort_values("date").drop_duplicates(
+                    ["entry_type", "region"], keep="last"
+                )
+                latest_vals = {
+                    (str(r["entry_type"]), str(r["region"])): float(r["value"])
+                    for _, r in latest_pokedex_rows.iterrows()
+                }
+
+            def _fmt_pokedex_value(value: object) -> str:
+                num = pd.to_numeric(value, errors="coerce")
+                if pd.isna(num):
+                    return "0"
+                num_float = float(num)
+                if num_float.is_integer():
+                    return str(int(num_float))
+                return f"{num_float:.2f}".rstrip("0").rstrip(".")
+
+            st.markdown(f"Full Pokédex entries snapshot for `{pokedex_account}`")
+            st.caption(
+                "Grey Pokemon region values are derived from medal inputs. Locked cells and max values come from "
+                "`inputs/config/pokedex_entry_config.csv`."
+            )
+
+            col_widths = [1.15] + [0.72] * len(POKEDEX_REGIONS) + [1.6]
+            pokedex_input_col = st.container()
+            header_cols = pokedex_input_col.columns(col_widths, gap="small")
+            header_cols[0].markdown("**Type**")
+            for idx, region in enumerate(POKEDEX_REGIONS, start=1):
+                header_cols[idx].markdown(f"**{POKEDEX_REGION_LABELS.get(region, region)}**")
+            header_cols[-1].markdown("**Save**")
+
+            pokedex_existing_for_validation = (
+                pokedex_df[["date", "account", "entry_type", "region", "value"]].copy()
+                if not pokedex_df.empty
+                else pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"])
+            )
+            for entry_type in POKEDEX_ENTRY_TYPES:
+                with pokedex_input_col.form(
+                    key=f"pokedex_category_form_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}",
+                    clear_on_submit=False,
+                ):
+                    row_cols = st.columns(col_widths, gap="small")
+                    row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
+                    row_inputs: list[dict[str, object]] = []
+                    for idx, region in enumerate(POKEDEX_REGIONS, start=1):
+                        last_value = latest_vals.get((entry_type, region), 0.0)
+                        is_overall = _is_overall_pokedex_cell(region)
+                        is_derived = _is_medal_derived_pokedex_cell(entry_type, region)
+                        cell_config = _pokedex_cell_config(entry_type, region)
+                        is_locked = bool(cell_config.get("locked", False))
+                        max_value = cell_config.get("max_value")
+                        config_notes = str(cell_config.get("notes", "")).strip()
+                        value_default = _fmt_pokedex_value(last_value)
+                        if is_overall or is_derived:
+                            row_cols[idx].markdown(
+                                f"<span style='color:#9ca3af'>{escape(value_default)}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            continue
+                        if is_locked:
+                            locked_value = max_value if max_value is not None else last_value
+                            locked_label = _fmt_pokedex_value(locked_value)
+                            note = f" title='{escape(config_notes)}'" if config_notes else ""
+                            row_cols[idx].markdown(
+                                f"<span style='color:#9ca3af'{note}>{escape(locked_label)}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            continue
+
+                        input_key = f"pokedex_value_input_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}_{region}"
+                        if input_key not in st.session_state:
+                            st.session_state[input_key] = value_default
+                        help_parts = []
+                        if max_value is not None:
+                            help_parts.append(f"Configured max: {_fmt_pokedex_value(max_value)}")
+                        if config_notes:
+                            help_parts.append(config_notes)
+                        value_input = row_cols[idx].text_input(
+                            f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}",
+                            key=input_key,
+                            label_visibility="collapsed",
+                            help=" | ".join(help_parts) if help_parts else None,
+                        )
+                        row_inputs.append(
+                            {
+                                "entry_type": entry_type,
+                                "region": region,
+                                "value": value_input,
+                                "max_value": max_value,
+                            }
+                        )
+
+                    submitted = row_cols[-1].form_submit_button("Save", use_container_width=True)
+                    if submitted:
+                        rows_to_write: list[dict[str, object]] = []
+                        errors: list[str] = []
+                        for r in row_inputs:
+                            row_entry_type = str(r.get("entry_type", "")).strip().lower()
+                            region = str(r.get("region", "")).strip().lower()
+                            value = _parse_float_loose_value(r.get("value"))
+                            max_value = r.get("max_value")
+                            region_label = POKEDEX_REGION_LABELS.get(region, region)
+                            if row_entry_type not in POKEDEX_ENTRY_TYPES:
+                                errors.append(f"Invalid Pokédex entry type: {row_entry_type}")
+                                continue
+                            if region not in POKEDEX_REGIONS:
+                                errors.append(f"Invalid Pokédex region: {region}")
+                                continue
+                            if value is None:
+                                errors.append(f"{region_label} must be a number.")
+                                continue
+                            if float(value) < 0:
+                                errors.append(f"{region_label} must be >= 0.")
+                                continue
+                            if max_value is not None and float(value) > float(max_value):
+                                errors.append(f"{region_label} must be <= {_fmt_pokedex_value(max_value)}.")
+                                continue
+                            row_df = pd.DataFrame(
+                                [
+                                    {
+                                        "date": pd.Timestamp(pokedex_date),
+                                        "account": pokedex_account,
+                                        "entry_type": row_entry_type,
+                                        "region": region,
+                                        "value": float(value),
+                                    }
+                                ]
+                            )
+                            row_mono_errors = _validate_pokedex_entry_rows_non_decreasing(
+                                pokedex_existing_for_validation,
+                                row_df,
+                            )
+                            if row_mono_errors:
+                                errors.append(row_mono_errors[0])
+                                continue
+                            rows_to_write.append(
+                                {
+                                    "date": pokedex_date.isoformat(),
+                                    "account": pokedex_account,
+                                    "entry_type": row_entry_type,
+                                    "region": region,
+                                    "value": float(value),
+                                }
+                            )
+                        if errors:
+                            st.error(
+                                f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}:\n"
+                                + "\n".join([f"- {err}" for err in errors])
+                            )
+                        else:
+                            try:
+                                written = upsert_pokedex_entry_rows(
+                                    pokedex_entry_snapshots_path(),
+                                    rows_to_write,
+                                    entry_config=pokedex_entry_config,
+                                )
+                            except ValueError as e:
+                                st.error(str(e))
+                            else:
+                                st.success(
+                                    f"Saved {POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} "
+                                    f"Pokédex rows: {written} for {pokedex_account}"
+                                )
+
+        with st.expander("Pokemon Catalog (1-1025)", expanded=False):
+            st.caption("Reference data comes from `inputs/reference/pokemon_catalog.csv`; edit availability or notes in the CSV.")
+            if pokemon_catalog_df.empty:
+                st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
+            else:
+                st.dataframe(pokemon_catalog_df, use_container_width=True, hide_index=True)
 
 if page == "Pipelines":
     st.subheader("Pipelines")

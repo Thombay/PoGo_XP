@@ -1,0 +1,121 @@
+entry_type,region,max_value,locked,notes
+pokemon,overall,,true,Derived as the sum of all Pokemon regions.
+pokemon,kanto,151,false,Derived from Kanto medal input.
+pokemon,johto,100,false,Derived from Johto medal input.
+pokemon,hoenn,135,false,Derived from Hoenn medal input.
+pokemon,sinnoh,107,false,Derived from Sinnoh medal input.
+pokemon,unova,156,false,Derived from Unova medal input.
+pokemon,kalos,72,false,Derived from Kalos medal input.
+pokemon,alola,86,false,Derived from Alola medal input.
+pokemon,galar,89,false,Derived from Galar medal input.
+pokemon,hisui,7,false,Derived from Hisui medal input.
+pokemon,paldea,120,false,Derived from Paldea medal input.
+pokemon,unidentified,2,false,
+shiny,overall,,true,Derived as the sum of all Shiny regions.
+shiny,kanto,,false,
+shiny,johto,,false,
+shiny,hoenn,,false,
+shiny,sinnoh,,false,
+shiny,unova,,false,
+shiny,kalos,,false,
+shiny,alola,,false,
+shiny,galar,,false,
+shiny,hisui,0,true,No shiny Hisui entries available yet.
+shiny,paldea,,false,
+shiny,unidentified,,false,
+lucky,overall,,true,Derived as the sum of all Lucky regions.
+lucky,kanto,,false,
+lucky,johto,,false,
+lucky,hoenn,,false,
+lucky,sinnoh,,false,
+lucky,unova,,false,
+lucky,kalos,,false,
+lucky,alola,,false,
+lucky,galar,,false,
+lucky,hisui,,true,
+lucky,paldea,,false,
+lucky,unidentified,,true,
+xxl,overall,,true,Derived as the sum of all XXL regions.
+xxl,kanto,,false,
+xxl,johto,,false,
+xxl,hoenn,,false,
+xxl,sinnoh,,false,
+xxl,unova,,false,
+xxl,kalos,,false,
+xxl,alola,,false,
+xxl,galar,,false,
+xxl,hisui,,true,
+xxl,paldea,,false,
+xxl,unidentified,,false,
+xxs,overall,,true,Derived as the sum of all XXS regions.
+xxs,kanto,,false,
+xxs,johto,,false,
+xxs,hoenn,,false,
+xxs,sinnoh,,false,
+xxs,unova,,false,
+xxs,kalos,,false,
+xxs,alola,,false,
+xxs,galar,,false,
+xxs,hisui,,true,
+xxs,paldea,,false,
+xxs,unidentified,,false,
+gmax,overall,,true,Derived as the sum of all G-Max regions.
+gmax,kanto,12,false,
+gmax,johto,,true,
+gmax,hoenn,,true,
+gmax,sinnoh,,true,
+gmax,unova,1,false,
+gmax,kalos,,true,
+gmax,alola,,true,
+gmax,galar,18,false,
+gmax,hisui,,true,
+gmax,paldea,,true,
+gmax,unidentified,1,true,
+mega,overall,,true,Derived as the sum of all Mega regions.
+mega,kanto,15,false,
+mega,johto,6,false,
+mega,hoenn,22,false,
+mega,sinnoh,5,false,
+mega,unova,1,false,
+mega,kalos,2,false,Only 2 Mega Kalos entries are currently available.
+mega,alola,,true,
+mega,galar,,true,
+mega,hisui,,true,
+mega,paldea,,true,
+mega,unidentified,,true,
+shadow,overall,,true,Derived as the sum of all Shadow regions.
+shadow,kanto,,false,
+shadow,johto,,false,
+shadow,hoenn,,false,
+shadow,sinnoh,,false,
+shadow,unova,,false,
+shadow,kalos,,false,
+shadow,alola,,false,
+shadow,galar,,false,
+shadow,hisui,,false,
+shadow,paldea,,false,
+shadow,unidentified,,false,
+purified,overall,,true,Derived as the sum of all Purified regions.
+purified,kanto,,false,
+purified,johto,,false,
+purified,hoenn,,false,
+purified,sinnoh,,false,
+purified,unova,,false,
+purified,kalos,,false,
+purified,alola,,false,
+purified,galar,,false,
+purified,hisui,,false,
+purified,paldea,,false,
+purified,unidentified,,false,
+hundo,overall,,true,Derived as the sum of all 100% regions.
+hundo,kanto,,false,
+hundo,johto,,false,
+hundo,hoenn,,false,
+hundo,sinnoh,,false,
+hundo,unova,,false,
+hundo,kalos,,false,
+hundo,alola,,false,
+hundo,galar,,false,
+hundo,hisui,,false,
+hundo,paldea,,false,
+hundo,unidentified,,false,

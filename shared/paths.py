@@ -50,6 +50,10 @@ def player_groups_path() -> Path:
     return config_dir() / "player_groups.csv"
 
 
+def data_input_accounts_path() -> Path:
+    return config_dir() / "data_input_accounts.csv"
+
+
 def xp_snapshots_path() -> Path:
     # Reserved for canonical per-account XP snapshots used by medal-tracker.
     return data_dir() / "xp_snapshots.csv"
@@ -61,6 +65,18 @@ def medals_config_path() -> Path:
 
 def medal_snapshots_path() -> Path:
     return data_dir() / "medal_snapshots.csv"
+
+
+def pokedex_entry_config_path() -> Path:
+    return config_dir() / "pokedex_entry_config.csv"
+
+
+def pokedex_entry_snapshots_path() -> Path:
+    return data_dir() / "pokedex_entry_snapshots.csv"
+
+
+def pokemon_catalog_path() -> Path:
+    return reference_dir() / "pokemon_catalog.csv"
 
 
 def medal_report_path() -> Path:
