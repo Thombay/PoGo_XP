@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from webapp.app import (
     _carry_forward_xp_chart_rows,
@@ -33,13 +33,13 @@ class TrendProjectionTest(unittest.TestCase):
         self.assertListEqual(new["Date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-08", "2026-01-15"])
         self.assertListEqual(new["Total XP"].tolist(), [50.0, 50.0])
 
-    def test_max_data_interval_uses_largest_starting_group_and_keeps_later_rows(self):
+    def test_common_interval_uses_row_dense_window_over_latest_single_snapshot(self):
         rows = []
         for player in ["OldA", "OldB", "OldC"]:
-            for dt in ["2019-01-01", "2026-03-01", "2026-04-01"]:
+            for dt in ["2019-01-01", "2026-03-01", "2026-03-15", "2026-04-01"]:
                 rows.append((dt, player, 100.0))
         for player in [f"Main{i}" for i in range(20)]:
-            for dt in ["2026-03-01", "2026-04-01"]:
+            for dt in ["2026-03-01", "2026-03-15", "2026-04-01"]:
                 rows.append((dt, player, 100.0))
         rows.append(("2026-04-01", "NewOne", 100.0))
         df = pd.DataFrame(rows, columns=["Date", "Spieler", "Total XP"])
@@ -48,17 +48,17 @@ class TrendProjectionTest(unittest.TestCase):
         out = restrict_to_common_interval(df)
 
         self.assertEqual(out["Date"].min(), pd.Timestamp("2026-03-01"))
-        self.assertEqual(out["Date"].max(), pd.Timestamp("2026-04-01"))
-        self.assertIn("NewOne", set(out["Spieler"].tolist()))
+        self.assertEqual(out["Date"].max(), pd.Timestamp("2026-03-15"))
+        self.assertNotIn("NewOne", set(out["Spieler"].tolist()))
         self.assertFalse(bool((out["Date"] < pd.Timestamp("2026-03-01")).any()))
 
-    def test_max_data_interval_keeps_main_cohort_when_single_account_starts_later(self):
+    def test_common_interval_keeps_longer_main_cohort_when_single_account_starts_later(self):
         rows = []
         for player in ["OldA", "OldB", "OldC"]:
-            for dt in ["2023-01-01", "2025-01-01", "2026-01-01"]:
+            for dt in ["2023-01-01", "2025-01-01", "2025-06-01", "2026-01-01"]:
                 rows.append((dt, player, 100.0))
         for player in [f"Main{i}" for i in range(10)]:
-            for dt in ["2025-01-01", "2026-01-01"]:
+            for dt in ["2025-01-01", "2025-06-01", "2026-01-01"]:
                 rows.append((dt, player, 100.0))
         rows.append(("2026-01-01", "LateNew", 100.0))
         df = pd.DataFrame(rows, columns=["Date", "Spieler", "Total XP"])
@@ -67,15 +67,21 @@ class TrendProjectionTest(unittest.TestCase):
         out = restrict_to_common_interval(df)
 
         self.assertEqual(out["Date"].min(), pd.Timestamp("2025-01-01"))
-        self.assertEqual(out["Date"].max(), pd.Timestamp("2026-01-01"))
-        self.assertIn("LateNew", set(out["Spieler"].tolist()))
+        self.assertEqual(out["Date"].max(), pd.Timestamp("2025-06-01"))
+        self.assertNotIn("LateNew", set(out["Spieler"].tolist()))
 
-    def test_max_data_interval_allows_small_later_additions(self):
+    def test_common_interval_prefers_longer_shared_window_over_small_later_additions(self):
         rows = []
         for player in [f"Feb{i}" for i in range(24)]:
-            for dt in ["2026-02-10", "2026-03-01", "2026-04-01"]:
+            for dt in ["2026-02-10", "2026-03-01", "2026-03-15", "2026-04-01"]:
                 rows.append((dt, player, 100.0))
-        rows.extend([("2026-03-01", "MarchOnly", 100.0), ("2026-04-01", "MarchOnly", 100.0)])
+        rows.extend(
+            [
+                ("2026-03-01", "MarchOnly", 100.0),
+                ("2026-03-15", "MarchOnly", 100.0),
+                ("2026-04-01", "MarchOnly", 100.0),
+            ]
+        )
         rows.append(("2026-04-01", "LateNew", 100.0))
         df = pd.DataFrame(rows, columns=["Date", "Spieler", "Total XP"])
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -83,8 +89,8 @@ class TrendProjectionTest(unittest.TestCase):
         out = restrict_to_common_interval(df)
 
         self.assertEqual(out["Date"].min(), pd.Timestamp("2026-03-01"))
-        self.assertEqual(out["Date"].max(), pd.Timestamp("2026-04-01"))
-        self.assertIn("LateNew", set(out["Spieler"].tolist()))
+        self.assertEqual(out["Date"].max(), pd.Timestamp("2026-03-15"))
+        self.assertNotIn("LateNew", set(out["Spieler"].tolist()))
 
     def test_projection_series_map_keeps_each_players_own_start(self):
         df = pd.DataFrame(

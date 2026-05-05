@@ -32,7 +32,7 @@ from shared.paths import (
     total_xp_curve_path,
     xp_history_path,
 )
-from shared.data_intervals import carry_forward_value_rows, restrict_to_max_data_start_interval
+from shared.data_intervals import carry_forward_value_rows
 from shared.xp_utils import carry_forward_max_level_rows, is_max_level, max_configured_level, total_xp_from_level_input
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
@@ -818,7 +818,52 @@ def add_goal_days_status_annotation(
 
 
 def restrict_to_common_interval(df: pd.DataFrame) -> pd.DataFrame:
-    return restrict_to_max_data_start_interval(df, date_col="Date", group_col="Spieler")
+    if df.empty:
+        return df.copy()
+    ranges = df.groupby("Spieler")["Date"].agg(["min", "max"])
+    if ranges.empty:
+        return df.copy()
+
+    events: list[tuple[pd.Timestamp, int]] = []
+    for _, r in ranges.iterrows():
+        start = pd.to_datetime(r["min"], errors="coerce")
+        end = pd.to_datetime(r["max"], errors="coerce")
+        if pd.isna(start) or pd.isna(end) or start > end:
+            continue
+        events.append((pd.Timestamp(start), 1))
+        events.append((pd.Timestamp(end) + pd.Timedelta(nanoseconds=1), -1))
+    if not events:
+        return df.iloc[0:0].copy()
+
+    events.sort(key=lambda x: x[0])
+    idx = 0
+    active = 0
+    prev_time: pd.Timestamp | None = None
+    segments: list[tuple[pd.Timestamp, pd.Timestamp, int]] = []
+    while idx < len(events):
+        current_time = events[idx][0]
+        if prev_time is not None and current_time > prev_time and active > 0:
+            segments.append((prev_time, current_time, active))
+        while idx < len(events) and events[idx][0] == current_time:
+            active += int(events[idx][1])
+            idx += 1
+        prev_time = current_time
+
+    if not segments:
+        return df.copy().sort_values(["Date", "Spieler"]).reset_index(drop=True)
+
+    # Pick the interval with the most real rows, matching the earlier dashboard behavior.
+    scored_segments: list[tuple[pd.Timestamp, pd.Timestamp, int, int]] = []
+    for start, end_exclusive, active_count in segments:
+        row_count = int(((df["Date"] >= start) & (df["Date"] < end_exclusive)).sum())
+        scored_segments.append((start, end_exclusive, active_count, row_count))
+
+    best_start, best_end_exclusive, _active, _rows = max(
+        scored_segments,
+        key=lambda seg: (seg[3], seg[2], seg[1] - seg[0], -seg[0].value),
+    )
+    out = df[(df["Date"] >= best_start) & (df["Date"] < best_end_exclusive)].copy()
+    return out.sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
 
 def _activity_chart_dates(
