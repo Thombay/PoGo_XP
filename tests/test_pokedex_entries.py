@@ -12,6 +12,7 @@ from webapp.app import (
     build_xp_activity_snapshot_rows,
     load_input_inactive_marker,
     save_input_inactive_marker,
+    select_real_xp_chart_rows,
     upsert_pokedex_entry_rows,
     with_derived_pokedex_overall_rows,
     with_medal_derived_pokedex_rows,
@@ -20,21 +21,19 @@ from webapp.data_files import load_pokedex_entry_snapshots
 
 
 class PokedexEntriesTest(unittest.TestCase):
-    def test_input_inactive_marker_round_trips_xp_and_pokedex(self):
+    def test_input_inactive_marker_round_trips_xp_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ui_preferences.json"
 
             save_input_inactive_marker("xp", "2026-01-01", "Thombay", True, path=path)
-            save_input_inactive_marker("pokedex", "2026-01-01", "Thombay", True, "shiny", path=path)
 
             self.assertTrue(load_input_inactive_marker("xp", "2026-01-01", "Thombay", path=path))
-            self.assertTrue(load_input_inactive_marker("pokedex", "2026-01-01", "Thombay", "shiny", path=path))
+            self.assertTrue(load_input_inactive_marker("xp", "2026-02-01", "Thombay", path=path))
 
             save_input_inactive_marker("xp", "2026-01-01", "Thombay", False, path=path)
-            save_input_inactive_marker("pokedex", "2026-01-01", "Thombay", False, "shiny", path=path)
 
             self.assertFalse(load_input_inactive_marker("xp", "2026-01-01", "Thombay", path=path))
-            self.assertFalse(load_input_inactive_marker("pokedex", "2026-01-01", "Thombay", "shiny", path=path))
+            self.assertFalse(load_input_inactive_marker("xp", "2026-02-01", "Thombay", path=path))
 
     def test_build_xp_activity_snapshot_rows_can_document_unchanged_inactive_row(self):
         xp_rows, activity_rows, medal_rows = build_xp_activity_snapshot_rows(
@@ -54,6 +53,36 @@ class PokedexEntriesTest(unittest.TestCase):
         self.assertEqual(xp_rows[0]["XP Bar"], 12345)
         self.assertEqual(activity_rows[0]["battles_won"], 1000.0)
         self.assertEqual({row["medal_id"] for row in medal_rows}, {"jogger", "collector"})
+
+    def test_build_xp_activity_snapshot_rows_skips_xp_for_max_level_accounts(self):
+        xp_rows, activity_rows, medal_rows = build_xp_activity_snapshot_rows(
+            "2026-01-01",
+            "Thombay",
+            80,
+            0,
+            True,
+            1000,
+            12.5,
+            250,
+        )
+
+        self.assertEqual(xp_rows, [])
+        self.assertEqual(activity_rows[0]["battles_won"], 1000.0)
+        self.assertEqual(len(medal_rows), 2)
+
+    def test_select_real_xp_chart_rows_does_not_carry_forward_missing_dates(self):
+        xp_rows = pd.DataFrame(
+            [
+                {"Date": "2026-01-01", "Spieler": "A", "Total XP": 100},
+                {"Date": "2026-01-05", "Spieler": "A", "Total XP": 150},
+                {"Date": "2026-01-01", "Spieler": "B", "Total XP": 50},
+            ]
+        )
+
+        chart_rows = select_real_xp_chart_rows(xp_rows, "2026-01-01", "2026-01-05")
+
+        b_rows = chart_rows[chart_rows["Spieler"] == "B"]
+        self.assertEqual(b_rows["Date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-01"])
 
     def test_build_pokedex_category_snapshot_rows_skips_derived_and_locked_cells(self):
         rows = build_pokedex_category_snapshot_rows(

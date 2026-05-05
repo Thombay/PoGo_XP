@@ -182,6 +182,7 @@ UI_PREFERENCES_PATH = config_dir() / "ui_preferences.json"
 UI_PREF_DASHBOARD_WINDOW_DAYS = "dashboard_window_days"
 UI_PREF_DASHBOARD_GAP_LEADER_BY_GROUP = "dashboard_gap_leader_by_group"
 UI_PREF_DATA_INPUT_INACTIVE = "data_input_inactive"
+UI_PREF_DATA_INPUT_INACTIVE_DEFAULTS = "data_input_inactive_defaults"
 ACCOUNT_COLORWAY = [
     "#4FA3FF",
     "#FF9F1C",
@@ -909,6 +910,27 @@ def _carry_forward_xp_chart_rows(xp_df: pd.DataFrame, chart_dates: list[pd.Times
     )
     if out.empty:
         return pd.DataFrame(columns=cols)
+    return out[cols].sort_values(["Date", "Spieler"]).reset_index(drop=True)
+
+
+def select_real_xp_chart_rows(
+    xp_df: pd.DataFrame,
+    visible_start: object,
+    visible_end: object,
+) -> pd.DataFrame:
+    cols = ["Date", "Spieler", "Total XP"]
+    if xp_df.empty or not set(cols).issubset(xp_df.columns):
+        return pd.DataFrame(columns=cols)
+    start_ts = pd.to_datetime(visible_start, errors="coerce")
+    end_ts = pd.to_datetime(visible_end, errors="coerce")
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return pd.DataFrame(columns=cols)
+    out = xp_df.copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Spieler"] = out["Spieler"].astype(str).str.strip()
+    out["Total XP"] = pd.to_numeric(out["Total XP"], errors="coerce")
+    out = out.dropna(subset=cols).copy()
+    out = out[(out["Date"] >= pd.Timestamp(start_ts)) & (out["Date"] <= pd.Timestamp(end_ts))].copy()
     return out[cols].sort_values(["Date", "Spieler"]).reset_index(drop=True)
 
 
@@ -1747,14 +1769,21 @@ def _render_xp_explorer_section_impl(
     if chart_seed_df.empty:
         st.warning("No rows in selected date range after interval filtering.")
         return
-    chart_dates = sorted(
-        pd.Timestamp(dt) for dt in pd.to_datetime(chart_seed_df["Date"], errors="coerce").dropna().unique().tolist()
-    )
-    carry_source_df = df_source[df_source["Date"] <= visible_end].copy()
-    df = _carry_forward_xp_chart_rows(carry_source_df, chart_dates)
+    df = select_real_xp_chart_rows(df_source, visible_start, visible_end)
     if df.empty:
-        st.warning("No rows in selected date range after carry-forward.")
+        st.warning("No rows in selected date range.")
         return
+    chart_dates = sorted(
+        pd.Timestamp(dt) for dt in pd.to_datetime(df["Date"], errors="coerce").dropna().unique().tolist()
+    )
+    latest_date_by_player = df.groupby("Spieler", as_index=False)["Date"].max()
+    latest_dates = sorted(pd.Timestamp(dt).date().isoformat() for dt in latest_date_by_player["Date"].dropna().unique())
+    if len(latest_dates) > 1:
+        lagging = latest_date_by_player.sort_values(["Date", "Spieler"]).head(6)
+        lagging_label = ", ".join(
+            f"{row['Spieler']} ({pd.Timestamp(row['Date']).date().isoformat()})" for _, row in lagging.iterrows()
+        )
+        st.caption(f"XP input dates differ across selected players. Lines stop at real input dates: {lagging_label}")
 
     # Recalculate trend projection defaults whenever the date range/player scope changes.
     trend_scope_sig = "|".join(
@@ -3713,16 +3742,24 @@ def load_input_inactive_marker(
     path: Path = UI_PREFERENCES_PATH,
 ) -> bool:
     prefs = load_ui_preferences(path)
+    input_key = str(input_type).strip().lower()
+    account_key = str(account).strip()
+    if input_key == "xp" and category is None:
+        raw_defaults = prefs.get(UI_PREF_DATA_INPUT_INACTIVE_DEFAULTS)
+        if isinstance(raw_defaults, dict):
+            xp_defaults = raw_defaults.get("xp")
+            if isinstance(xp_defaults, dict) and account_key in xp_defaults:
+                return bool(xp_defaults.get(account_key, False))
+
     raw_root = prefs.get(UI_PREF_DATA_INPUT_INACTIVE)
     if not isinstance(raw_root, dict):
         return False
-    type_scope = raw_root.get(str(input_type).strip().lower())
+    type_scope = raw_root.get(input_key)
     if not isinstance(type_scope, dict):
         return False
     date_scope = type_scope.get(_input_inactive_date_key(row_date))
     if not isinstance(date_scope, dict):
         return False
-    account_key = str(account).strip()
     if category is None:
         return bool(date_scope.get(account_key, False))
     account_scope = date_scope.get(account_key)
@@ -3746,6 +3783,47 @@ def save_input_inactive_marker(
         return
 
     prefs = load_ui_preferences(path)
+    if input_key == "xp" and category is None:
+        raw_defaults = prefs.get(UI_PREF_DATA_INPUT_INACTIVE_DEFAULTS)
+        defaults = dict(raw_defaults) if isinstance(raw_defaults, dict) else {}
+        raw_xp_defaults = defaults.get("xp")
+        xp_defaults = dict(raw_xp_defaults) if isinstance(raw_xp_defaults, dict) else {}
+        if inactive:
+            xp_defaults[account_key] = True
+        else:
+            xp_defaults.pop(account_key, None)
+        if xp_defaults:
+            defaults["xp"] = xp_defaults
+        else:
+            defaults.pop("xp", None)
+        if defaults:
+            prefs[UI_PREF_DATA_INPUT_INACTIVE_DEFAULTS] = defaults
+        else:
+            prefs.pop(UI_PREF_DATA_INPUT_INACTIVE_DEFAULTS, None)
+        raw_root = prefs.get(UI_PREF_DATA_INPUT_INACTIVE)
+        root = dict(raw_root) if isinstance(raw_root, dict) else {}
+        raw_type_scope = root.get(input_key)
+        type_scope = dict(raw_type_scope) if isinstance(raw_type_scope, dict) else {}
+        raw_date_scope = type_scope.get(date_key)
+        date_scope = dict(raw_date_scope) if isinstance(raw_date_scope, dict) else {}
+        date_scope.pop(account_key, None)
+        if date_scope:
+            type_scope[date_key] = date_scope
+        else:
+            type_scope.pop(date_key, None)
+        if type_scope:
+            root[input_key] = type_scope
+        else:
+            root.pop(input_key, None)
+        if root:
+            prefs[UI_PREF_DATA_INPUT_INACTIVE] = root
+        else:
+            prefs.pop(UI_PREF_DATA_INPUT_INACTIVE, None)
+        if prefs == load_ui_preferences(path):
+            return
+        save_ui_preferences(prefs, path)
+        return
+
     raw_root = prefs.get(UI_PREF_DATA_INPUT_INACTIVE)
     root = dict(raw_root) if isinstance(raw_root, dict) else {}
     type_scope = dict(root.get(input_key)) if isinstance(root.get(input_key), dict) else {}
@@ -4654,17 +4732,14 @@ def _build_dashboard_export_payload(
                 (chart_seed_df["Date"] >= visible_start_ts)
                 & (chart_seed_df["Date"] <= visible_end_ts)
             ].copy()
-        xp_explorer_chart_dates = sorted(
-            pd.Timestamp(dt)
-            for dt in pd.to_datetime(chart_seed_df["Date"], errors="coerce").dropna().unique().tolist()
-        )
-        carry_source_df = xp_explorer_df.copy()
-        if visible_end_ts is not None:
-            carry_source_df = carry_source_df[carry_source_df["Date"] <= visible_end_ts].copy()
-        xp_explorer_df = _carry_forward_xp_chart_rows(carry_source_df, xp_explorer_chart_dates)
+        xp_explorer_df = select_real_xp_chart_rows(xp_explorer_df, visible_start_ts, visible_end_ts)
         if xp_explorer_df.empty:
             xp_explorer_df = chart_seed_df.copy() if not chart_seed_df.empty else xp_interval_df.copy()
         xp_explorer_df = xp_explorer_df.sort_values(["Date", "Spieler"]).copy()
+        xp_explorer_chart_dates = sorted(
+            pd.Timestamp(dt)
+            for dt in pd.to_datetime(xp_explorer_df["Date"], errors="coerce").dropna().unique().tolist()
+        )
 
         gain_over_time_df = build_xp_gain_over_time_df(xp_explorer_df)
         fig_xp_gain_over_time = px.line(
@@ -6868,7 +6943,7 @@ if page == "Data Input":
                         if not bool(draft.get("valid", False)):
                             final_errors.extend([f"{acc}: {err}" for err in draft.get("errors", [])])
                             continue
-                        should_write = bool(draft.get("changed", False)) or bool(draft.get("inactive", False))
+                        should_write = bool(draft.get("changed", False)) or bool(draft.get("inactive", False)) or xp_locked
                         if not should_write:
                             skipped_unchanged.append(acc)
                             continue
@@ -6882,7 +6957,7 @@ if page == "Data Input":
                             float(draft.get("distance_walked", row.get("distance_last", 0.0))),
                             float(draft.get("pokemon_caught", row.get("caught_last", 0.0))),
                         )
-                    elif inactive_saved:
+                    elif inactive_saved or xp_locked:
                         xp_rows, activity_rows, activity_medal_rows = build_xp_activity_snapshot_rows(
                             xp_date,
                             acc,
@@ -7404,7 +7479,7 @@ if page == "Data Input":
             header_cols[0].markdown("**Type**")
             for idx, region in enumerate(POKEDEX_REGIONS, start=1):
                 header_cols[idx].markdown(f"**{POKEDEX_REGION_LABELS.get(region, region)}**")
-            header_cols[-1].markdown("**Inactive / Status**")
+            header_cols[-1].markdown("**Status**")
 
             pokedex_existing_for_validation = (
                 pokedex_df[["date", "account", "entry_type", "region", "value"]].copy()
@@ -7414,16 +7489,7 @@ if page == "Data Input":
             for entry_type in visible_pokedex_entry_types:
                 category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                 category_status_key = f"pokedex_draft_status_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
-                category_inactive_key = f"pokedex_inactive_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                 category_refresh_key = f"pokedex_draft_refresh_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
-                if category_inactive_key not in st.session_state:
-                    st.session_state[category_inactive_key] = load_input_inactive_marker(
-                        "pokedex",
-                        pokedex_date,
-                        pokedex_account,
-                        entry_type,
-                    )
-                category_inactive_current = bool(st.session_state.get(category_inactive_key, False))
                 with pokedex_input_col.container():
                     row_cols = st.columns(col_widths, gap="small")
                     row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
@@ -7474,7 +7540,6 @@ if page == "Data Input":
                             key=input_key,
                             label_visibility="collapsed",
                             help=" | ".join(help_parts) if help_parts else None,
-                            disabled=category_inactive_current,
                             on_change=mark_session_flag if region == last_editable_region else None,
                             args=(category_refresh_key,) if region == last_editable_region else None,
                         )
@@ -7488,13 +7553,6 @@ if page == "Data Input":
                             }
                         )
 
-                    inactive_value = row_cols[-1].checkbox(
-                        "Inactive",
-                        key=category_inactive_key,
-                        help="Document unchanged values for this category on final save.",
-                        on_change=mark_session_flag,
-                        args=(category_refresh_key,),
-                    )
                     if bool(st.session_state.pop(category_refresh_key, False)):
                         rows_to_write: list[dict[str, object]] = []
                         errors: list[str] = []
@@ -7504,7 +7562,7 @@ if page == "Data Input":
                             row_entry_type = str(r.get("entry_type", "")).strip().lower()
                             region = str(r.get("region", "")).strip().lower()
                             last_value = pd.to_numeric(r.get("last_value"), errors="coerce")
-                            raw_value = last_value if inactive_value else r.get("value")
+                            raw_value = r.get("value")
                             value = _parse_float_loose_value(raw_value)
                             max_value = r.get("max_value")
                             region_label = POKEDEX_REGION_LABELS.get(region, region)
@@ -7556,24 +7614,21 @@ if page == "Data Input":
                             "account": pokedex_account,
                             "entry_type": entry_type,
                             "rows": rows_to_write,
-                            "inactive": bool(inactive_value),
+                            "inactive": False,
                             "changed": bool(category_changed),
                             "valid": not bool(errors),
                             "errors": errors,
                         }
                         st.session_state[category_status_key] = {
                             "valid": not bool(errors),
-                            "inactive": bool(inactive_value),
+                            "inactive": False,
                             "changed": bool(category_changed),
                             "errors": errors,
                         }
-                        save_input_inactive_marker("pokedex", pokedex_date, pokedex_account, bool(inactive_value), entry_type)
                         if errors:
                             pass
                         else:
-                            if inactive_value:
-                                pass
-                            elif category_changed:
+                            if category_changed:
                                 pass
                             else:
                                 pass
@@ -7581,8 +7636,6 @@ if page == "Data Input":
                     if isinstance(current_status, dict):
                         if not bool(current_status.get("valid", False)):
                             row_cols[-1].caption("Draft error")
-                        elif bool(current_status.get("inactive", False)):
-                            row_cols[-1].caption("Inactive draft")
                         elif bool(current_status.get("changed", False)):
                             row_cols[-1].caption("Draft OK")
                         else:
@@ -7595,7 +7648,6 @@ if page == "Data Input":
                 for entry_type in visible_pokedex_entry_types:
                     category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                     draft = st.session_state.get(category_draft_key)
-                    inactive_saved = load_input_inactive_marker("pokedex", pokedex_date, pokedex_account, entry_type)
                     if isinstance(draft, dict):
                         if not bool(draft.get("valid", False)):
                             final_errors.extend(
@@ -7610,20 +7662,6 @@ if page == "Data Input":
                             skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
                             continue
                         rows_to_write.extend(list(draft.get("rows", [])))
-                    elif inactive_saved:
-                        latest_region_values = {
-                            region: latest_vals.get((entry_type, region), 0.0)
-                            for region in POKEDEX_REGIONS
-                        }
-                        rows_to_write.extend(
-                            build_pokedex_category_snapshot_rows(
-                                pokedex_date,
-                                pokedex_account,
-                                entry_type,
-                                latest_region_values,
-                                entry_config=pokedex_entry_config,
-                            )
-                        )
                     else:
                         skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
                 if final_errors:
