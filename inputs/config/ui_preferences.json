@@ -1,7 +1,7 @@
 {
   "dashboard_gap_leader_by_group": {
     "global:All": "Tastef",
-    "global:Bekannte": "AnSaCruiser",
+    "global:Bekannte": "Tastef",
     "global:Family": "Thombay",
     "global:Papiermuehlgasse": "Tastef",
     "global:Work": "86Berni"
@@ -18,7 +18,6 @@
   },
   "data_input_inactive_defaults": {
     "xp": {
-      "13TurboDoudl12": true,
       "Babsi": true,
       "Gloria": true,
       "LuanY3lloW2023": true
