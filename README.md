@@ -170,7 +170,8 @@ Dashboard pages:
     - availability rules live in `inputs/config/pokedex_entry_config.csv` with columns `entry_type,region,max_value,locked,notes`
     - `overall` is derived as the sum of all regions for each entry type and is not saved manually
     - locked cells are shown read-only and configured max values are validated on save
-    - `pokemon` region counts are displayed from existing region medal rows and are not duplicated in Pokédex input
+    - `pokemon` region counts are saved as Pokédex entry rows; matching region medal values are shown only as references
+    - historical `pokemon` region rows before the separation migration are seeded from existing region medal snapshots
   - Pokemon catalog reference lives in `inputs/reference/pokemon_catalog.csv`
     - generated for National Dex 1-1025 from PokéAPI plus Pokemon GO availability from PokeMiners/Game Master where available
     - editable columns are preserved by `python tools/update_pokemon_catalog.py`: `available_in_pogo`, `extra_info`

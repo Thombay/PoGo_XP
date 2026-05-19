@@ -3051,6 +3051,101 @@ def with_medal_derived_pokedex_rows(pokedex_df: pd.DataFrame, source_medal_df: p
     return with_derived_pokedex_overall_rows(combined)
 
 
+def with_pokedex_entry_display_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
+    return with_derived_pokedex_overall_rows(pokedex_df)
+
+
+def latest_regional_pokedex_medal_references(
+    source_medal_df: pd.DataFrame,
+    account: str,
+    as_of_date: object,
+) -> dict[str, float]:
+    if source_medal_df.empty:
+        return {}
+    as_of = pd.to_datetime(as_of_date, errors="coerce")
+    if pd.isna(as_of):
+        return {}
+
+    refs = source_medal_df[["date", "account", "medal_id", "value"]].copy()
+    refs["date"] = pd.to_datetime(refs["date"], errors="coerce")
+    refs["account"] = refs["account"].astype(str).str.strip()
+    refs["region"] = refs["medal_id"].astype(str).str.strip().str.lower()
+    refs["value"] = pd.to_numeric(refs["value"], errors="coerce")
+    refs = refs[
+        (refs["account"] == str(account).strip())
+        & (refs["date"] <= pd.Timestamp(as_of))
+        & refs["region"].isin(POKEDEX_MEDAL_REGION_IDS)
+    ].copy()
+    refs = refs.dropna(subset=["date", "region", "value"]).sort_values(["date", "region"])
+    if refs.empty:
+        return {}
+
+    refs = refs.drop_duplicates(subset=["region"], keep="last")
+    return {str(row["region"]): float(row["value"]) for _, row in refs.iterrows()}
+
+
+def seed_pokedex_pokemon_rows_from_medals(path: Path, source_medal_df: pd.DataFrame) -> int:
+    cols = ["date", "account", "entry_type", "region", "value"]
+    if source_medal_df.empty:
+        return 0
+
+    existing = load_pokedex_entry_snapshots(
+        path,
+        account_order=ACCOUNT_ORDER,
+        valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+        valid_regions=set(POKEDEX_REGIONS),
+    )
+    derived = source_medal_df[["date", "account", "medal_id", "value"]].copy()
+    derived["date"] = pd.to_datetime(derived["date"], errors="coerce")
+    derived["account"] = derived["account"].astype(str).str.strip()
+    derived["region"] = derived["medal_id"].astype(str).str.strip().str.lower()
+    derived["value"] = pd.to_numeric(derived["value"], errors="coerce")
+    derived = derived[derived["region"].isin(POKEDEX_MEDAL_REGION_IDS)].copy()
+    derived = derived.dropna(subset=["date", "account", "region", "value"]).copy()
+    if derived.empty:
+        return 0
+
+    derived["entry_type"] = "pokemon"
+    derived = derived[cols].drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+    existing_keys = set()
+    if not existing.empty:
+        existing_keys = {
+            (
+                pd.Timestamp(row["date"]).date().isoformat(),
+                str(row["account"]).strip(),
+                str(row["entry_type"]).strip().lower(),
+                str(row["region"]).strip().lower(),
+            )
+            for _, row in existing.iterrows()
+        }
+    derived["_key"] = derived.apply(
+        lambda row: (
+            pd.Timestamp(row["date"]).date().isoformat(),
+            str(row["account"]).strip(),
+            str(row["entry_type"]).strip().lower(),
+            str(row["region"]).strip().lower(),
+        ),
+        axis=1,
+    )
+    rows_to_add = derived[~derived["_key"].isin(existing_keys)].drop(columns=["_key"]).copy()
+    if rows_to_add.empty:
+        return 0
+
+    combined = rows_to_add if existing.empty else pd.concat([existing[cols], rows_to_add], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
+    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
+    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
+    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
+    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
+    combined = combined.sort_values(
+        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
+    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce").dt.date.astype(str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    combined[cols].to_csv(path, index=False, encoding="utf-8-sig")
+    return int(len(rows_to_add))
+
+
 def with_derived_pokedex_overall_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
     cols = ["date", "account", "entry_type", "region", "value"]
     base = pokedex_df[cols].copy() if not pokedex_df.empty else pd.DataFrame(columns=cols)
@@ -3177,7 +3272,6 @@ def build_pokedex_category_snapshot_rows(
         if (
             entry_type_key not in POKEDEX_ENTRY_TYPES
             or region not in POKEDEX_REGIONS
-            or _is_medal_derived_pokedex_cell(entry_type_key, region)
             or _is_overall_pokedex_cell(region)
             or bool(config.get((entry_type_key, region), {}).get("locked", False))
         ):
@@ -3291,8 +3385,7 @@ def upsert_pokedex_entry_rows(
     new_df = new_df[new_df["entry_type"].isin(POKEDEX_ENTRY_TYPES) & new_df["region"].isin(POKEDEX_REGIONS)].copy()
     new_df = new_df[
         ~new_df.apply(
-            lambda r: _is_medal_derived_pokedex_cell(r["entry_type"], r["region"])
-            or _is_overall_pokedex_cell(r["region"]),
+            lambda r: _is_overall_pokedex_cell(r["region"]),
             axis=1,
         )
     ].copy()
@@ -5766,7 +5859,7 @@ pokedex_entry_config_df = load_pokedex_entry_config(
     valid_regions=set(POKEDEX_REGIONS),
 )
 pokedex_entry_config = pokedex_entry_config_map(pokedex_entry_config_df)
-display_pokedex_df = with_medal_derived_pokedex_rows(pokedex_df, medal_df)
+display_pokedex_df = with_pokedex_entry_display_rows(pokedex_df)
 pokemon_catalog_df = load_pokemon_catalog(pokemon_catalog_path())
 all_accounts = account_options_from_data(xp_input_df, medal_df, display_pokedex_df)
 data_input_accounts_df = load_data_input_accounts(data_input_accounts_path(), valid_input_types=DATA_INPUT_TYPES)
@@ -7386,7 +7479,7 @@ if page == "Data Input":
                     st.rerun()
 
     with tab_pokedex:
-        st.caption("Enter counts by category and region. Pokemon region counts are read from medal snapshots.")
+        st.caption("Enter counts by category and region. Pokemon region medal values are shown as references only.")
         st.caption("Available Pokédex accounts are controlled by `inputs/config/data_input_accounts.csv`.")
         pokedex_date = st.date_input("Pokédex Date", value=date.today(), key="pokedex_entry_date")
         pokedex_accounts = list(pokedex_input_accounts) if pokedex_input_accounts else list(ACCOUNT_ORDER)
@@ -7402,7 +7495,6 @@ if page == "Data Input":
             for entry_type in POKEDEX_ENTRY_TYPES
             for region in POKEDEX_REGIONS
             if not _is_overall_pokedex_cell(region)
-            and not _is_medal_derived_pokedex_cell(entry_type, region)
             and not _is_locked_pokedex_cell(entry_type, region)
         ]
         expected_pokedex_count = len(editable_cells)
@@ -7479,6 +7571,8 @@ if page == "Data Input":
                     return str(int(num_float))
                 return f"{num_float:.2f}".rstrip("0").rstrip(".")
 
+            medal_reference_values = latest_regional_pokedex_medal_references(medal_df, pokedex_account, pokedex_date)
+
             complete_pokedex_entry_types_on_date: set[str] = set()
             if not pokedex_df.empty:
                 account_day_pokedex = pokedex_df[
@@ -7514,7 +7608,7 @@ if page == "Data Input":
 
             st.markdown(f"Full Pokédex entries snapshot for `{pokedex_account}`")
             st.caption(
-                "Grey Pokemon region values are derived from medal inputs. Locked cells and max values come from "
+                "Pokemon region medal values are shown as references in input help. Locked cells and max values come from "
                 "`inputs/config/pokedex_entry_config.csv`."
             )
 
@@ -7543,20 +7637,18 @@ if page == "Data Input":
                         region
                         for region in POKEDEX_REGIONS
                         if not _is_overall_pokedex_cell(region)
-                        and not _is_medal_derived_pokedex_cell(entry_type, region)
                         and not bool(_pokedex_cell_config(entry_type, region).get("locked", False))
                     ]
                     last_editable_region = editable_regions_for_entry[-1] if editable_regions_for_entry else None
                     for idx, region in enumerate(POKEDEX_REGIONS, start=1):
                         last_value = latest_vals.get((entry_type, region), 0.0)
                         is_overall = _is_overall_pokedex_cell(region)
-                        is_derived = _is_medal_derived_pokedex_cell(entry_type, region)
                         cell_config = _pokedex_cell_config(entry_type, region)
                         is_locked = bool(cell_config.get("locked", False))
                         max_value = cell_config.get("max_value")
                         config_notes = str(cell_config.get("notes", "")).strip()
                         value_default = _fmt_pokedex_value(last_value)
-                        if is_overall or is_derived:
+                        if is_overall:
                             row_cols[idx].markdown(
                                 f"<span style='color:#9ca3af'>{escape(value_default)}</span>",
                                 unsafe_allow_html=True,
@@ -7578,6 +7670,8 @@ if page == "Data Input":
                         help_parts = []
                         if max_value is not None:
                             help_parts.append(f"Configured max: {_fmt_pokedex_value(max_value)}")
+                        if entry_type == "pokemon" and region in medal_reference_values:
+                            help_parts.append(f"Medal reference: {_fmt_pokedex_value(medal_reference_values[region])}")
                         if config_notes:
                             help_parts.append(config_notes)
                         value_input = row_cols[idx].text_input(

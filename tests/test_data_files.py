@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from webapp.data_files import (
     load_medal_goals,
@@ -76,22 +76,31 @@ class DataFilesTest(unittest.TestCase):
                         "region": "Unidentified",
                         "value": "2",
                     },
+                    {
+                        "date": "2026-04-30",
+                        "account": "Thomzay",
+                        "entry_type": "Pokemon",
+                        "region": "Paldea",
+                        "value": "103",
+                    },
                 ]
             ).to_csv(path, index=False, encoding="utf-8-sig")
 
             snapshots = load_pokedex_entry_snapshots(
                 path,
                 account_order=["Thombay"],
-                valid_entry_types={"shiny", "lucky"},
-                valid_regions={"kanto", "unidentified"},
+                valid_entry_types={"shiny", "lucky", "pokemon"},
+                valid_regions={"kanto", "unidentified", "paldea"},
             )
 
-        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(len(snapshots), 3)
         self.assertEqual(snapshots.iloc[0]["account"], "Thombay")
         self.assertEqual(snapshots.iloc[0]["entry_type"], "shiny")
         self.assertEqual(snapshots.iloc[0]["region"], "kanto")
         self.assertEqual(float(snapshots.iloc[0]["value"]), 12.0)
         self.assertEqual(snapshots.iloc[1]["region"], "unidentified")
+        self.assertEqual(snapshots.iloc[2]["entry_type"], "pokemon")
+        self.assertEqual(snapshots.iloc[2]["region"], "paldea")
 
     def test_load_pokedex_entry_config_normalizes_locked_and_max(self):
         with tempfile.TemporaryDirectory() as tmp:

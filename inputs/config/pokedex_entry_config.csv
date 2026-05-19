@@ -1,15 +1,15 @@
 entry_type,region,max_value,locked,notes
 pokemon,overall,,true,Derived as the sum of all Pokemon regions.
-pokemon,kanto,151,false,Derived from Kanto medal input.
-pokemon,johto,100,false,Derived from Johto medal input.
-pokemon,hoenn,135,false,Derived from Hoenn medal input.
-pokemon,sinnoh,107,false,Derived from Sinnoh medal input.
-pokemon,unova,156,false,Derived from Unova medal input.
-pokemon,kalos,72,false,Derived from Kalos medal input.
-pokemon,alola,86,false,Derived from Alola medal input.
-pokemon,galar,89,false,Derived from Galar medal input.
-pokemon,hisui,7,false,Derived from Hisui medal input.
-pokemon,paldea,120,false,Derived from Paldea medal input.
+pokemon,kanto,151,false,Saved from Pokédex input; Kanto medal value is reference only.
+pokemon,johto,100,false,Saved from Pokédex input; Johto medal value is reference only.
+pokemon,hoenn,135,false,Saved from Pokédex input; Hoenn medal value is reference only.
+pokemon,sinnoh,107,false,Saved from Pokédex input; Sinnoh medal value is reference only.
+pokemon,unova,156,false,Saved from Pokédex input; Unova medal value is reference only.
+pokemon,kalos,72,false,Saved from Pokédex input; Kalos medal value is reference only.
+pokemon,alola,86,false,Saved from Pokédex input; Alola medal value is reference only.
+pokemon,galar,89,false,Saved from Pokédex input; Galar medal value is reference only.
+pokemon,hisui,7,false,Saved from Pokédex input; Hisui medal value is reference only.
+pokemon,paldea,120,false,Saved from Pokédex input; Paldea medal value is reference only.
 pokemon,unidentified,2,false,
 shiny,overall,,true,Derived as the sum of all Shiny regions.
 shiny,kanto,,false,

@@ -10,12 +10,14 @@ from webapp.app import (
     accounts_for_data_input,
     build_pokedex_category_snapshot_rows,
     build_xp_activity_snapshot_rows,
+    latest_regional_pokedex_medal_references,
     load_input_inactive_marker,
     save_input_inactive_marker,
+    seed_pokedex_pokemon_rows_from_medals,
     select_real_xp_chart_rows,
     upsert_pokedex_entry_rows,
     with_derived_pokedex_overall_rows,
-    with_medal_derived_pokedex_rows,
+    with_pokedex_entry_display_rows,
 )
 from webapp.data_files import load_pokedex_entry_snapshots
 
@@ -100,6 +102,24 @@ class PokedexEntriesTest(unittest.TestCase):
 
         self.assertEqual([(row["region"], row["value"]) for row in rows], [("kanto", 10.0), ("johto", 5.0)])
 
+    def test_build_pokedex_category_snapshot_rows_includes_regional_pokemon_cells(self):
+        rows = build_pokedex_category_snapshot_rows(
+            "2026-01-01",
+            "Thombay",
+            "pokemon",
+            {
+                "overall": 999,
+                "kanto": 151,
+                "johto": 100,
+                "unidentified": 2,
+            },
+        )
+
+        self.assertEqual(
+            [(row["region"], row["value"]) for row in rows],
+            [("kanto", 151.0), ("johto", 100.0), ("unidentified", 2.0)],
+        )
+
     def test_accounts_for_data_input_uses_enabled_config_rows(self):
         config = pd.DataFrame(
             [
@@ -154,7 +174,7 @@ class PokedexEntriesTest(unittest.TestCase):
                     ],
                 )
 
-    def test_upsert_pokedex_entry_rows_skips_medal_derived_region_cells(self):
+    def test_upsert_pokedex_entry_rows_saves_regional_pokemon_cells(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pokedex_entry_snapshots.csv"
             written = upsert_pokedex_entry_rows(
@@ -172,8 +192,10 @@ class PokedexEntriesTest(unittest.TestCase):
 
             snapshots = load_pokedex_entry_snapshots(path)
 
-        self.assertEqual(written, 0)
-        self.assertTrue(snapshots.empty)
+        self.assertEqual(written, 1)
+        self.assertEqual(snapshots.iloc[0]["entry_type"], "pokemon")
+        self.assertEqual(snapshots.iloc[0]["region"], "kanto")
+        self.assertEqual(float(snapshots.iloc[0]["value"]), 151.0)
 
     def test_upsert_pokedex_entry_rows_skips_manual_overall_cells(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,27 +254,128 @@ class PokedexEntriesTest(unittest.TestCase):
                     entry_config={("mega", "kalos"): {"locked": False, "max_value": 2, "notes": ""}},
                 )
 
-    def test_medal_region_rows_are_available_as_pokedex_pokemon_counts(self):
-        pokedex = pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"])
+    def test_pokedex_entry_display_rows_use_saved_pokedex_values(self):
+        pokedex = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "kanto",
+                    "value": 150,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "johto",
+                    "value": 100,
+                },
+            ]
+        )
+
+        combined = with_pokedex_entry_display_rows(pokedex)
+
+        values = {
+            str(row["region"]): float(row["value"])
+            for _, row in combined[combined["entry_type"] == "pokemon"].iterrows()
+        }
+        self.assertEqual(values, {"overall": 250.0, "kanto": 150.0, "johto": 100.0})
+
+    def test_latest_regional_pokedex_medal_references_uses_selected_date(self):
         medals = pd.DataFrame(
             [
                 {
                     "date": pd.Timestamp("2026-01-01"),
                     "account": "Thombay",
                     "medal_id": "kanto",
+                    "value": 150,
+                },
+                {
+                    "date": pd.Timestamp("2026-02-01"),
+                    "account": "Thombay",
+                    "medal_id": "kanto",
                     "value": 151,
-                }
+                },
+                {
+                    "date": pd.Timestamp("2026-01-15"),
+                    "account": "Thombay",
+                    "medal_id": "johto",
+                    "value": 99,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-15"),
+                    "account": "Cerius",
+                    "medal_id": "kanto",
+                    "value": 140,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-15"),
+                    "account": "Thombay",
+                    "medal_id": "collector",
+                    "value": 50000,
+                },
             ]
         )
 
-        combined = with_medal_derived_pokedex_rows(pokedex, medals)
+        refs = latest_regional_pokedex_medal_references(medals, "Thombay", "2026-01-20")
 
-        self.assertEqual(len(combined), 2)
-        self.assertEqual(combined.iloc[0]["entry_type"], "pokemon")
-        self.assertEqual(combined.iloc[0]["region"], "overall")
-        self.assertEqual(float(combined.iloc[0]["value"]), 151.0)
-        self.assertEqual(combined.iloc[1]["region"], "kanto")
-        self.assertEqual(float(combined.iloc[1]["value"]), 151.0)
+        self.assertEqual(refs, {"kanto": 150.0, "johto": 99.0})
+
+    def test_seed_pokedex_pokemon_rows_from_medals_fills_missing_rows_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pokedex_entry_snapshots.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "date": "2026-01-01",
+                        "account": "Thombay",
+                        "entry_type": "pokemon",
+                        "region": "kanto",
+                        "value": 150,
+                    },
+                    {
+                        "date": "2026-01-01",
+                        "account": "Thombay",
+                        "entry_type": "pokemon",
+                        "region": "unidentified",
+                        "value": 2,
+                    },
+                ]
+            ).to_csv(path, index=False, encoding="utf-8-sig")
+            medals = pd.DataFrame(
+                [
+                    {
+                        "date": pd.Timestamp("2026-01-01"),
+                        "account": "Thombay",
+                        "medal_id": "kanto",
+                        "value": 151,
+                    },
+                    {
+                        "date": pd.Timestamp("2026-01-01"),
+                        "account": "Thombay",
+                        "medal_id": "johto",
+                        "value": 100,
+                    },
+                    {
+                        "date": pd.Timestamp("2026-01-01"),
+                        "account": "Thombay",
+                        "medal_id": "collector",
+                        "value": 50000,
+                    },
+                ]
+            )
+
+            written = seed_pokedex_pokemon_rows_from_medals(path, medals)
+            snapshots = load_pokedex_entry_snapshots(path)
+
+        self.assertEqual(written, 1)
+        pokemon_rows = snapshots[snapshots["entry_type"] == "pokemon"].copy()
+        values = {
+            str(row["region"]): float(row["value"])
+            for _, row in pokemon_rows.iterrows()
+        }
+        self.assertEqual(values, {"kanto": 150.0, "johto": 100.0, "unidentified": 2.0})
 
     def test_overall_rows_are_derived_from_region_sums(self):
         pokedex = pd.DataFrame(
