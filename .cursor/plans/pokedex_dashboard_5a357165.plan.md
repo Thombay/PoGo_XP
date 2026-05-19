@@ -6,7 +6,7 @@ todos:
     content: Add a new Pokédex Dashboard page and wire it into the top page selector.
     status: pending
   - id: pokedex-dashboard-data
-    content: Build helper logic for latest values, overall trends, and regional breakdowns from `display_pokedex_df`.
+    content: Build helper logic for latest values, overall trends, and regional breakdowns from saved Pokédex entry rows plus derived `overall` rows.
     status: pending
   - id: pokedex-dashboard-ui
     content: Render metric cards, account comparison chart, trend chart, region breakdown chart, and detail table.
@@ -21,10 +21,9 @@ isProject: false
 
 ## Dashboard Shape
 - Add a new page entry, `Pokédex Dashboard`, to [`webapp/app.py`](webapp/app.py), near the existing `Dashboard Global`, `Dashboard Personal`, and `Medal Explorer` pages.
-- Use the already prepared `display_pokedex_df`, which includes:
-  - manual Pokédex entry snapshots from [`inputs/data/pokedex_entry_snapshots.csv`](inputs/data/pokedex_entry_snapshots.csv)
-  - medal-derived Pokemon region counts via `with_medal_derived_pokedex_rows(...)`
-  - derived `overall` rows via `with_derived_pokedex_overall_rows(...)`
+- Build dashboard data from saved Pokédex entry snapshots in [`inputs/data/pokedex_entry_snapshots.csv`](inputs/data/pokedex_entry_snapshots.csv), plus derived `overall` rows via `with_derived_pokedex_overall_rows(...)`.
+- Do not use medal-derived regional `pokemon` rows as main dashboard values. Regional medal values may be shown only as optional reference data after `.cursor/plans/separate_pokedex_medal_saves.plan.md` is implemented.
+- Treat `.cursor/plans/separate_pokedex_medal_saves.plan.md` as a prerequisite for reliable regional `pokemon` dashboard history, because it seeds historical `pokemon` rows into the Pokédex entry snapshot CSV.
 - Keep this dashboard read-only. No new data files are needed.
 
 ## User Controls
@@ -57,9 +56,7 @@ isProject: false
 ```mermaid
 flowchart TD
     snapshots["pokedex_entry_snapshots.csv"] --> loader["load_pokedex_entry_snapshots"]
-    medals["medal_snapshots.csv"] --> derivedPokemon["with_medal_derived_pokedex_rows"]
-    loader --> derivedPokemon
-    derivedPokemon --> derivedOverall["with_derived_pokedex_overall_rows"]
+    loader --> derivedOverall["with_derived_pokedex_overall_rows"]
     derivedOverall --> dashboard["Pokédex Dashboard"]
     dashboard --> metrics["Metric Cards"]
     dashboard --> charts["Trend And Breakdown Charts"]
@@ -69,9 +66,10 @@ flowchart TD
 ## Implementation Notes
 - Add small helper functions in [`webapp/app.py`](webapp/app.py) unless the dashboard grows large enough to justify a new view module under [`webapp/views/`](webapp/views/).
 - Prefer Plotly figures rendered through `render_plotly_chart(...)` for consistency with the existing dashboards.
-- Filter only after `display_pokedex_df` is built, so derived rows are available to the dashboard.
+- Filter only after saved Pokédex entry rows have derived `overall` rows added, so all dashboard views use the same canonical Pokédex values.
 - For latest values, sort by `date` and use `groupby(["account", "entry_type", "region"]).tail(1)`.
 - Treat empty data gracefully with `st.info(...)` and avoid crashes when there are no rows for a selected account/date/category.
+- If medal reference values are added later, look them up separately by account/date/region and label them clearly as medal references, not Pokédex entry counts.
 
 ## Verification
 - Add focused tests for any new pure helper functions, especially latest-value shaping and regional breakdown shaping.
