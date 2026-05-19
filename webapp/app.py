@@ -3208,6 +3208,16 @@ def _parse_float_loose_value(raw: object) -> float | None:
     return None if pd.isna(val) else float(val)
 
 
+def _format_pokedex_value(value: object) -> str:
+    num = pd.to_numeric(value, errors="coerce")
+    if pd.isna(num):
+        return "0"
+    num_float = float(num)
+    if num_float.is_integer():
+        return str(int(num_float))
+    return f"{num_float:.2f}".rstrip("0").rstrip(".")
+
+
 def pokedex_entry_config_map(config_df: pd.DataFrame) -> dict[tuple[str, str], dict[str, object]]:
     if config_df.empty:
         return {}
@@ -3289,6 +3299,86 @@ def build_pokedex_category_snapshot_rows(
             }
         )
     return rows
+
+
+def build_pokedex_category_draft(
+    row_date: object,
+    account: str,
+    entry_type: str,
+    row_inputs: list[dict[str, object]],
+    existing_df: pd.DataFrame,
+    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
+) -> dict[str, object]:
+    entry_type_key = str(entry_type).strip().lower()
+    account_name = str(account).strip()
+    errors: list[str] = []
+    region_values: dict[str, object] = {}
+    category_changed = False
+
+    for r in row_inputs:
+        row_entry_type = str(r.get("entry_type", "")).strip().lower()
+        region = str(r.get("region", "")).strip().lower()
+        last_value = pd.to_numeric(r.get("last_value"), errors="coerce")
+        raw_value = r.get("value")
+        value = _parse_float_loose_value(raw_value)
+        max_value = r.get("max_value")
+        region_label = POKEDEX_REGION_LABELS.get(region, region)
+        if row_entry_type not in POKEDEX_ENTRY_TYPES:
+            errors.append(f"Invalid Pokédex entry type: {row_entry_type}")
+            continue
+        if region not in POKEDEX_REGIONS:
+            errors.append(f"Invalid Pokédex region: {region}")
+            continue
+        if value is None:
+            errors.append(f"{region_label} must be a number.")
+            continue
+        if float(value) < 0:
+            errors.append(f"{region_label} must be >= 0.")
+            continue
+        if max_value is not None and float(value) > float(max_value):
+            errors.append(f"{region_label} must be <= {_format_pokedex_value(max_value)}.")
+            continue
+        if pd.notna(last_value) and float(value) != float(last_value):
+            category_changed = True
+        region_values[region] = float(value)
+        row_df = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp(row_date),
+                    "account": account_name,
+                    "entry_type": row_entry_type,
+                    "region": region,
+                    "value": float(value),
+                }
+            ]
+        )
+        row_mono_errors = _validate_pokedex_entry_rows_non_decreasing(
+            existing_df,
+            row_df,
+        )
+        if row_mono_errors:
+            errors.append(row_mono_errors[0])
+            continue
+
+    rows_to_write: list[dict[str, object]] = []
+    if not errors:
+        rows_to_write = build_pokedex_category_snapshot_rows(
+            row_date,
+            account_name,
+            entry_type_key,
+            region_values,
+            entry_config=entry_config,
+        )
+
+    return {
+        "account": account_name,
+        "entry_type": entry_type_key,
+        "rows": rows_to_write,
+        "inactive": False,
+        "changed": bool(category_changed),
+        "valid": not bool(errors),
+        "errors": errors,
+    }
 
 
 def _validate_pokedex_entry_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
@@ -7562,15 +7652,6 @@ if page == "Data Input":
                     for _, r in latest_pokedex_rows.iterrows()
                 }
 
-            def _fmt_pokedex_value(value: object) -> str:
-                num = pd.to_numeric(value, errors="coerce")
-                if pd.isna(num):
-                    return "0"
-                num_float = float(num)
-                if num_float.is_integer():
-                    return str(int(num_float))
-                return f"{num_float:.2f}".rstrip("0").rstrip(".")
-
             medal_reference_values = latest_regional_pokedex_medal_references(medal_df, pokedex_account, pokedex_date)
 
             complete_pokedex_entry_types_on_date: set[str] = set()
@@ -7628,18 +7709,10 @@ if page == "Data Input":
             for entry_type in visible_pokedex_entry_types:
                 category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                 category_status_key = f"pokedex_draft_status_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
-                category_refresh_key = f"pokedex_draft_refresh_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                 with pokedex_input_col.container():
                     row_cols = st.columns(col_widths, gap="small")
                     row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
                     row_inputs: list[dict[str, object]] = []
-                    editable_regions_for_entry = [
-                        region
-                        for region in POKEDEX_REGIONS
-                        if not _is_overall_pokedex_cell(region)
-                        and not bool(_pokedex_cell_config(entry_type, region).get("locked", False))
-                    ]
-                    last_editable_region = editable_regions_for_entry[-1] if editable_regions_for_entry else None
                     for idx, region in enumerate(POKEDEX_REGIONS, start=1):
                         last_value = latest_vals.get((entry_type, region), 0.0)
                         is_overall = _is_overall_pokedex_cell(region)
@@ -7647,7 +7720,7 @@ if page == "Data Input":
                         is_locked = bool(cell_config.get("locked", False))
                         max_value = cell_config.get("max_value")
                         config_notes = str(cell_config.get("notes", "")).strip()
-                        value_default = _fmt_pokedex_value(last_value)
+                        value_default = _format_pokedex_value(last_value)
                         if is_overall:
                             row_cols[idx].markdown(
                                 f"<span style='color:#9ca3af'>{escape(value_default)}</span>",
@@ -7656,7 +7729,7 @@ if page == "Data Input":
                             continue
                         if is_locked:
                             locked_value = max_value if max_value is not None else last_value
-                            locked_label = _fmt_pokedex_value(locked_value)
+                            locked_label = _format_pokedex_value(locked_value)
                             note = f" title='{escape(config_notes)}'" if config_notes else ""
                             row_cols[idx].markdown(
                                 f"<span style='color:#9ca3af'{note}>{escape(locked_label)}</span>",
@@ -7669,9 +7742,9 @@ if page == "Data Input":
                             st.session_state[input_key] = value_default
                         help_parts = []
                         if max_value is not None:
-                            help_parts.append(f"Configured max: {_fmt_pokedex_value(max_value)}")
+                            help_parts.append(f"Configured max: {_format_pokedex_value(max_value)}")
                         if entry_type == "pokemon" and region in medal_reference_values:
-                            help_parts.append(f"Medal reference: {_fmt_pokedex_value(medal_reference_values[region])}")
+                            help_parts.append(f"Medal reference: {_format_pokedex_value(medal_reference_values[region])}")
                         if config_notes:
                             help_parts.append(config_notes)
                         value_input = row_cols[idx].text_input(
@@ -7679,8 +7752,6 @@ if page == "Data Input":
                             key=input_key,
                             label_visibility="collapsed",
                             help=" | ".join(help_parts) if help_parts else None,
-                            on_change=mark_session_flag if region == last_editable_region else None,
-                            args=(category_refresh_key,) if region == last_editable_region else None,
                         )
                         row_inputs.append(
                             {
@@ -7692,85 +7763,21 @@ if page == "Data Input":
                             }
                         )
 
-                    if bool(st.session_state.pop(category_refresh_key, False)):
-                        rows_to_write: list[dict[str, object]] = []
-                        errors: list[str] = []
-                        region_values: dict[str, object] = {}
-                        category_changed = False
-                        for r in row_inputs:
-                            row_entry_type = str(r.get("entry_type", "")).strip().lower()
-                            region = str(r.get("region", "")).strip().lower()
-                            last_value = pd.to_numeric(r.get("last_value"), errors="coerce")
-                            raw_value = r.get("value")
-                            value = _parse_float_loose_value(raw_value)
-                            max_value = r.get("max_value")
-                            region_label = POKEDEX_REGION_LABELS.get(region, region)
-                            if row_entry_type not in POKEDEX_ENTRY_TYPES:
-                                errors.append(f"Invalid Pokédex entry type: {row_entry_type}")
-                                continue
-                            if region not in POKEDEX_REGIONS:
-                                errors.append(f"Invalid Pokédex region: {region}")
-                                continue
-                            if value is None:
-                                errors.append(f"{region_label} must be a number.")
-                                continue
-                            if float(value) < 0:
-                                errors.append(f"{region_label} must be >= 0.")
-                                continue
-                            if max_value is not None and float(value) > float(max_value):
-                                errors.append(f"{region_label} must be <= {_fmt_pokedex_value(max_value)}.")
-                                continue
-                            if pd.notna(last_value) and float(value) != float(last_value):
-                                category_changed = True
-                            region_values[region] = float(value)
-                            row_df = pd.DataFrame(
-                                [
-                                    {
-                                        "date": pd.Timestamp(pokedex_date),
-                                        "account": pokedex_account,
-                                        "entry_type": row_entry_type,
-                                        "region": region,
-                                        "value": float(value),
-                                    }
-                                ]
-                            )
-                            row_mono_errors = _validate_pokedex_entry_rows_non_decreasing(
-                                pokedex_existing_for_validation,
-                                row_df,
-                            )
-                            if row_mono_errors:
-                                errors.append(row_mono_errors[0])
-                                continue
-                        if not errors:
-                            rows_to_write = build_pokedex_category_snapshot_rows(
-                                pokedex_date,
-                                pokedex_account,
-                                entry_type,
-                                region_values,
-                                entry_config=pokedex_entry_config,
-                            )
-                        st.session_state[category_draft_key] = {
-                            "account": pokedex_account,
-                            "entry_type": entry_type,
-                            "rows": rows_to_write,
-                            "inactive": False,
-                            "changed": bool(category_changed),
-                            "valid": not bool(errors),
-                            "errors": errors,
-                        }
-                        st.session_state[category_status_key] = {
-                            "valid": not bool(errors),
-                            "inactive": False,
-                            "changed": bool(category_changed),
-                            "errors": errors,
-                        }
-                        if errors:
-                            pass
-                        else:
-                            if category_changed:
-                                pass
-                            else:
-                                pass
+                    category_draft = build_pokedex_category_draft(
+                        pokedex_date,
+                        pokedex_account,
+                        entry_type,
+                        row_inputs,
+                        pokedex_existing_for_validation,
+                        entry_config=pokedex_entry_config,
+                    )
+                    st.session_state[category_draft_key] = category_draft
+                    st.session_state[category_status_key] = {
+                        "valid": bool(category_draft.get("valid", False)),
+                        "inactive": bool(category_draft.get("inactive", False)),
+                        "changed": bool(category_draft.get("changed", False)),
+                        "errors": category_draft.get("errors", []),
+                    }
                     current_status = st.session_state.get(category_status_key)
                     if isinstance(current_status, dict):
                         if not bool(current_status.get("valid", False)):
@@ -7806,7 +7813,7 @@ if page == "Data Input":
                 if final_errors:
                     st.error("Fix Pokédex draft errors before saving:\n" + "\n".join(final_errors[:12]))
                 elif not rows_to_write:
-                    st.info("No changed or inactive Pokédex categories to save.")
+                    st.info("No changed Pokédex categories to save.")
                 else:
                     try:
                         written = upsert_pokedex_entry_rows(

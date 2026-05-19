@@ -8,6 +8,7 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from webapp.app import (
     accounts_for_data_input,
+    build_pokedex_category_draft,
     build_pokedex_category_snapshot_rows,
     build_xp_activity_snapshot_rows,
     latest_regional_pokedex_medal_references,
@@ -117,6 +118,44 @@ class PokedexEntriesTest(unittest.TestCase):
 
         self.assertEqual(
             [(row["region"], row["value"]) for row in rows],
+            [("kanto", 151.0), ("johto", 100.0), ("unidentified", 2.0)],
+        )
+
+    def test_build_pokedex_category_draft_marks_regional_pokemon_change(self):
+        draft = build_pokedex_category_draft(
+            "2026-01-01",
+            "Thombay",
+            "pokemon",
+            [
+                {
+                    "entry_type": "pokemon",
+                    "region": "kanto",
+                    "value": "151",
+                    "last_value": 150,
+                    "max_value": 151,
+                },
+                {
+                    "entry_type": "pokemon",
+                    "region": "johto",
+                    "value": "100",
+                    "last_value": 100,
+                    "max_value": 100,
+                },
+                {
+                    "entry_type": "pokemon",
+                    "region": "unidentified",
+                    "value": "2",
+                    "last_value": 2,
+                    "max_value": 2,
+                },
+            ],
+            pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"]),
+        )
+
+        self.assertTrue(draft["valid"])
+        self.assertTrue(draft["changed"])
+        self.assertEqual(
+            [(row["region"], row["value"]) for row in draft["rows"]],
             [("kanto", 151.0), ("johto", 100.0), ("unidentified", 2.0)],
         )
 
