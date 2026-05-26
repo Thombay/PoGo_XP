@@ -1,0 +1,10 @@
+﻿---
+name: writing-fragments
+description: Grilling session that mines the user for fragments — heterogeneous nuggets of writing (claims, vignettes, sharp sentences, half-thoughts) — and appends them to a single document as raw material for a future article. Use when the user wants to develop ideas before imposing structure, or mentions "fragments", "ideate", or "raw material" for writing.
+---
+
+# Skill Loader
+
+The canonical instructions for this project skill live at `.agents/in-progress/writing-fragments/SKILL.md`.
+
+Before applying this skill, read `.agents/in-progress/writing-fragments/SKILL.md` and follow those instructions. Resolve supporting-file references relative to `.agents/in-progress/writing-fragments`.
