@@ -12,6 +12,9 @@ from webapp.app import (
     build_medal_snapshot_draft,
     build_pokedex_category_draft,
     build_pokedex_category_snapshot_rows,
+    build_pokedex_dashboard_latest_rows,
+    build_pokedex_dashboard_region_breakdown_rows,
+    build_pokedex_dashboard_trend_rows,
     build_xp_activity_draft,
     build_xp_activity_snapshot_rows,
     evaluate_input_check_state,
@@ -737,6 +740,130 @@ class PokedexEntriesTest(unittest.TestCase):
 
         self.assertEqual(len(overall), 1)
         self.assertEqual(float(overall.iloc[0]["value"]), 15.0)
+
+    def test_build_pokedex_dashboard_latest_rows_uses_latest_value_in_range(self):
+        pokedex = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "overall",
+                    "value": 151,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-10"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "overall",
+                    "value": 152,
+                },
+                {
+                    "date": pd.Timestamp("2026-02-01"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "overall",
+                    "value": 200,
+                },
+            ]
+        )
+
+        latest = build_pokedex_dashboard_latest_rows(
+            pokedex,
+            accounts=["Thombay"],
+            entry_types=["pokemon"],
+            regions=["overall"],
+            end_date="2026-01-31",
+        )
+
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest.iloc[0]["date"].date().isoformat(), "2026-01-10")
+        self.assertEqual(float(latest.iloc[0]["value"]), 152.0)
+        self.assertEqual(latest.iloc[0]["entry_type_label"], "Pokemon")
+        self.assertEqual(latest.iloc[0]["region_label"], "Overall")
+
+    def test_build_pokedex_dashboard_trend_rows_returns_overall_rows_only(self):
+        pokedex = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "shiny",
+                    "region": "kanto",
+                    "value": 10,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "shiny",
+                    "region": "overall",
+                    "value": 15,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-02"),
+                    "account": "Cerius",
+                    "entry_type": "lucky",
+                    "region": "overall",
+                    "value": 8,
+                },
+            ]
+        )
+
+        trend = build_pokedex_dashboard_trend_rows(
+            pokedex,
+            accounts=["Thombay", "Cerius"],
+            entry_types=["shiny"],
+        )
+
+        self.assertEqual(len(trend), 1)
+        self.assertEqual(trend.iloc[0]["account"], "Thombay")
+        self.assertEqual(trend.iloc[0]["region"], "overall")
+        self.assertEqual(trend.iloc[0]["entry_type_label"], "Shiny")
+
+    def test_build_pokedex_dashboard_region_breakdown_rows_uses_latest_regions_as_of_date(self):
+        pokedex = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp("2026-01-01"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "kanto",
+                    "value": 151,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-03"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "kanto",
+                    "value": 152,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-02"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "johto",
+                    "value": 100,
+                },
+                {
+                    "date": pd.Timestamp("2026-01-03"),
+                    "account": "Thombay",
+                    "entry_type": "pokemon",
+                    "region": "overall",
+                    "value": 252,
+                },
+            ]
+        )
+
+        breakdown = build_pokedex_dashboard_region_breakdown_rows(
+            pokedex,
+            account="Thombay",
+            entry_type="pokemon",
+            as_of_date="2026-01-02",
+        )
+
+        self.assertEqual(breakdown["region"].tolist(), ["kanto", "johto"])
+        self.assertEqual(breakdown["region_label"].tolist(), ["Kanto", "Johto"])
+        self.assertEqual(breakdown["value"].astype(float).tolist(), [151.0, 100.0])
 
 
 if __name__ == "__main__":

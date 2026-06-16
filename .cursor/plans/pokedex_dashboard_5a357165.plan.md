@@ -4,16 +4,16 @@ overview: Add a dedicated Streamlit dashboard page for Pokédex entry snapshots,
 todos:
   - id: pokedex-dashboard-page
     content: Add a new Pokédex Dashboard page and wire it into the top page selector.
-    status: pending
+    status: completed
   - id: pokedex-dashboard-data
     content: Build helper logic for latest values, overall trends, and regional breakdowns from saved Pokédex entry rows plus derived `overall` rows.
-    status: pending
+    status: completed
   - id: pokedex-dashboard-ui
     content: Render metric cards, account comparison chart, trend chart, region breakdown chart, and detail table.
-    status: pending
+    status: completed
   - id: pokedex-dashboard-tests
     content: Add focused tests for new data-shaping helpers and run the existing test suite.
-    status: pending
+    status: completed
 isProject: false
 ---
 
