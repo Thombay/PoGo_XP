@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -2769,6 +2770,60 @@ def append_xp_row(path: Path, row_date: date, account: str, level: int, xp_bar: 
         f.write(f"{row_date.isoformat()};{account};{level};{xp_bar}\n")
 
 
+def _input_check_signature_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (list, tuple)):
+        return [_input_check_signature_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _input_check_signature_value(child)
+            for key, child in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    raise TypeError("Input check signatures support only JSON-friendly simple values.")
+
+
+def build_input_check_signature(values: object) -> str:
+    normalized = _input_check_signature_value(values)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def evaluate_input_check_state(
+    current_signature: str,
+    checked_signature: str | None,
+    valid: bool,
+    errors: list[object] | None = None,
+) -> dict[str, object]:
+    error_list = [str(error).strip() for error in (errors or []) if str(error).strip()]
+    is_valid = bool(valid) and not bool(error_list)
+    has_check = checked_signature not in (None, "")
+    fresh = bool(has_check and current_signature == checked_signature)
+
+    if not fresh:
+        status_label = "Needs check"
+        status_kind = "warning"
+    elif not is_valid:
+        status_label = "Check failed"
+        status_kind = "error"
+    else:
+        status_label = "Checked OK"
+        status_kind = "success"
+
+    return {
+        "checked": bool(has_check),
+        "fresh": fresh,
+        "valid": is_valid,
+        "save_allowed": bool(fresh and is_valid),
+        "status_label": status_label,
+        "status_kind": status_kind,
+        "errors": error_list,
+    }
+
+
 def build_xp_activity_snapshot_rows(
     row_date: object,
     account: str,
@@ -2813,6 +2868,232 @@ def build_xp_activity_snapshot_rows(
         },
     ]
     return xp_rows, additional_rows, medal_rows
+
+
+def build_medal_snapshot_draft(
+    row_date: object,
+    account: str,
+    medal_input_rows: list[dict[str, object]],
+    existing_medal_df: pd.DataFrame | None = None,
+) -> dict[str, object]:
+    row_date_text = _input_inactive_date_key(row_date)
+    account_name = str(account).strip()
+    existing = (
+        existing_medal_df[["date", "account", "medal_id", "value"]].copy()
+        if existing_medal_df is not None and {"date", "account", "medal_id", "value"}.issubset(existing_medal_df.columns)
+        else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
+    )
+    if not existing.empty:
+        existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
+        existing["account"] = existing["account"].astype(str).str.strip()
+        existing["medal_id"] = existing["medal_id"].astype(str).str.strip().str.lower()
+        existing["value"] = pd.to_numeric(existing["value"], errors="coerce")
+        existing = existing.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+
+    rows_to_write: list[dict[str, object]] = []
+    inline_errors: list[str] = []
+    save_errors: list[str] = []
+    statuses: list[dict[str, object]] = []
+
+    for input_row in medal_input_rows:
+        medal_id = str(input_row.get("medal_id", "")).strip().lower()
+        display_name = str(input_row.get("display_name", medal_id)).strip() or medal_id
+        value = pd.to_numeric(input_row.get("value"), errors="coerce")
+        row_errors: list[str] = []
+
+        if not medal_id:
+            row_errors.append("Missing medal_id.")
+            save_errors.append("Missing medal_id.")
+        elif medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
+            row_errors.append("Derived medal cannot be saved.")
+            save_errors.append(f"{display_name}: derived medal is not allowed in medal snapshots.")
+        elif pd.isna(value):
+            row_errors.append("Value is empty.")
+            save_errors.append(f"{display_name}: value is empty.")
+        else:
+            row_df = pd.DataFrame(
+                [
+                    {
+                        "date": pd.Timestamp(row_date),
+                        "account": account_name,
+                        "medal_id": medal_id,
+                        "value": float(value),
+                    }
+                ]
+            )
+            row_mono_errors = _validate_medal_rows_non_decreasing(existing, row_df)
+            if row_mono_errors:
+                row_errors.append(row_mono_errors[0])
+            rows_to_write.append(
+                {
+                    "date": row_date_text,
+                    "account": account_name,
+                    "medal_id": medal_id,
+                    "value": float(value),
+                }
+            )
+
+        error = row_errors[0] if row_errors else None
+        if error:
+            inline_errors.append(f"{display_name}: {error}")
+        statuses.append(
+            {
+                "medal_id": medal_id,
+                "display_name": display_name,
+                "valid": error is None,
+                "error": error,
+            }
+        )
+
+    return {
+        "date": row_date_text,
+        "account": account_name,
+        "rows": rows_to_write,
+        "statuses": statuses,
+        "errors": inline_errors,
+        "save_errors": save_errors,
+        "valid": not bool(inline_errors),
+    }
+
+
+def build_xp_activity_draft(
+    row_date: object,
+    account: str,
+    level_value: object,
+    xp_bar_value: object,
+    battles_won_value: object,
+    distance_walked_value: object,
+    pokemon_caught_value: object,
+    *,
+    xp_locked: bool,
+    inactive: bool,
+    level_last: object,
+    xp_bar_last: object,
+    battles_won_last: object = 0.0,
+    distance_walked_last: object = 0.0,
+    pokemon_caught_last: object = 0.0,
+    xp_existing_df: pd.DataFrame | None = None,
+    additional_existing_df: pd.DataFrame | None = None,
+    medal_existing_df: pd.DataFrame | None = None,
+    curve_map: dict[int, int] | None = None,
+) -> dict[str, object]:
+    account_name = str(account).strip()
+    xp_existing = (
+        xp_existing_df[["Date", "Spieler", "Lvl", "XP Bar"]].copy()
+        if xp_existing_df is not None and {"Date", "Spieler", "Lvl", "XP Bar"}.issubset(xp_existing_df.columns)
+        else pd.DataFrame(columns=["Date", "Spieler", "Lvl", "XP Bar"])
+    )
+    additional_existing = (
+        additional_existing_df[["date", "account", "battles_won"]].copy()
+        if additional_existing_df is not None
+        and {"date", "account", "battles_won"}.issubset(additional_existing_df.columns)
+        else pd.DataFrame(columns=["date", "account", "battles_won"])
+    )
+    medal_existing = (
+        medal_existing_df[["date", "account", "medal_id", "value"]].copy()
+        if medal_existing_df is not None and {"date", "account", "medal_id", "value"}.issubset(medal_existing_df.columns)
+        else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
+    )
+    xp_curve_map = curve_map or {}
+
+    row_errors: list[str] = []
+    draft_level = int(level_last) if inactive or xp_locked else int(level_value)
+    draft_xp_bar_raw = int(xp_bar_last) if inactive or xp_locked else xp_bar_value
+    draft_battles_raw = battles_won_last if inactive else battles_won_value
+    draft_distance_raw = distance_walked_last if inactive else distance_walked_value
+    draft_caught_raw = pokemon_caught_last if inactive else pokemon_caught_value
+    draft_xp_bar = pd.to_numeric(draft_xp_bar_raw, errors="coerce")
+    draft_battles = _parse_float_loose_value(draft_battles_raw)
+    draft_distance = _parse_float_loose_value(draft_distance_raw)
+    draft_caught = _parse_float_loose_value(draft_caught_raw)
+
+    if xp_locked:
+        pass
+    elif pd.isna(draft_xp_bar) or int(draft_xp_bar) < 0:
+        row_errors.append("XP Bar must be a number >= 0.")
+    else:
+        row_df = pd.DataFrame(
+            [
+                {
+                    "Date": pd.Timestamp(row_date),
+                    "Spieler": account_name,
+                    "Lvl": int(draft_level),
+                    "XP Bar": int(draft_xp_bar),
+                }
+            ]
+        )
+        row_errors.extend(_validate_xp_rows_non_decreasing(xp_existing, row_df, xp_curve_map))
+
+    if draft_battles is None or float(draft_battles) < 0:
+        row_errors.append("Battles Won must be a number >= 0.")
+    if draft_distance is None or float(draft_distance) < 0:
+        row_errors.append("Distance Walked must be a number >= 0.")
+    if draft_caught is None or float(draft_caught) < 0:
+        row_errors.append("Pokemon Caught must be a number >= 0.")
+
+    if not row_errors:
+        additional_row_df = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp(row_date),
+                    "account": account_name,
+                    "battles_won": float(draft_battles),
+                }
+            ]
+        )
+        row_errors.extend(_validate_additional_activity_rows_non_decreasing(additional_existing, additional_row_df))
+
+    if not row_errors:
+        medal_row_df = pd.DataFrame(
+            [
+                {
+                    "date": pd.Timestamp(row_date),
+                    "account": account_name,
+                    "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
+                    "value": float(draft_distance),
+                },
+                {
+                    "date": pd.Timestamp(row_date),
+                    "account": account_name,
+                    "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
+                    "value": float(draft_caught),
+                },
+            ]
+        )
+        row_errors.extend(_validate_medal_rows_non_decreasing(medal_existing, medal_row_df))
+
+    row_changed_for_draft = False
+    if not xp_locked:
+        if pd.isna(draft_xp_bar):
+            row_changed_for_draft = str(draft_xp_bar_raw).strip() != str(int(xp_bar_last))
+        else:
+            row_changed_for_draft = int(draft_level) != int(level_last) or int(draft_xp_bar) != int(xp_bar_last)
+    row_changed_for_draft = row_changed_for_draft or float(draft_battles or 0) != float(battles_won_last)
+    row_changed_for_draft = row_changed_for_draft or float(draft_distance or 0) != float(distance_walked_last)
+    row_changed_for_draft = row_changed_for_draft or float(draft_caught or 0) != float(pokemon_caught_last)
+
+    return {
+        "account": account_name,
+        "lvl": int(draft_level),
+        "xp_bar": None if pd.isna(draft_xp_bar) else int(draft_xp_bar),
+        "xp_locked": bool(xp_locked),
+        "battles_won": draft_battles,
+        "distance_walked": draft_distance,
+        "pokemon_caught": draft_caught,
+        "inactive": bool(inactive),
+        "changed": bool(row_changed_for_draft),
+        "valid": not bool(row_errors),
+        "errors": row_errors,
+    }
+
+
+def xp_activity_draft_status(draft: dict[str, object]) -> dict[str, object]:
+    return {
+        "valid": bool(draft.get("valid", False)),
+        "inactive": bool(draft.get("inactive", False)),
+        "changed": bool(draft.get("changed", False)),
+        "errors": list(draft.get("errors", [])),
+    }
 
 
 def _validate_xp_rows_non_decreasing(
@@ -6909,33 +7190,19 @@ if page == "Data Input":
                     return str(int(round(n)))
                 return f"{n:.{int(decimals)}f}"
 
-            def _parse_float_loose(raw: object) -> float | None:
-                s = str(raw).strip()
-                if not s:
-                    return None
-                s = s.replace(" ", "")
-                if "," in s and "." in s:
-                    if s.rfind(",") > s.rfind("."):
-                        s = s.replace(".", "").replace(",", ".")
-                    else:
-                        s = s.replace(",", "")
-                elif "," in s and "." not in s:
-                    if s.count(",") == 1:
-                        s = s.replace(",", ".")
-                    else:
-                        s = s.replace(",", "")
-                else:
-                    s = s.replace(",", "")
-                val = pd.to_numeric(pd.Series([s]), errors="coerce").iloc[0]
-                return None if pd.isna(val) else float(val)
+            xp_check_prefix = f"xp_batch_check_{xp_date.isoformat()}"
+            xp_checked_signature_key = f"{xp_check_prefix}_signature"
+            xp_checked_valid_key = f"{xp_check_prefix}_valid"
+            xp_checked_errors_key = f"{xp_check_prefix}_errors"
+            xp_checked_drafts_key = f"{xp_check_prefix}_drafts"
+            xp_checked_statuses_key = f"{xp_check_prefix}_statuses"
+            xp_current_inputs: list[dict[str, object]] = []
+            xp_status_slots = {}
 
             for row in xp_editor_rows:
                 acc = str(row["account"])
                 xp_locked = bool(row.get("xp_locked", False))
-                draft_key = f"xp_draft_{xp_date.isoformat()}_{acc}"
-                status_key = f"xp_draft_status_{xp_date.isoformat()}_{acc}"
                 inactive_key = f"xp_inactive_{xp_date.isoformat()}_{acc}"
-                refresh_key = f"xp_draft_refresh_{xp_date.isoformat()}_{acc}"
                 if inactive_key not in st.session_state:
                     st.session_state[inactive_key] = load_input_inactive_marker("xp", xp_date, acc)
                 inactive_current = bool(st.session_state.get(inactive_key, False))
@@ -7001,13 +7268,11 @@ if page == "Data Input":
                         key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
                         label_visibility="collapsed",
                         disabled=inactive_current,
-                        on_change=mark_session_flag,
-                        args=(refresh_key,),
                     )
                     xp_bar_num = pd.to_numeric(xp_bar_value, errors="coerce")
-                    battles_num = _parse_float_loose(battles_value)
-                    distance_num = _parse_float_loose(distance_value)
-                    caught_num = _parse_float_loose(caught_value)
+                    battles_num = _parse_float_loose_value(battles_value)
+                    distance_num = _parse_float_loose_value(distance_value)
+                    caught_num = _parse_float_loose_value(caught_value)
                     row_changed = False
                     if not xp_locked:
                         row_changed = int(lvl_value) != int(row["lvl_last"])
@@ -7025,8 +7290,6 @@ if page == "Data Input":
                         "Inactive",
                         key=inactive_key,
                         help="Document unchanged values for this date on final save.",
-                        on_change=mark_session_flag,
-                        args=(refresh_key,),
                     )
                     if inactive_value:
                         c5.markdown("<span style='color:#9ca3af'>inactive</span>", unsafe_allow_html=True)
@@ -7035,138 +7298,125 @@ if page == "Data Input":
                         f"<span style='color:{account_color}; font-weight:500'>{escape(acc)}</span>",
                         unsafe_allow_html=True,
                     )
-
-                    if bool(st.session_state.pop(refresh_key, False)):
-                        row_errors: list[str] = []
-                        draft_level = int(row["lvl_last"]) if inactive_value or xp_locked else int(lvl_value)
-                        draft_xp_bar_raw = int(row["xp_bar_last"]) if inactive_value or xp_locked else xp_bar_value
-                        draft_battles_raw = row.get("battles_last", 0.0) if inactive_value else battles_value
-                        draft_distance_raw = row.get("distance_last", 0.0) if inactive_value else distance_value
-                        draft_caught_raw = row.get("caught_last", 0.0) if inactive_value else caught_value
-                        draft_xp_bar = pd.to_numeric(draft_xp_bar_raw, errors="coerce")
-                        draft_battles = _parse_float_loose(draft_battles_raw)
-                        draft_distance = _parse_float_loose(draft_distance_raw)
-                        draft_caught = _parse_float_loose(draft_caught_raw)
-                        if xp_locked:
-                            pass
-                        elif pd.isna(draft_xp_bar) or int(draft_xp_bar) < 0:
-                            row_errors.append("XP Bar must be a number >= 0.")
-                        else:
-                            row_df = pd.DataFrame(
-                                [
-                                    {
-                                        "Date": pd.Timestamp(xp_date),
-                                        "Spieler": acc,
-                                        "Lvl": int(draft_level),
-                                        "XP Bar": int(draft_xp_bar),
-                                    }
-                                ]
-                            )
-                            row_errors.extend(_validate_xp_rows_non_decreasing(xp_existing_for_validation, row_df, curve_map))
-                        if draft_battles is None or float(draft_battles) < 0:
-                            row_errors.append("Battles Won must be a number >= 0.")
-                        if draft_distance is None or float(draft_distance) < 0:
-                            row_errors.append("Distance Walked must be a number >= 0.")
-                        if draft_caught is None or float(draft_caught) < 0:
-                            row_errors.append("Pokemon Caught must be a number >= 0.")
-                        if not row_errors:
-                            additional_row_df = pd.DataFrame(
-                                [
-                                    {
-                                        "date": pd.Timestamp(xp_date),
-                                        "account": acc,
-                                        "battles_won": float(draft_battles),
-                                    }
-                                ]
-                            )
-                            row_errors.extend(
-                                _validate_additional_activity_rows_non_decreasing(
-                                    additional_existing_for_validation,
-                                    additional_row_df,
-                                )
-                            )
-                        if not row_errors:
-                            medal_row_df = pd.DataFrame(
-                                [
-                                    {
-                                        "date": pd.Timestamp(xp_date),
-                                        "account": acc,
-                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"],
-                                        "value": float(draft_distance),
-                                    },
-                                    {
-                                        "date": pd.Timestamp(xp_date),
-                                        "account": acc,
-                                        "medal_id": XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"],
-                                        "value": float(draft_caught),
-                                    },
-                                ]
-                            )
-                            row_errors.extend(_validate_medal_rows_non_decreasing(medal_existing_for_validation, medal_row_df))
-                        row_changed_for_draft = False
-                        if not xp_locked:
-                            if pd.isna(draft_xp_bar):
-                                row_changed_for_draft = str(draft_xp_bar_raw).strip() != str(int(row["xp_bar_last"]))
-                            else:
-                                row_changed_for_draft = (
-                                    int(draft_level) != int(row["lvl_last"])
-                                    or int(draft_xp_bar) != int(row["xp_bar_last"])
-                                )
-                        row_changed_for_draft = row_changed_for_draft or float(draft_battles or 0) != float(row.get("battles_last", 0.0))
-                        row_changed_for_draft = row_changed_for_draft or float(draft_distance or 0) != float(row.get("distance_last", 0.0))
-                        row_changed_for_draft = row_changed_for_draft or float(draft_caught or 0) != float(row.get("caught_last", 0.0))
-                        st.session_state[draft_key] = {
+                    xp_current_inputs.append(
+                        {
                             "account": acc,
-                            "lvl": int(draft_level),
-                            "xp_bar": None if pd.isna(draft_xp_bar) else int(draft_xp_bar),
-                            "xp_locked": xp_locked,
-                            "battles_won": draft_battles,
-                            "distance_walked": draft_distance,
-                            "pokemon_caught": draft_caught,
+                            "level": int(lvl_value),
+                            "xp_bar": str(xp_bar_value),
+                            "battles_won": str(battles_value),
+                            "distance_walked": str(distance_value),
+                            "pokemon_caught": str(caught_value),
                             "inactive": bool(inactive_value),
-                            "changed": bool(row_changed_for_draft),
-                            "valid": not bool(row_errors),
-                            "errors": row_errors,
+                            "xp_locked": bool(xp_locked),
+                            "level_last": int(row["lvl_last"]),
+                            "xp_bar_last": int(row["xp_bar_last"]),
+                            "battles_won_last": row.get("battles_last", 0.0),
+                            "distance_walked_last": row.get("distance_last", 0.0),
+                            "pokemon_caught_last": row.get("caught_last", 0.0),
                         }
-                        st.session_state[status_key] = {
-                            "valid": not bool(row_errors),
-                            "inactive": bool(inactive_value),
-                            "changed": bool(row_changed_for_draft),
-                            "errors": row_errors,
-                        }
-                        save_input_inactive_marker("xp", xp_date, acc, bool(inactive_value))
-                        if row_errors:
-                            pass
-                        else:
-                            if inactive_value:
-                                pass
-                            elif row_changed_for_draft:
-                                pass
-                            else:
-                                pass
-                    current_status = st.session_state.get(status_key)
-                    if isinstance(current_status, dict):
-                        if not bool(current_status.get("valid", False)):
-                            c14.caption("Draft error")
-                        elif bool(current_status.get("inactive", False)):
-                            c14.caption("Inactive draft")
-                        elif bool(current_status.get("changed", False)):
-                            c14.caption("Draft OK")
-                        else:
-                            c14.caption("Unchanged")
+                    )
+                    xp_status_slots[acc] = c14.empty()
 
-            if st.button("Save all XP/activity changes", key="xp_batch_final_save"):
+            xp_current_signature = build_input_check_signature(
+                {
+                    "date": xp_date.isoformat(),
+                    "accounts": [str(account) for account in selected_xp_accounts],
+                    "rows": xp_current_inputs,
+                }
+            )
+            xp_check_state = evaluate_input_check_state(
+                xp_current_signature,
+                st.session_state.get(xp_checked_signature_key),
+                bool(st.session_state.get(xp_checked_valid_key, False)),
+                list(st.session_state.get(xp_checked_errors_key, [])),
+            )
+            xp_action_cols = st.columns([1.0, 1.8, 2.2], gap="small")
+            if xp_action_cols[0].button("Check inputs", key="xp_batch_check_inputs"):
+                checked_drafts: dict[str, dict[str, object]] = {}
+                checked_statuses: dict[str, dict[str, object]] = {}
+                check_errors: list[str] = []
+                for input_row in xp_current_inputs:
+                    acc = str(input_row["account"])
+                    draft = build_xp_activity_draft(
+                        xp_date,
+                        acc,
+                        input_row["level"],
+                        input_row["xp_bar"],
+                        input_row["battles_won"],
+                        input_row["distance_walked"],
+                        input_row["pokemon_caught"],
+                        xp_locked=bool(input_row["xp_locked"]),
+                        inactive=bool(input_row["inactive"]),
+                        level_last=input_row["level_last"],
+                        xp_bar_last=input_row["xp_bar_last"],
+                        battles_won_last=input_row["battles_won_last"],
+                        distance_walked_last=input_row["distance_walked_last"],
+                        pokemon_caught_last=input_row["pokemon_caught_last"],
+                        xp_existing_df=xp_existing_for_validation,
+                        additional_existing_df=additional_existing_for_validation,
+                        medal_existing_df=medal_existing_for_validation,
+                        curve_map=curve_map,
+                    )
+                    checked_drafts[acc] = draft
+                    checked_statuses[acc] = xp_activity_draft_status(draft)
+                    save_input_inactive_marker("xp", xp_date, acc, bool(input_row["inactive"]))
+                    for error in draft.get("errors", []):
+                        check_errors.append(f"{acc}: {error}")
+                st.session_state[xp_checked_signature_key] = xp_current_signature
+                st.session_state[xp_checked_valid_key] = not bool(check_errors)
+                st.session_state[xp_checked_errors_key] = check_errors
+                st.session_state[xp_checked_drafts_key] = checked_drafts
+                st.session_state[xp_checked_statuses_key] = checked_statuses
+                xp_check_state = evaluate_input_check_state(
+                    xp_current_signature,
+                    st.session_state.get(xp_checked_signature_key),
+                    bool(st.session_state.get(xp_checked_valid_key, False)),
+                    check_errors,
+                )
+
+            checked_xp_drafts = st.session_state.get(xp_checked_drafts_key, {})
+            checked_xp_statuses = st.session_state.get(xp_checked_statuses_key, {})
+            for acc, status_slot in xp_status_slots.items():
+                if not bool(xp_check_state.get("fresh", False)):
+                    status_slot.caption("Needs check")
+                    continue
+                draft = checked_xp_drafts.get(acc, {}) if isinstance(checked_xp_drafts, dict) else {}
+                status = checked_xp_statuses.get(acc, {}) if isinstance(checked_xp_statuses, dict) else {}
+                if not bool(status.get("valid", False)):
+                    status_slot.caption("Check failed")
+                elif bool(draft.get("changed", False)) or bool(draft.get("inactive", False)) or bool(draft.get("xp_locked", False)):
+                    status_slot.caption("Checked OK")
+                else:
+                    status_slot.caption("Unchanged")
+
+            if not bool(xp_check_state.get("fresh", False)):
+                xp_action_cols[2].warning("Needs check")
+            elif not bool(xp_check_state.get("valid", False)):
+                xp_action_cols[2].error("Check failed")
+                xp_errors = list(xp_check_state.get("errors", []))
+                if xp_errors:
+                    st.error("Check failed:\n" + "\n".join([f"- {x}" for x in xp_errors[:12]]))
+            else:
+                xp_action_cols[2].success("Checked OK")
+
+            if xp_action_cols[1].button(
+                "Save all XP/activity changes",
+                key="xp_batch_final_save",
+                disabled=not bool(xp_check_state.get("save_allowed", False)),
+            ):
+                if not bool(xp_check_state.get("save_allowed", False)):
+                    st.error("Check inputs first.")
+                    st.stop()
                 rows_to_write: list[dict[str, object]] = []
                 additional_rows_to_write: list[dict[str, object]] = []
                 medal_rows_to_write: list[dict[str, object]] = []
                 final_errors: list[str] = []
                 skipped_unchanged: list[str] = []
+                checked_drafts = st.session_state.get(xp_checked_drafts_key, {})
                 for row in xp_editor_rows:
                     acc = str(row["account"])
                     xp_locked = bool(row.get("xp_locked", False))
-                    draft_key = f"xp_draft_{xp_date.isoformat()}_{acc}"
-                    draft = st.session_state.get(draft_key)
-                    inactive_saved = load_input_inactive_marker("xp", xp_date, acc)
+                    draft = checked_drafts.get(acc) if isinstance(checked_drafts, dict) else None
                     if isinstance(draft, dict):
                         if not bool(draft.get("valid", False)):
                             final_errors.extend([f"{acc}: {err}" for err in draft.get("errors", [])])
@@ -7185,19 +7435,8 @@ if page == "Data Input":
                             float(draft.get("distance_walked", row.get("distance_last", 0.0))),
                             float(draft.get("pokemon_caught", row.get("caught_last", 0.0))),
                         )
-                    elif inactive_saved or xp_locked:
-                        xp_rows, activity_rows, activity_medal_rows = build_xp_activity_snapshot_rows(
-                            xp_date,
-                            acc,
-                            int(row["lvl_last"]),
-                            int(row["xp_bar_last"]),
-                            xp_locked,
-                            float(row.get("battles_last", 0.0)),
-                            float(row.get("distance_last", 0.0)),
-                            float(row.get("caught_last", 0.0)),
-                        )
                     else:
-                        skipped_unchanged.append(acc)
+                        final_errors.append(f"{acc}: missing checked draft.")
                         continue
                     rows_to_write.extend(xp_rows)
                     additional_rows_to_write.extend(activity_rows)
@@ -7388,17 +7627,17 @@ if page == "Data Input":
             h5.markdown("**Status**")
 
             medal_inputs: list[dict[str, object]] = []
-            inline_medal_errors: list[str] = []
+            medal_status_slots = []
             medal_existing_for_validation = (
                 medal_df[["date", "account", "medal_id", "value"]].copy()
                 if not medal_df.empty
                 else pd.DataFrame(columns=["date", "account", "medal_id", "value"])
             )
-            additional_existing_for_validation = (
-                additional_activity_df[["date", "account", "battles_won"]].copy()
-                if not additional_activity_df.empty
-                else pd.DataFrame(columns=["date", "account", "battles_won"])
-            )
+            medal_check_prefix = f"medal_snapshot_check_{medal_date.isoformat()}_{medal_account}"
+            medal_checked_signature_key = f"{medal_check_prefix}_signature"
+            medal_checked_valid_key = f"{medal_check_prefix}_valid"
+            medal_checked_errors_key = f"{medal_check_prefix}_errors"
+            medal_checked_draft_key = f"{medal_check_prefix}_draft"
             for row in editor_rows:
                 medal_id = str(row.get("medal_id", "")).strip().lower()
                 display_name = str(row.get("display_name", medal_id)).strip() or medal_id
@@ -7432,38 +7671,6 @@ if page == "Data Input":
                     unsafe_allow_html=True,
                 )
 
-                value = pd.to_numeric(value_input, errors="coerce")
-                row_errors: list[str] = []
-                if not medal_id:
-                    row_errors.append("Missing medal_id.")
-                elif medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
-                    row_errors.append("Derived medal cannot be saved.")
-                elif pd.isna(value):
-                    row_errors.append("Value is empty.")
-                else:
-                    row_df = pd.DataFrame(
-                        [
-                            {
-                                "date": pd.Timestamp(medal_date),
-                                "account": medal_account,
-                                "medal_id": medal_id,
-                                "value": float(value),
-                            }
-                        ]
-                    )
-                    row_mono_errors = _validate_medal_rows_non_decreasing(medal_existing_for_validation, row_df)
-                    if row_mono_errors:
-                        row_errors.append(row_mono_errors[0])
-
-                if row_errors:
-                    inline_medal_errors.append(f"{display_name}: {row_errors[0]}")
-                    c5.markdown(
-                        f"<span style='color:#ef4444; font-size:0.82rem'>{escape(row_errors[0])}</span>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    c5.markdown("<span style='color:#22c55e; font-size:0.82rem'>OK</span>", unsafe_allow_html=True)
-
                 medal_inputs.append(
                     {
                         "medal_id": medal_id,
@@ -7471,42 +7678,87 @@ if page == "Data Input":
                         "value": value_input,
                     }
                 )
+                medal_status_slots.append(c5.empty())
 
-            if inline_medal_errors:
-                details = "\n".join([f"- {x}" for x in inline_medal_errors[:12]])
-                extra = f"\n... and {len(inline_medal_errors) - 12} more issue(s)." if len(inline_medal_errors) > 12 else ""
-                st.error("Live validation issues:\n" + details + extra)
+            medal_current_signature = build_input_check_signature(
+                {
+                    "date": medal_date.isoformat(),
+                    "account": str(medal_account),
+                    "rows": medal_inputs,
+                }
+            )
+            medal_check_state = evaluate_input_check_state(
+                medal_current_signature,
+                st.session_state.get(medal_checked_signature_key),
+                bool(st.session_state.get(medal_checked_valid_key, False)),
+                list(st.session_state.get(medal_checked_errors_key, [])),
+            )
+            medal_action_cols = st.columns([1.0, 1.9, 2.1], gap="small")
+            if medal_action_cols[0].button("Check inputs", key="check_full_medal_snapshot"):
+                medal_draft = build_medal_snapshot_draft(
+                    medal_date,
+                    medal_account,
+                    medal_inputs,
+                    medal_existing_for_validation,
+                )
+                medal_errors = list(medal_draft.get("save_errors", [])) or list(medal_draft.get("errors", []))
+                st.session_state[medal_checked_signature_key] = medal_current_signature
+                st.session_state[medal_checked_valid_key] = bool(medal_draft.get("valid", False)) and not bool(
+                    medal_errors
+                )
+                st.session_state[medal_checked_errors_key] = medal_errors
+                st.session_state[medal_checked_draft_key] = medal_draft
+                medal_check_state = evaluate_input_check_state(
+                    medal_current_signature,
+                    st.session_state.get(medal_checked_signature_key),
+                    bool(st.session_state.get(medal_checked_valid_key, False)),
+                    medal_errors,
+                )
+
+            checked_medal_draft = st.session_state.get(medal_checked_draft_key, {})
+            checked_medal_statuses = (
+                checked_medal_draft.get("statuses", []) if isinstance(checked_medal_draft, dict) else []
+            )
+            for status_slot, status in zip(medal_status_slots, checked_medal_statuses):
+                if not bool(medal_check_state.get("fresh", False)):
+                    status_slot.caption("Needs check")
+                    continue
+                error = status.get("error") if isinstance(status, dict) else None
+                if error:
+                    status_slot.markdown(
+                        f"<span style='color:#ef4444; font-size:0.82rem'>{escape(str(error))}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    status_slot.markdown(
+                        "<span style='color:#22c55e; font-size:0.82rem'>Checked OK</span>",
+                        unsafe_allow_html=True,
+                    )
+            if not bool(medal_check_state.get("fresh", False)):
+                for status_slot in medal_status_slots[len(checked_medal_statuses) :]:
+                    status_slot.caption("Needs check")
+                medal_action_cols[2].warning("Needs check")
+            elif not bool(medal_check_state.get("valid", False)):
+                medal_action_cols[2].error("Check failed")
+                medal_errors = list(medal_check_state.get("errors", []))
+                if medal_errors:
+                    details = "\n".join([f"- {x}" for x in medal_errors[:12]])
+                    extra = f"\n... and {len(medal_errors) - 12} more issue(s)." if len(medal_errors) > 12 else ""
+                    st.error("Check failed:\n" + details + extra)
             else:
-                st.caption("Live validation: OK")
+                medal_action_cols[2].success("Checked OK")
 
-            if st.button(
+            if medal_action_cols[1].button(
                 "Save full medal snapshot for account",
                 key="save_full_medal_snapshot",
-                disabled=bool(inline_medal_errors),
+                disabled=not bool(medal_check_state.get("save_allowed", False)),
             ):
-                rows_to_write: list[dict[str, object]] = []
-                errors: list[str] = []
-                for r in medal_inputs:
-                    medal_id = str(r.get("medal_id", "")).strip().lower()
-                    display_name = str(r.get("display_name", medal_id)).strip() or medal_id
-                    value = pd.to_numeric(r.get("value"), errors="coerce")
-                    if not medal_id:
-                        errors.append("Missing medal_id.")
-                        continue
-                    if medal_id in EXCLUDED_MANUAL_MEDAL_IDS:
-                        errors.append(f"{display_name}: derived medal is not allowed in medal snapshots.")
-                        continue
-                    if pd.isna(value):
-                        errors.append(f"{display_name}: value is empty.")
-                        continue
-                    rows_to_write.append(
-                        {
-                            "date": medal_date.isoformat(),
-                            "account": medal_account,
-                            "medal_id": medal_id,
-                            "value": float(value),
-                        }
-                    )
+                if not bool(medal_check_state.get("save_allowed", False)):
+                    st.error("Check inputs first.")
+                    st.stop()
+                medal_draft = st.session_state.get(medal_checked_draft_key, {})
+                rows_to_write = list(medal_draft.get("rows", []))
+                errors = list(medal_draft.get("save_errors", []))
                 if errors:
                     st.error("\n".join(errors))
                 else:
@@ -7706,9 +7958,15 @@ if page == "Data Input":
                 if not pokedex_df.empty
                 else pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"])
             )
+            pokedex_check_prefix = f"pokedex_check_{pokedex_date.isoformat()}_{pokedex_account}"
+            pokedex_checked_signature_key = f"{pokedex_check_prefix}_signature"
+            pokedex_checked_valid_key = f"{pokedex_check_prefix}_valid"
+            pokedex_checked_errors_key = f"{pokedex_check_prefix}_errors"
+            pokedex_checked_drafts_key = f"{pokedex_check_prefix}_drafts"
+            pokedex_category_inputs: dict[str, list[dict[str, object]]] = {}
+            pokedex_signature_config: list[dict[str, object]] = []
+            pokedex_status_slots = {}
             for entry_type in visible_pokedex_entry_types:
-                category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
-                category_status_key = f"pokedex_draft_status_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
                 with pokedex_input_col.container():
                     row_cols = st.columns(col_widths, gap="small")
                     row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
@@ -7720,6 +7978,15 @@ if page == "Data Input":
                         is_locked = bool(cell_config.get("locked", False))
                         max_value = cell_config.get("max_value")
                         config_notes = str(cell_config.get("notes", "")).strip()
+                        if not is_overall:
+                            pokedex_signature_config.append(
+                                {
+                                    "entry_type": entry_type,
+                                    "region": region,
+                                    "locked": bool(is_locked),
+                                    "max_value": None if max_value is None else float(max_value),
+                                }
+                            )
                         value_default = _format_pokedex_value(last_value)
                         if is_overall:
                             row_cols[idx].markdown(
@@ -7763,6 +8030,29 @@ if page == "Data Input":
                             }
                         )
 
+                    pokedex_category_inputs[entry_type] = row_inputs
+                    pokedex_status_slots[entry_type] = row_cols[-1].empty()
+
+            pokedex_current_signature = build_input_check_signature(
+                {
+                    "date": pokedex_date.isoformat(),
+                    "account": str(pokedex_account),
+                    "entry_types": list(visible_pokedex_entry_types),
+                    "config": pokedex_signature_config,
+                    "categories": pokedex_category_inputs,
+                }
+            )
+            pokedex_check_state = evaluate_input_check_state(
+                pokedex_current_signature,
+                st.session_state.get(pokedex_checked_signature_key),
+                bool(st.session_state.get(pokedex_checked_valid_key, False)),
+                list(st.session_state.get(pokedex_checked_errors_key, [])),
+            )
+            pokedex_action_cols = st.columns([1.0, 1.7, 2.2], gap="small")
+            if pokedex_action_cols[0].button("Check inputs", key="pokedex_check_inputs"):
+                checked_pokedex_drafts: dict[str, dict[str, object]] = {}
+                check_errors: list[str] = []
+                for entry_type, row_inputs in pokedex_category_inputs.items():
                     category_draft = build_pokedex_category_draft(
                         pokedex_date,
                         pokedex_account,
@@ -7771,29 +8061,57 @@ if page == "Data Input":
                         pokedex_existing_for_validation,
                         entry_config=pokedex_entry_config,
                     )
-                    st.session_state[category_draft_key] = category_draft
-                    st.session_state[category_status_key] = {
-                        "valid": bool(category_draft.get("valid", False)),
-                        "inactive": bool(category_draft.get("inactive", False)),
-                        "changed": bool(category_draft.get("changed", False)),
-                        "errors": category_draft.get("errors", []),
-                    }
-                    current_status = st.session_state.get(category_status_key)
-                    if isinstance(current_status, dict):
-                        if not bool(current_status.get("valid", False)):
-                            row_cols[-1].caption("Draft error")
-                        elif bool(current_status.get("changed", False)):
-                            row_cols[-1].caption("Draft OK")
-                        else:
-                            row_cols[-1].caption("Unchanged")
+                    checked_pokedex_drafts[entry_type] = category_draft
+                    for error in category_draft.get("errors", []):
+                        check_errors.append(f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: {error}")
+                st.session_state[pokedex_checked_signature_key] = pokedex_current_signature
+                st.session_state[pokedex_checked_valid_key] = not bool(check_errors)
+                st.session_state[pokedex_checked_errors_key] = check_errors
+                st.session_state[pokedex_checked_drafts_key] = checked_pokedex_drafts
+                pokedex_check_state = evaluate_input_check_state(
+                    pokedex_current_signature,
+                    st.session_state.get(pokedex_checked_signature_key),
+                    bool(st.session_state.get(pokedex_checked_valid_key, False)),
+                    check_errors,
+                )
 
-            if st.button("Save all Pokédex changes", key="pokedex_final_save"):
+            checked_pokedex_drafts = st.session_state.get(pokedex_checked_drafts_key, {})
+            for entry_type, status_slot in pokedex_status_slots.items():
+                if not bool(pokedex_check_state.get("fresh", False)):
+                    status_slot.caption("Needs check")
+                    continue
+                draft = checked_pokedex_drafts.get(entry_type, {}) if isinstance(checked_pokedex_drafts, dict) else {}
+                if not bool(draft.get("valid", False)):
+                    status_slot.caption("Check failed")
+                elif bool(draft.get("changed", False)):
+                    status_slot.caption("Checked OK")
+                else:
+                    status_slot.caption("Unchanged")
+
+            if not bool(pokedex_check_state.get("fresh", False)):
+                pokedex_action_cols[2].warning("Needs check")
+            elif not bool(pokedex_check_state.get("valid", False)):
+                pokedex_action_cols[2].error("Check failed")
+                pokedex_errors = list(pokedex_check_state.get("errors", []))
+                if pokedex_errors:
+                    st.error("Check failed:\n" + "\n".join([f"- {x}" for x in pokedex_errors[:12]]))
+            else:
+                pokedex_action_cols[2].success("Checked OK")
+
+            if pokedex_action_cols[1].button(
+                "Save all Pokédex changes",
+                key="pokedex_final_save",
+                disabled=not bool(pokedex_check_state.get("save_allowed", False)),
+            ):
+                if not bool(pokedex_check_state.get("save_allowed", False)):
+                    st.error("Check inputs first.")
+                    st.stop()
                 rows_to_write: list[dict[str, object]] = []
                 final_errors: list[str] = []
                 skipped_unchanged: list[str] = []
+                checked_drafts = st.session_state.get(pokedex_checked_drafts_key, {})
                 for entry_type in visible_pokedex_entry_types:
-                    category_draft_key = f"pokedex_draft_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}"
-                    draft = st.session_state.get(category_draft_key)
+                    draft = checked_drafts.get(entry_type) if isinstance(checked_drafts, dict) else None
                     if isinstance(draft, dict):
                         if not bool(draft.get("valid", False)):
                             final_errors.extend(
@@ -7809,7 +8127,9 @@ if page == "Data Input":
                             continue
                         rows_to_write.extend(list(draft.get("rows", [])))
                     else:
-                        skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
+                        final_errors.append(
+                            f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: missing checked draft."
+                        )
                 if final_errors:
                     st.error("Fix Pokédex draft errors before saving:\n" + "\n".join(final_errors[:12]))
                 elif not rows_to_write:
