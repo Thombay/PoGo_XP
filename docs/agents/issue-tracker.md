@@ -1,22 +1,38 @@
-# Issue tracker: GitHub
+# Issue tracker: Local Markdown
 
-Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and PRDs for this repo live as markdown files in `.scratch/`. Do not use the GitHub CLI for issue operations unless the user explicitly asks to publish something remotely.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
+- One feature per directory: `.scratch/<feature-slug>/`
+- The PRD is `.scratch/<feature-slug>/PRD.md`
+- Implementation issues are `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`
+- Triage state is recorded as a `Status:` line near the top of each issue file. Use the role strings from `docs/agents/triage-labels.md`.
+- Comments and conversation history append to the bottom of the file under a `## Comments` heading.
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+## Issue File Template
+
+```markdown
+# <Issue title>
+
+Status: ready-for-agent
+Type: feature
+
+## Problem
+
+## Scope
+
+## Acceptance Criteria
+
+## Testing
+
+## Comments
+```
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue.
+Create or update local markdown files under `.scratch/<feature-slug>/`.
 
 ## When a skill says "fetch the relevant ticket"
 
-Run `gh issue view <number> --comments`.
+Read the referenced local markdown file. The user will normally pass the path, feature slug, or issue number.
