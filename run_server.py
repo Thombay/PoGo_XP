@@ -26,9 +26,15 @@ def main() -> int:
         f"--server.address={host}",
         f"--server.port={port}",
     ]
+    proc = subprocess.Popen(cmd, cwd=root)
     try:
-        return subprocess.call(cmd, cwd=root)
+        return proc.wait()
     except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
         print("\nServer stopped.", flush=True)
         return 130
 
