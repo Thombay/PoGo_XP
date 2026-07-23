@@ -1,12 +1,12 @@
 {
   "dashboard_gap_leader_by_group": {
-    "global:All": "Tastef",
-    "global:Bekannte": "Azog",
-    "global:Family": "Babsi",
+    "global:All": "AnSaCruiser",
+    "global:Bekannte": "AnSaCruiser",
+    "global:Family": "Martin",
     "global:Papiermuehlgasse": "Tastef",
     "global:Work": "86Berni"
   },
-  "dashboard_window_days": 7,
+  "dashboard_window_days": 30,
   "data_input_inactive": {
     "xp": {
       "2026-05-04": {
@@ -19,7 +19,6 @@
   "data_input_inactive_defaults": {
     "xp": {
       "Babsi": true,
-      "Gloria": true,
       "LuanY3lloW2023": true
     }
   }
