@@ -1,0 +1,72 @@
+{
+  "root_folder_name": "PoGo",
+  "root_folder_id": "1ubwLQHIMalbLrgmMishi4Gc6g8qAACWM",
+  "share_mode": "anyone_with_link",
+  "export_mode": "dark",
+  "window_days": 7,
+  "exports": [
+    {
+      "dashboard": "Dashboard Global",
+      "group": "All",
+      "folder_id": "1phT7f2xezSYs0s3xTu21Q2Hrv4O5aEUM",
+      "file_name": "dashboard.html",
+      "file_id": "1YvgyXh0-tvyC2Il1443lDepHnmcZHC3I",
+      "web_view_link": "https://drive.google.com/file/d/1YvgyXh0-tvyC2Il1443lDepHnmcZHC3I/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Global",
+      "group": "Family",
+      "folder_id": "1djpXW4WBZGwooV-d7uzyYo43qM7fwsuM",
+      "file_name": "dashboard.html",
+      "file_id": "1rQ1NyCxxmlC7NGnOoXYF51cEfoxb92-D",
+      "web_view_link": "https://drive.google.com/file/d/1rQ1NyCxxmlC7NGnOoXYF51cEfoxb92-D/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Global",
+      "group": "Work",
+      "folder_id": "1W33SjEomoInVMlb-NpFohGEXGeVAag1k",
+      "file_name": "dashboard.html",
+      "file_id": "1OeVDFaTEKjl7WNvcbZf4y3zD9CU9DCif",
+      "web_view_link": "https://drive.google.com/file/d/1OeVDFaTEKjl7WNvcbZf4y3zD9CU9DCif/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Global",
+      "group": "Papiermuehlgasse",
+      "folder_id": "1gHl8kTKAXtc80HMUVIV8HncuxSP9GgwR",
+      "file_name": "dashboard.html",
+      "file_id": "1zeunFYyldYy-GpA3hSCIJyX3fBYX6LsQ",
+      "web_view_link": "https://drive.google.com/file/d/1zeunFYyldYy-GpA3hSCIJyX3fBYX6LsQ/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Global",
+      "group": "Bekannte",
+      "folder_id": "1kWPGNfXwsq-oHkTxFb2asVkjun54nL0I",
+      "file_name": "dashboard.html",
+      "file_id": "1hof3_e_yl8f742DcKKjd9gARpjjl55yO",
+      "web_view_link": "https://drive.google.com/file/d/1hof3_e_yl8f742DcKKjd9gARpjjl55yO/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Personal",
+      "group": "OwnAccounts",
+      "folder_id": "1u5Fn3DFG9Yi_x-K9No8Fj-dwPVmxgELs",
+      "file_name": "dashboard.html",
+      "file_id": "1A4EUe7jjBnQ8cvyCoHotwvnUSYe65JWG",
+      "web_view_link": "https://drive.google.com/file/d/1A4EUe7jjBnQ8cvyCoHotwvnUSYe65JWG/view?usp=drivesdk",
+      "enabled": true
+    },
+    {
+      "dashboard": "Dashboard Personal",
+      "group": "Ich",
+      "folder_id": "1wYHEFkpxbhaYAH4U_AkAzqPZiIF2Kbjc",
+      "file_name": "dashboard.html",
+      "file_id": "1wKWmkOOC1ri4nGALJhm1S5vmY_WpBjSu",
+      "web_view_link": "https://drive.google.com/file/d/1wKWmkOOC1ri4nGALJhm1S5vmY_WpBjSu/view?usp=drivesdk",
+      "enabled": true
+    }
+  ]
+}

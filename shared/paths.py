@@ -38,6 +38,22 @@ def reference_dir() -> Path:
     return inputs_dir() / "reference"
 
 
+def private_dir() -> Path:
+    return inputs_dir() / "private"
+
+
+def google_drive_credentials_path() -> Path:
+    return private_dir() / "google_drive_credentials.json"
+
+
+def google_drive_token_path() -> Path:
+    return private_dir() / "google_drive_token.json"
+
+
+def google_drive_exports_config_path() -> Path:
+    return config_dir() / "google_drive_exports.json"
+
+
 def total_xp_curve_path() -> Path:
     return reference_dir() / "total_xp_curve.csv"
 
