@@ -23,6 +23,7 @@ from shared.paths import (
     additional_activity_path,
     config_dir,
     data_input_accounts_path,
+    google_drive_exports_config_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
@@ -60,6 +61,14 @@ from webapp.data_files import (
 from webapp.exporting import (
     build_dashboard_export_html as build_dashboard_export_html_impl,
     build_dashboard_export_png as build_dashboard_export_png_impl,
+)
+from webapp.google_drive import (
+    build_drive_service,
+    enabled_export_targets,
+    format_publish_summary,
+    load_google_drive_credentials,
+    load_google_drive_exports_config,
+    publish_html_exports,
 )
 from webapp.ui_styles import inject_responsive_styles
 from webapp.views.dashboard import render_dashboard_content_view
@@ -6102,6 +6111,104 @@ def _build_dashboard_export_payload(
     }
 
 
+def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
+    """Reload latest dashboard data and upload configured Google Drive HTML exports."""
+    config = load_google_drive_exports_config(google_drive_exports_config_path())
+    targets = enabled_export_targets(config)
+    if not targets:
+        return {
+            "ok": False,
+            "skipped": True,
+            "uploaded": 0,
+            "total": 0,
+            "results": [],
+            "error": (
+                "No enabled Google Drive export targets with folder IDs. "
+                "Run `python tools/google_drive_setup_folders.py` first."
+            ),
+        }
+
+    curve_map_local = load_curve_map(total_xp_curve_path())
+    xp_input_local = load_xp_history(xp_history_path(), curve_map_local)
+    xp_local = carry_forward_max_level_rows(xp_input_local, curve_map_local)
+    additional_local = load_additional_activity(additional_activity_path())
+    groups_local = parse_groups(player_groups_path())
+    medal_local = load_medal_snapshots(
+        medal_snapshots_path(),
+        account_order=ACCOUNT_ORDER,
+        excluded_manual_medal_ids=EXCLUDED_MANUAL_MEDAL_IDS,
+    )
+    goals_local = load_medal_goals(medals_config_path())
+    display_medal_local = with_derived_platinum_rows(medal_local, goals_local)
+    all_dashboard_accounts_local = sorted(
+        set(xp_local["Spieler"].dropna().astype(str).tolist())
+        | set(display_medal_local["account"].dropna().astype(str).tolist())
+    )
+    window_days = int(config.get("window_days") or load_saved_dashboard_window_days(DASHBOARD_WINDOW_OPTIONS[0]))
+
+    def _build_html(dashboard: str, group: str, export_mode: str, window_days_inner: int) -> str:
+        selected_accounts = accounts_for_selected_group(group, groups_local, all_dashboard_accounts_local)
+        if not selected_accounts:
+            raise ValueError(f"No accounts found for group `{group}`.")
+        dash_xp_df = xp_local[xp_local["Spieler"].isin(selected_accounts)].copy()
+        dash_medal_df = medal_local[medal_local["account"].isin(selected_accounts)].copy()
+        dash_additional_df = additional_local[additional_local["account"].isin(selected_accounts)].copy()
+        dash_display_medal_df = display_medal_local[display_medal_local["account"].isin(selected_accounts)].copy()
+        show_medals = str(dashboard).strip().lower() == "dashboard personal"
+        preference_prefix = "personal" if show_medals else "global"
+        gap_leader = load_saved_dashboard_gap_leader(
+            f"{preference_prefix}:{group}",
+            [str(a).strip() for a in selected_accounts],
+        )
+        if not gap_leader:
+            gap_leader = infer_default_gap_leader(dash_xp_df)
+        return build_dashboard_export_html(
+            dashboard_title=dashboard,
+            selected_group=group,
+            selected_accounts=selected_accounts,
+            dash_xp_df=dash_xp_df,
+            dash_medal_df=dash_medal_df,
+            dash_additional_df=dash_additional_df,
+            dash_display_medal_df=dash_display_medal_df,
+            goals_df=goals_local,
+            curve_map=curve_map_local,
+            show_medals=show_medals,
+            export_mode=export_mode,
+            window_days=int(window_days_inner or window_days),
+            selected_gap_leader=gap_leader,
+        )
+
+    service = build_drive_service(load_google_drive_credentials(interactive=False))
+    return publish_html_exports(
+        service,
+        config,
+        build_html=_build_html,
+        config_path=google_drive_exports_config_path(),
+    )
+
+
+def notify_google_drive_export_result(result: dict[str, object] | None = None) -> None:
+    if result is None:
+        try:
+            result = rebuild_and_upload_google_drive_exports()
+        except FileNotFoundError as exc:
+            st.warning(f"Google Drive export skipped: {exc}")
+            return
+        except Exception as exc:
+            st.warning(f"Google Drive export failed: {exc}")
+            return
+
+    if result.get("skipped"):
+        st.info(str(result.get("error") or "Google Drive export skipped."))
+        return
+
+    summary = format_publish_summary(result)
+    if result.get("ok"):
+        st.success(summary)
+    else:
+        st.warning(summary)
+
+
 def build_dashboard_export_html(
     dashboard_title: str,
     selected_group: str,
@@ -7844,6 +7951,7 @@ if page == "Data Input":
                         )
                         if skipped_unchanged:
                             st.caption(f"Unchanged without inactive marker stayed open: {', '.join(skipped_unchanged)}")
+                        notify_google_drive_export_result()
 
         if all_players:
             st.markdown("Input order for XP accounts")
@@ -8150,6 +8258,7 @@ if page == "Data Input":
                         st.error(str(e))
                     else:
                         st.success(f"Saved medal snapshot rows: {written} for {medal_account}")
+                        notify_google_drive_export_result()
 
             medal_order = load_medal_input_order(goals_df, account=medal_account)
             st.markdown(f"Input order for `{medal_account}`")
@@ -8532,6 +8641,7 @@ if page == "Data Input":
                                 "Unchanged without inactive marker stayed open: "
                                 + ", ".join(skipped_unchanged)
                             )
+                        notify_google_drive_export_result()
 
         with st.expander("Pokemon Catalog (1-1025)", expanded=False):
             st.caption("Reference data comes from `inputs/reference/pokemon_catalog.csv`; edit availability or notes in the CSV.")
