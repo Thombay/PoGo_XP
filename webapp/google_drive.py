@@ -72,6 +72,7 @@ def default_google_drive_exports_config(
     dashboard_groups = dashboards or {
         "Dashboard Global": ["All", "Family", "Work", "Papiermuehlgasse", "Bekannte"],
         "Dashboard Personal": ["OwnAccounts", "Ich"],
+        "Medal Dashboard": ["OwnAccounts", "Ich"],
     }
     exports: list[dict[str, Any]] = []
     for dashboard, groups in dashboard_groups.items():

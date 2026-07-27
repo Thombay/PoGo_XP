@@ -29,6 +29,7 @@ def _dashboard_groups_from_player_groups() -> dict[str, list[str]]:
     return {
         "Dashboard Global": global_groups,
         "Dashboard Personal": personal_groups,
+        "Medal Dashboard": personal_groups,
     }
 
 

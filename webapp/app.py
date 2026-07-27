@@ -23,6 +23,7 @@ from shared.paths import (
     additional_activity_path,
     config_dir,
     data_input_accounts_path,
+    github_pages_site_dir,
     google_drive_exports_config_path,
     medal_snapshots_path,
     medals_config_path,
@@ -69,6 +70,11 @@ from webapp.google_drive import (
     load_google_drive_credentials,
     load_google_drive_exports_config,
     publish_html_exports,
+)
+from webapp.github_pages import (
+    format_github_pages_summary,
+    load_github_pages_config,
+    publish_html_to_github_pages,
 )
 from webapp.ui_styles import inject_responsive_styles
 from webapp.views.dashboard import render_dashboard_content_view
@@ -4955,6 +4961,226 @@ def _build_medal_export_tables(
     ].copy()
 
 
+def _build_medal_progress_export_blocks(
+    selected_accounts: list[str],
+    dash_medal_df: pd.DataFrame,
+    dash_display_medal_df: pd.DataFrame,
+    dash_xp_df: pd.DataFrame,
+    goals_df: pd.DataFrame,
+    curve_map: dict[int, int],
+    *,
+    include_xp_progress: bool = True,
+    filter_mode: str = MEDAL_FILTER_SHOW_ALL,
+    show_goal_trends: bool = True,
+) -> list[dict[str, object]]:
+    """Build Medal Explorer-style chart blocks for HTML export."""
+    accounts = [str(a).strip() for a in selected_accounts if str(a).strip()]
+    if not accounts or dash_display_medal_df.empty:
+        return []
+
+    account_color_map = build_account_color_map(accounts, dash_xp_df)
+    display_df = dash_display_medal_df[dash_display_medal_df["account"].isin(accounts)].copy()
+    if display_df.empty:
+        return []
+    display_df["date"] = pd.to_datetime(display_df["date"], errors="coerce")
+    display_df["account"] = display_df["account"].astype(str).str.strip()
+    display_df["medal_id"] = display_df["medal_id"].astype(str).str.strip().str.lower()
+    display_df["value"] = pd.to_numeric(display_df["value"], errors="coerce")
+    display_df = display_df.dropna(subset=["date", "account", "medal_id", "value"]).copy()
+    if display_df.empty:
+        return []
+
+    source_df = dash_medal_df[dash_medal_df["account"].isin(accounts)].copy() if not dash_medal_df.empty else pd.DataFrame()
+    tracking_start_by_account = infer_medal_tracking_start_dates(
+        source_df,
+        min_medal_rows=MIN_MEDAL_ROWS_FOR_TRACKING_START,
+    )
+
+    goals_map: dict[str, float] = {}
+    display_map: dict[str, str] = {}
+    if not goals_df.empty:
+        goals_for_plot = goals_df.copy()
+        goals_for_plot["medal_id"] = goals_for_plot["medal_id"].astype(str).str.strip().str.lower()
+        goals_for_plot["goal_value"] = pd.to_numeric(goals_for_plot["goal_value"], errors="coerce")
+        goals_for_plot = goals_for_plot.dropna(subset=["medal_id", "goal_value"]).copy()
+        goals_map = dict(
+            zip(
+                goals_for_plot["medal_id"].astype(str).tolist(),
+                goals_for_plot["goal_value"].astype(float).tolist(),
+            )
+        )
+        display_map = dict(
+            zip(
+                goals_for_plot["medal_id"].astype(str).tolist(),
+                goals_for_plot["display_name"].astype(str).tolist(),
+            )
+        )
+    explanations_map = medal_explanation_map_from_goals(goals_df)
+
+    def _add_goal_and_trends(fig_medal: go.Figure, line_df: pd.DataFrame, medal_id: str) -> None:
+        goal_lookup_id = goal_medal_id_for(medal_id)
+        goal_val = goals_map.get(goal_lookup_id)
+        if goal_val is None or pd.isna(goal_val):
+            return
+        goal_val_f = float(goal_val)
+        add_light_goal_reference(fig_medal, goal_val_f, f"Goal: {goal_val:g}")
+        y_max_data = pd.to_numeric(line_df.get("value"), errors="coerce").max()
+        if pd.notna(y_max_data):
+            y_top = max(float(y_max_data), goal_val_f)
+            if y_top <= 0:
+                y_top = 1.0
+            fig_medal.update_yaxes(range=[0, y_top * 1.05])
+        if not show_goal_trends:
+            return
+        color_by_account: dict[str, str | None] = {}
+        for tr in fig_medal.data:
+            name = str(getattr(tr, "name", ""))
+            color = getattr(getattr(tr, "line", None), "color", None)
+            color_by_account[name] = color
+        for acc, grp in line_df.groupby("account", sort=True):
+            if medal_id == DERIVED_MEDAL_ID:
+                trend_trace = build_platinum_goal_projection_trace(
+                    display_df,
+                    str(acc),
+                    goals_map,
+                    float(goal_val),
+                    color_by_account.get(str(acc)),
+                )
+            else:
+                trend_trace = build_goal_projection_trace(
+                    grp[["date", "value"]],
+                    float(goal_val),
+                    str(acc),
+                    color_by_account.get(str(acc)),
+                )
+            if trend_trace is not None:
+                fig_medal.add_trace(trend_trace)
+
+    blocks: list[dict[str, object]] = []
+    medal_ids_available = set(display_df["medal_id"].astype(str).tolist())
+
+    if DERIVED_MEDAL_ID in medal_ids_available:
+        platinum_df = display_df[display_df["medal_id"] == DERIVED_MEDAL_ID].copy()
+        if not platinum_df.empty:
+            platinum_df["tracking_start"] = platinum_df["account"].map(tracking_start_by_account)
+            platinum_df = platinum_df[
+                platinum_df["tracking_start"].isna() | (platinum_df["date"] >= platinum_df["tracking_start"])
+            ].copy()
+        if not platinum_df.empty:
+            platinum_title = display_map.get(DERIVED_MEDAL_ID, "Platinum Medals")
+            fig_platinum = px.line(
+                platinum_df,
+                x="date",
+                y="value",
+                color="account",
+                color_discrete_map=account_color_map,
+                markers=True,
+                title=f"Progress: {platinum_title}",
+            )
+            _add_goal_and_trends(fig_platinum, platinum_df, DERIVED_MEDAL_ID)
+            apply_account_colors(fig_platinum, account_color_map)
+            fig_platinum.update_layout(height=520)
+            blocks.append({"type": "chart", "title": f"Progress: {platinum_title}", "figure": fig_platinum})
+
+    if include_xp_progress and not dash_xp_df.empty:
+        xp_line_df = dash_xp_df[dash_xp_df["Spieler"].isin(accounts)].copy()
+        if not xp_line_df.empty:
+            fig_xp = px.line(
+                xp_line_df,
+                x="Date",
+                y="Total XP",
+                color="Spieler",
+                color_discrete_map=account_color_map,
+                markers=True,
+                title="Progress: XP",
+            )
+            xp_goal_value: float | None = None
+            if curve_map:
+                xp_goal_level = 80 if 80 in curve_map else int(max(curve_map.keys()))
+                xp_goal_value = float(curve_map[xp_goal_level])
+                add_light_goal_reference(fig_xp, xp_goal_value, f"Goal L{xp_goal_level}: {int(xp_goal_value):,}")
+            if show_goal_trends and xp_goal_value is not None:
+                color_by_player: dict[str, str | None] = {}
+                for tr in fig_xp.data:
+                    name = str(getattr(tr, "name", ""))
+                    color = getattr(getattr(tr, "line", None), "color", None)
+                    color_by_player[name] = color
+                for player, grp in xp_line_df.groupby("Spieler", sort=True):
+                    trend_trace = build_xp_projection_trace(
+                        grp[["Date", "Total XP"]],
+                        float(xp_goal_value),
+                        str(player),
+                        color_by_player.get(str(player)),
+                    )
+                    if trend_trace is not None:
+                        fig_xp.add_trace(trend_trace)
+            apply_account_colors(fig_xp, account_color_map)
+            fig_xp.update_layout(height=460)
+            y_max_xp = pd.to_numeric(xp_line_df["Total XP"], errors="coerce").max()
+            if xp_goal_value is not None and pd.notna(y_max_xp):
+                y_max_xp = max(float(y_max_xp), xp_goal_value)
+            if pd.notna(y_max_xp):
+                fig_xp.update_yaxes(range=[0, max(1.0, float(y_max_xp) * 1.05)], tickformat=",.0f")
+            else:
+                fig_xp.update_yaxes(tickformat=",.0f")
+            blocks.append({"type": "chart", "title": "Progress: XP", "figure": fig_xp})
+
+    medals_for_grid = {
+        m for m in medal_ids_available if m not in EXCLUDED_MEDAL_GRAPH_IDS and m != DERIVED_MEDAL_ID
+    }
+    thombay_order = load_medal_input_order(goals_df, account="Thombay")
+    medal_ids_base = [m for m in thombay_order if m in medals_for_grid]
+    medal_ids_base += sorted([m for m in medals_for_grid if m not in medal_ids_base])
+    sort_account = next((a for a in MEDAL_EXPLORER_CORE_ACCOUNTS if a in set(accounts)), accounts[0])
+    medal_ids = get_medal_ids_for_view_mode(
+        medal_ids=medal_ids_base,
+        source_df=source_df if not source_df.empty else display_df,
+        goals_map=goals_map,
+        selected_accounts=accounts,
+        filter_mode=filter_mode,
+        sort_metric=MEDAL_SORT_INPUT,
+        sort_direction=MEDAL_SORT_ASC,
+        sort_account=sort_account,
+        input_order=thombay_order,
+    )
+
+    for medal_id in medal_ids:
+        line_df = display_df[display_df["medal_id"] == medal_id].copy()
+        if line_df.empty:
+            continue
+        title_label = display_map.get(medal_id, medal_id)
+        fig_medal = px.line(
+            line_df,
+            x="date",
+            y="value",
+            color="account",
+            color_discrete_map=account_color_map,
+            markers=True,
+            title=f"Progress: {title_label}",
+        )
+        medal_info = explanations_map.get(goal_medal_id_for(medal_id), "")
+        if medal_info and str(medal_info).strip():
+            info_txt = str(medal_info).strip()
+            for tr in fig_medal.data:
+                x_raw = getattr(tr, "x", None)
+                x_vals = list(x_raw) if x_raw is not None else []
+                tr.update(
+                    customdata=[[info_txt] for _ in x_vals],
+                    hovertemplate=(
+                        "Date: %{x|%Y-%m-%d}<br>"
+                        "Account: %{fullData.name}<br>"
+                        "Value: %{y:,}<br>"
+                        "Info: %{customdata[0]}<extra></extra>"
+                    ),
+                )
+        _add_goal_and_trends(fig_medal, line_df, medal_id)
+        apply_account_colors(fig_medal, account_color_map)
+        fig_medal.update_layout(height=320, margin=dict(t=40))
+        blocks.append({"type": "chart", "title": f"Progress: {title_label}", "figure": fig_medal})
+
+    return blocks
+
+
 def render_latest_medal_status_panel(
     dash_medal_df: pd.DataFrame,
     dash_display_medal_df: pd.DataFrame,
@@ -5013,7 +5239,69 @@ def _build_dashboard_export_payload(
     selected_gap_leader: str | None = None,
     xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
     xp_explorer_players: list[str] | tuple[str, ...] | None = None,
+    medal_only: bool = False,
+    include_medal_charts: bool = True,
 ) -> dict[str, object]:
+    if medal_only:
+        latest_medals_view, first_achieved_view = _build_medal_export_tables(
+            dash_medal_df, dash_display_medal_df, goals_df
+        )
+        medal_blocks = _build_medal_progress_export_blocks(
+            selected_accounts=selected_accounts,
+            dash_medal_df=dash_medal_df,
+            dash_display_medal_df=dash_display_medal_df,
+            dash_xp_df=dash_xp_df,
+            goals_df=goals_df,
+            curve_map=curve_map,
+            include_xp_progress=True,
+            filter_mode=MEDAL_FILTER_SHOW_ALL,
+            show_goal_trends=True,
+        )
+        metric_cards: list[object] = []
+        platinum_latest = dash_display_medal_df[dash_display_medal_df["medal_id"] == DERIVED_MEDAL_ID].copy()
+        if not platinum_latest.empty:
+            platinum_latest = platinum_latest.sort_values("date").groupby("account", as_index=False).tail(1)
+            team_platinum_total = int(pd.to_numeric(platinum_latest["value"], errors="coerce").fillna(0).sum())
+            breakdown = []
+            for acc in ACCOUNT_ORDER:
+                row = platinum_latest[platinum_latest["account"].astype(str) == acc]
+                if not row.empty:
+                    breakdown.append(f"{acc}:{int(float(row['value'].iloc[0]))}")
+            metric_cards.append(
+                {
+                    "label": "Team Platinum Total",
+                    "value": f"{team_platinum_total:,}",
+                    "winner": "",
+                    "winner_color": "",
+                    "detail": " | ".join(breakdown),
+                }
+            )
+        latest_medal_date = pd.to_datetime(dash_medal_df.get("date"), errors="coerce").max() if not dash_medal_df.empty else pd.NaT
+        if pd.notna(latest_medal_date):
+            days_ago = (pd.Timestamp.today().normalize() - latest_medal_date.normalize()).days
+            metric_cards.append(
+                {
+                    "label": "Last Medal Snapshot",
+                    "value": latest_medal_date.strftime("%Y-%m-%d"),
+                    "winner": "",
+                    "winner_color": "",
+                    "detail": f"{int(days_ago)} day(s) ago",
+                }
+            )
+        sections: list[tuple[str, pd.DataFrame]] = [
+            ("Latest Medal Status", latest_medals_view),
+            ("Latest Achieved Platinum Medals", first_achieved_view),
+        ]
+        chart_items = [(str(b.get("title", "Chart")), b.get("figure")) for b in medal_blocks if b.get("type") == "chart"]
+        return {
+            "metric_cards": metric_cards,
+            "ordered_blocks": medal_blocks,
+            "chart_items": chart_items,
+            "sections": sections,
+            "accounts_text": ", ".join([str(a) for a in selected_accounts]) if selected_accounts else "-",
+            "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     w = int(window_days)
     w_label = f"{w}d"
     eligible_col = window_col("eligible", w)
@@ -6098,6 +6386,22 @@ def _build_dashboard_export_payload(
     if show_medals:
         sections.append(("Latest Medal Status", latest_medals_view))
         sections.append(("Latest Achieved Platinum Medals", first_achieved_view))
+        if include_medal_charts:
+            medal_blocks = _build_medal_progress_export_blocks(
+                selected_accounts=selected_accounts,
+                dash_medal_df=dash_medal_df,
+                dash_display_medal_df=dash_display_medal_df,
+                dash_xp_df=dash_xp_df,
+                goals_df=goals_df,
+                curve_map=curve_map,
+                include_xp_progress=False,
+                filter_mode=MEDAL_FILTER_SHOW_ALL,
+                show_goal_trends=True,
+            )
+            ordered_blocks.extend(medal_blocks)
+            chart_items.extend(
+                [(str(b.get("title", "Chart")), b.get("figure")) for b in medal_blocks if b.get("type") == "chart"]
+            )
 
     accounts_text = ", ".join([str(a) for a in selected_accounts]) if selected_accounts else "-"
     generated_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -6111,23 +6415,23 @@ def _build_dashboard_export_payload(
     }
 
 
-def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
-    """Reload latest dashboard data and upload configured Google Drive HTML exports."""
-    config = load_google_drive_exports_config(google_drive_exports_config_path())
-    targets = enabled_export_targets(config)
-    if not targets:
-        return {
-            "ok": False,
-            "skipped": True,
-            "uploaded": 0,
-            "total": 0,
-            "results": [],
-            "error": (
-                "No enabled Google Drive export targets with folder IDs. "
-                "Run `python tools/google_drive_setup_folders.py` first."
-            ),
-        }
+def enabled_github_pages_targets(config: dict[str, object]) -> list[dict[str, object]]:
+    """Enabled dashboard/group rows for GitHub Pages (folder IDs not required)."""
+    rows: list[dict[str, object]] = []
+    for row in list(config.get("exports") or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get("enabled", True) is False:
+            continue
+        dashboard = str(row.get("dashboard", "")).strip()
+        group = str(row.get("group", "")).strip()
+        if dashboard and group:
+            rows.append(row)
+    return rows
 
+
+def build_export_html_callback(config: dict[str, object]):
+    """Build the shared HTML callback used by Drive and GitHub Pages publishers."""
     curve_map_local = load_curve_map(total_xp_curve_path())
     xp_input_local = load_xp_history(xp_history_path(), curve_map_local)
     xp_local = carry_forward_max_level_rows(xp_input_local, curve_map_local)
@@ -6154,7 +6458,9 @@ def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
         dash_medal_df = medal_local[medal_local["account"].isin(selected_accounts)].copy()
         dash_additional_df = additional_local[additional_local["account"].isin(selected_accounts)].copy()
         dash_display_medal_df = display_medal_local[display_medal_local["account"].isin(selected_accounts)].copy()
-        show_medals = str(dashboard).strip().lower() == "dashboard personal"
+        dash_key = str(dashboard).strip().lower()
+        show_medals = dash_key in {"dashboard personal", "medal dashboard"}
+        medal_only = dash_key == "medal dashboard"
         preference_prefix = "personal" if show_medals else "global"
         gap_leader = load_saved_dashboard_gap_leader(
             f"{preference_prefix}:{group}",
@@ -6176,14 +6482,61 @@ def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
             export_mode=export_mode,
             window_days=int(window_days_inner or window_days),
             selected_gap_leader=gap_leader,
+            medal_only=medal_only,
         )
 
+    return _build_html
+
+
+def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
+    """Reload latest dashboard data and upload configured Google Drive HTML exports."""
+    config = load_google_drive_exports_config(google_drive_exports_config_path())
+    targets = enabled_export_targets(config)
+    if not targets:
+        return {
+            "ok": False,
+            "skipped": True,
+            "uploaded": 0,
+            "total": 0,
+            "results": [],
+            "error": (
+                "No enabled Google Drive export targets with folder IDs. "
+                "Run `python tools/google_drive_setup_folders.py` first."
+            ),
+        }
+
+    build_html = build_export_html_callback(config)
     service = build_drive_service(load_google_drive_credentials(interactive=False))
     return publish_html_exports(
         service,
         config,
-        build_html=_build_html,
+        build_html=build_html,
         config_path=google_drive_exports_config_path(),
+    )
+
+
+def rebuild_and_publish_github_pages_exports() -> dict[str, object]:
+    """Reload latest dashboard data and publish HTML exports to the gh-pages branch."""
+    config = load_google_drive_exports_config(google_drive_exports_config_path())
+    targets = enabled_github_pages_targets(config)
+    if not targets:
+        return {
+            "ok": False,
+            "skipped": True,
+            "uploaded": 0,
+            "total": 0,
+            "results": [],
+            "error": "No enabled GitHub Pages export targets found.",
+        }
+    pages_config = load_github_pages_config()
+    return publish_html_to_github_pages(
+        targets=targets,
+        build_html=build_export_html_callback(config),
+        export_mode=str(config.get("export_mode") or "dark"),
+        window_days=int(config.get("window_days") or 7),
+        site_dir=github_pages_site_dir(),
+        pages_config=pages_config,
+        push=True,
     )
 
 
@@ -6193,20 +6546,36 @@ def notify_google_drive_export_result(result: dict[str, object] | None = None) -
             result = rebuild_and_upload_google_drive_exports()
         except FileNotFoundError as exc:
             st.warning(f"Google Drive export skipped: {exc}")
-            return
+            result = None
         except Exception as exc:
             st.warning(f"Google Drive export failed: {exc}")
-            return
+            result = None
 
-    if result.get("skipped"):
-        st.info(str(result.get("error") or "Google Drive export skipped."))
+    if result is not None:
+        if result.get("skipped"):
+            st.info(str(result.get("error") or "Google Drive export skipped."))
+        else:
+            summary = format_publish_summary(result)
+            if result.get("ok"):
+                st.success(summary)
+            else:
+                st.warning(summary)
+
+    try:
+        pages_result = rebuild_and_publish_github_pages_exports()
+    except Exception as exc:
+        st.warning(f"GitHub Pages export failed: {exc}")
         return
 
-    summary = format_publish_summary(result)
-    if result.get("ok"):
-        st.success(summary)
+    if pages_result.get("skipped"):
+        st.info(str(pages_result.get("error") or "GitHub Pages export skipped."))
+        return
+
+    pages_summary = format_github_pages_summary(pages_result)
+    if pages_result.get("ok"):
+        st.success(pages_summary)
     else:
-        st.warning(summary)
+        st.warning(pages_summary)
 
 
 def build_dashboard_export_html(
@@ -6225,7 +6594,11 @@ def build_dashboard_export_html(
     selected_gap_leader: str | None = None,
     xp_explorer_date_range: tuple[date, date] | list[date] | None = None,
     xp_explorer_players: list[str] | tuple[str, ...] | None = None,
+    medal_only: bool = False,
 ) -> str:
+    default_window = int(window_days)
+    window_options = [default_window] if medal_only else list(DASHBOARD_WINDOW_OPTIONS)
+
     def _build_payload_for_window(window_days_inner: int) -> dict[str, object]:
         return _build_dashboard_export_payload(
             selected_accounts=selected_accounts,
@@ -6240,14 +6613,16 @@ def build_dashboard_export_html(
             selected_gap_leader=selected_gap_leader,
             xp_explorer_date_range=xp_explorer_date_range,
             xp_explorer_players=xp_explorer_players,
+            medal_only=medal_only,
+            include_medal_charts=(medal_only or int(window_days_inner) == default_window),
         )
 
     return build_dashboard_export_html_impl(
         dashboard_title=dashboard_title,
         selected_group=selected_group,
         export_mode=export_mode,
-        window_days=int(window_days),
-        dashboard_window_options=DASHBOARD_WINDOW_OPTIONS,
+        window_days=default_window,
+        dashboard_window_options=window_options,
         build_payload_for_window=_build_payload_for_window,
         sort_legend_by_latest_y=sort_legend_by_latest_y,
     )

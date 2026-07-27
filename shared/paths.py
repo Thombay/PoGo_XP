@@ -54,6 +54,14 @@ def google_drive_exports_config_path() -> Path:
     return config_dir() / "google_drive_exports.json"
 
 
+def github_pages_config_path() -> Path:
+    return config_dir() / "github_pages.json"
+
+
+def github_pages_site_dir() -> Path:
+    return output_dir() / "github_pages_site"
+
+
 def total_xp_curve_path() -> Path:
     return reference_dir() / "total_xp_curve.csv"
 

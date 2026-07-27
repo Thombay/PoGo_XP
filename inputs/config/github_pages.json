@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "branch": "gh-pages",
+  "base_url": "https://thombay.github.io/PoGo_XP",
+  "commit_message": "Update hosted dashboard exports"
+}

@@ -467,5 +467,7 @@ Thumbs.db
 # --- Project outputs ---
 medal-tracker/out/
 output/medal-tracker/
+output/github_pages_site/
+.gh-pages-worktree/
 pogo-xp/out/
 inputs/private/

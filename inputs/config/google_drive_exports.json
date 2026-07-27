@@ -67,6 +67,24 @@
       "file_id": "1wKWmkOOC1ri4nGALJhm1S5vmY_WpBjSu",
       "web_view_link": "https://drive.google.com/file/d/1wKWmkOOC1ri4nGALJhm1S5vmY_WpBjSu/view?usp=drivesdk",
       "enabled": true
+    },
+    {
+      "dashboard": "Medal Dashboard",
+      "group": "OwnAccounts",
+      "folder_id": "13Xh60FoVMEOihi40dCb8wwx8M2hhv4P7",
+      "file_name": "dashboard.html",
+      "file_id": "",
+      "web_view_link": "",
+      "enabled": true
+    },
+    {
+      "dashboard": "Medal Dashboard",
+      "group": "Ich",
+      "folder_id": "1IVk4rf4RSq9LMCNU2PV2meGxdKXsoLmN",
+      "file_name": "dashboard.html",
+      "file_id": "",
+      "web_view_link": "",
+      "enabled": true
     }
   ]
 }

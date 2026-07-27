@@ -33,6 +33,11 @@ class GoogleDriveHelpersTest(unittest.TestCase):
         self.assertEqual(config["exports"][0]["file_name"], DEFAULT_EXPORT_FILE_NAME)
         self.assertEqual(config["exports"][1]["group"], "Family")
 
+    def test_default_config_includes_medal_dashboard(self):
+        config = default_google_drive_exports_config()
+        medal_rows = [row for row in config["exports"] if row["dashboard"] == "Medal Dashboard"]
+        self.assertEqual([row["group"] for row in medal_rows], ["OwnAccounts", "Ich"])
+
     def test_config_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "google_drive_exports.json"

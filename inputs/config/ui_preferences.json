@@ -6,7 +6,7 @@
     "global:Papiermuehlgasse": "Tastef",
     "global:Work": "86Berni"
   },
-  "dashboard_window_days": 30,
+  "dashboard_window_days": 7,
   "data_input_inactive": {
     "xp": {
       "2026-05-04": {
