@@ -1707,19 +1707,31 @@ def select_date_range(
         st.caption(f"{label}: only one snapshot date available ({min_date.isoformat()}).")
         return min_date, max_date
     default_range = (min_date, max_date)
+    bounds_key = f"{key}_bounds" if key else None
     has_session_value = False
     if key and key in st.session_state:
         has_session_value = True
         current = st.session_state.get(key)
-        clamped_range = default_range
-        if isinstance(current, (tuple, list)) and len(current) == 2:
-            current_start, current_end = current
-            if isinstance(current_start, date) and isinstance(current_end, date):
-                clamped_start = min(max(current_start, min_date), max_date)
-                clamped_end = min(max(current_end, min_date), max_date)
-                if clamped_start > clamped_end:
-                    clamped_start, clamped_end = min_date, max_date
-                clamped_range = (clamped_start, clamped_end)
+        prev_bounds = st.session_state.get(bounds_key) if bounds_key else None
+        was_full_window = (
+            isinstance(prev_bounds, (tuple, list))
+            and len(prev_bounds) == 2
+            and isinstance(current, (tuple, list))
+            and len(current) == 2
+            and tuple(current) == tuple(prev_bounds)
+        )
+        if was_full_window:
+            clamped_range = default_range
+        else:
+            clamped_range = default_range
+            if isinstance(current, (tuple, list)) and len(current) == 2:
+                current_start, current_end = current
+                if isinstance(current_start, date) and isinstance(current_end, date):
+                    clamped_start = min(max(current_start, min_date), max_date)
+                    clamped_end = min(max(current_end, min_date), max_date)
+                    if clamped_start > clamped_end:
+                        clamped_start, clamped_end = min_date, max_date
+                    clamped_range = (clamped_start, clamped_end)
         st.session_state[key] = clamped_range
     slider_parent = st
     if show_reset and key:
@@ -1742,6 +1754,8 @@ def select_date_range(
         slider_kwargs["key"] = key
         if not has_session_value:
             slider_kwargs["value"] = default_range
+        if bounds_key:
+            st.session_state[bounds_key] = default_range
     else:
         slider_kwargs["value"] = default_range
     return slider_parent.slider(**slider_kwargs)
