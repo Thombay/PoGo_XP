@@ -11,6 +11,7 @@ from webapp.github_pages import (
     format_github_pages_summary,
     publish_html_to_github_pages,
     slugify_path_segment,
+    sync_site_dir_to_destination,
     write_export_site,
 )
 
@@ -49,6 +50,67 @@ class GithubPagesHelpersTest(unittest.TestCase):
             )
             self.assertEqual(written[0]["url_path"], "Dashboard-Global/All/")
 
+    def test_overlay_sync_keeps_unpublished_dashboard_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "gh-pages"
+            dest.mkdir()
+            (dest / "Dashboard-Global" / "All").mkdir(parents=True)
+            (dest / "Dashboard-Global" / "All" / "index.html").write_text("<html>global</html>", encoding="utf-8")
+            (dest / "Medal-Dashboard" / "Ich").mkdir(parents=True)
+            (dest / "Medal-Dashboard" / "Ich" / "index.html").write_text("<html>old-medal</html>", encoding="utf-8")
+            (dest / ".git").write_text("keep", encoding="utf-8")
+
+            site_dir = Path(tmp) / "site"
+            write_export_site(
+                site_dir,
+                pages=[
+                    {
+                        "dashboard": "Medal Dashboard",
+                        "group": "Ich",
+                        "html": "<html>new-medal</html>",
+                    }
+                ],
+            )
+            sync_site_dir_to_destination(site_dir, dest, replace_existing=False)
+
+            self.assertEqual(
+                (dest / "Dashboard-Global" / "All" / "index.html").read_text(encoding="utf-8"),
+                "<html>global</html>",
+            )
+            self.assertEqual(
+                (dest / "Medal-Dashboard" / "Ich" / "index.html").read_text(encoding="utf-8"),
+                "<html>new-medal</html>",
+            )
+            self.assertEqual((dest / ".git").read_text(encoding="utf-8"), "keep")
+
+    def test_replace_sync_removes_unpublished_dashboard_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "gh-pages"
+            dest.mkdir()
+            (dest / "Dashboard-Global" / "All").mkdir(parents=True)
+            (dest / "Dashboard-Global" / "All" / "index.html").write_text("<html>global</html>", encoding="utf-8")
+            (dest / ".git").write_text("keep", encoding="utf-8")
+
+            site_dir = Path(tmp) / "site"
+            write_export_site(
+                site_dir,
+                pages=[
+                    {
+                        "dashboard": "Medal Dashboard",
+                        "group": "Ich",
+                        "html": "<html>medal</html>",
+                    }
+                ],
+            )
+            sync_site_dir_to_destination(site_dir, dest, replace_existing=True)
+
+            self.assertFalse((dest / "Dashboard-Global").exists())
+            self.assertEqual(
+                (dest / "Medal-Dashboard" / "Ich" / "index.html").read_text(encoding="utf-8"),
+                "<html>medal</html>",
+            )
+            self.assertEqual((dest / ".git").read_text(encoding="utf-8"), "keep")
+
     def test_publish_html_to_github_pages_without_push(self):
         with tempfile.TemporaryDirectory() as tmp:
             site_dir = Path(tmp) / "site"
@@ -65,6 +127,23 @@ class GithubPagesHelpersTest(unittest.TestCase):
         self.assertEqual(result["uploaded"], 1)
         self.assertIn("Dashboard-Personal/Ich/", result["results"][0]["web_view_link"])
         self.assertIn("GitHub Pages exports updated: 1/1", format_github_pages_summary(result))
+
+    def test_publish_reports_progress_for_pages_and_skips_push(self):
+        seen: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            site_dir = Path(tmp) / "site"
+            result = publish_html_to_github_pages(
+                targets=[{"dashboard": "Dashboard Personal", "group": "Ich", "enabled": True}],
+                build_html=lambda dashboard, group, mode, days: f"<html>{dashboard}:{group}</html>",
+                export_mode="dark",
+                window_days=7,
+                site_dir=site_dir,
+                push=False,
+                on_progress=seen.append,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen, ["GitHub Pages: Dashboard Personal / Ich"])
 
     def test_publish_respects_disabled_config(self):
         with tempfile.TemporaryDirectory() as tmp:

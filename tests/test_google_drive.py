@@ -3,13 +3,17 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+from google.auth.exceptions import RefreshError
 
 from webapp.google_drive import (
     DEFAULT_EXPORT_FILE_NAME,
+    dashboard_matches_export_kind,
     default_google_drive_exports_config,
     enabled_export_targets,
     format_publish_summary,
+    load_google_drive_credentials,
     load_google_drive_exports_config,
     publish_html_exports,
     save_google_drive_exports_config,
@@ -63,6 +67,26 @@ class GoogleDriveHelpersTest(unittest.TestCase):
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0]["group"], "All")
+
+    def test_export_kind_separates_medal_and_xp_dashboards(self):
+        self.assertTrue(dashboard_matches_export_kind("Medal Dashboard", "medal"))
+        self.assertFalse(dashboard_matches_export_kind("Dashboard Global", "medal"))
+        self.assertFalse(dashboard_matches_export_kind("Medal Dashboard", "xp"))
+        self.assertTrue(dashboard_matches_export_kind("Dashboard Personal", "xp"))
+        self.assertTrue(dashboard_matches_export_kind("Medal Dashboard", "all"))
+
+        config = default_google_drive_exports_config()
+        for row in config["exports"]:
+            row["folder_id"] = f"folder-{row['dashboard']}-{row['group']}"
+
+        medal_targets = enabled_export_targets(config, kind="medal")
+        xp_targets = enabled_export_targets(config, kind="xp")
+
+        self.assertEqual({row["dashboard"] for row in medal_targets}, {"Medal Dashboard"})
+        self.assertEqual(
+            {row["dashboard"] for row in xp_targets},
+            {"Dashboard Global", "Dashboard Personal"},
+        )
 
     def test_setup_google_drive_folder_structure_reuses_existing_folders(self):
         service = MagicMock()
@@ -159,6 +183,73 @@ class GoogleDriveHelpersTest(unittest.TestCase):
         self.assertEqual(saved["exports"][0]["web_view_link"], "https://drive.example/file-1")
         self.assertIn("Dashboard Global / All", format_publish_summary(result))
 
+    def test_publish_html_exports_reports_progress_per_file(self):
+        service = MagicMock()
+        service.files.return_value.create.return_value.execute.return_value = {
+            "id": "file-1",
+            "name": "dashboard.html",
+            "webViewLink": "https://drive.example/file-1",
+        }
+        seen: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "google_drive_exports.json"
+            config = default_google_drive_exports_config(dashboards={"Dashboard Global": ["All", "Family"]})
+            config["exports"][0]["folder_id"] = "folder-all"
+            config["exports"][1]["folder_id"] = "folder-family"
+            publish_html_exports(
+                service,
+                config,
+                build_html=lambda *_args: "<html>ok</html>",
+                config_path=path,
+                on_progress=seen.append,
+            )
+
+        self.assertEqual(
+            seen,
+            ["Google Drive: Dashboard Global / All", "Google Drive: Dashboard Global / Family"],
+        )
+
+    def test_publish_html_exports_kind_medal_skips_other_dashboards(self):
+        service = MagicMock()
+        service.files.return_value.create.return_value.execute.return_value = {
+            "id": "medal-file",
+            "name": "dashboard.html",
+            "webViewLink": "https://drive.example/medal-file",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "google_drive_exports.json"
+            config = default_google_drive_exports_config(
+                dashboards={
+                    "Dashboard Global": ["All"],
+                    "Medal Dashboard": ["Ich"],
+                }
+            )
+            config["exports"][0]["folder_id"] = "folder-global"
+            config["exports"][1]["folder_id"] = "folder-medal"
+
+            built: list[tuple[str, str]] = []
+
+            def build_html(dashboard: str, group: str, export_mode: str, window_days: int) -> str:
+                built.append((dashboard, group))
+                return f"<html>{dashboard}:{group}</html>"
+
+            result = publish_html_exports(
+                service,
+                config,
+                build_html=build_html,
+                config_path=path,
+                kind="medal",
+            )
+            saved = load_google_drive_exports_config(path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["uploaded"], 1)
+        self.assertEqual(built, [("Medal Dashboard", "Ich")])
+        self.assertEqual(saved["exports"][0]["file_id"], "")
+        self.assertEqual(saved["exports"][1]["file_id"], "medal-file")
+
     def test_publish_html_exports_keeps_existing_file_id_on_update(self):
         service = MagicMock()
         service.files.return_value.update.return_value.execute.return_value = {
@@ -231,6 +322,91 @@ class GoogleDriveHelpersTest(unittest.TestCase):
         self.assertEqual(after_update["exports"][0]["web_view_link"], stable_link)
         service.files.return_value.create.assert_called_once()
         service.files.return_value.update.assert_called_once()
+
+    def test_load_credentials_refresh_error_noninteractive_asks_reconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tok_path = Path(tmp) / "google_drive_token.json"
+            creds_path = Path(tmp) / "google_drive_credentials.json"
+            tok_path.write_text("{}", encoding="utf-8")
+            stale = MagicMock()
+            stale.expired = True
+            stale.refresh_token = "stale-refresh"
+            stale.valid = False
+            stale.refresh.side_effect = RefreshError(
+                "invalid_grant: Bad Request",
+                {"error": "invalid_grant", "error_description": "Bad Request"},
+            )
+
+            with patch("webapp.google_drive.Credentials") as mock_creds_cls:
+                mock_creds_cls.from_authorized_user_file.return_value = stale
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    load_google_drive_credentials(
+                        credentials_path=creds_path,
+                        token_path=tok_path,
+                        interactive=False,
+                    )
+
+            self.assertIn("google_drive_connect.py", str(ctx.exception))
+            self.assertFalse(tok_path.exists())
+
+    def test_load_credentials_refresh_error_interactive_reauths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tok_path = Path(tmp) / "google_drive_token.json"
+            creds_path = Path(tmp) / "google_drive_credentials.json"
+            tok_path.write_text("{}", encoding="utf-8")
+            creds_path.write_text("{}", encoding="utf-8")
+            stale = MagicMock()
+            stale.expired = True
+            stale.refresh_token = "stale-refresh"
+            stale.valid = False
+            stale.refresh.side_effect = RefreshError(
+                "invalid_grant: Bad Request",
+                {"error": "invalid_grant", "error_description": "Bad Request"},
+            )
+            fresh = MagicMock()
+            fresh.to_json.return_value = '{"token": "new"}'
+            flow = MagicMock()
+            flow.run_local_server.return_value = fresh
+
+            with patch("webapp.google_drive.Credentials") as mock_creds_cls:
+                mock_creds_cls.from_authorized_user_file.return_value = stale
+                with patch("webapp.google_drive.InstalledAppFlow") as mock_flow_cls:
+                    mock_flow_cls.from_client_secrets_file.return_value = flow
+                    result = load_google_drive_credentials(
+                        credentials_path=creds_path,
+                        token_path=tok_path,
+                        interactive=True,
+                    )
+
+            self.assertIs(result, fresh)
+            flow.run_local_server.assert_called_once()
+            kwargs = flow.run_local_server.call_args.kwargs
+            self.assertEqual(kwargs.get("access_type"), "offline")
+            self.assertEqual(kwargs.get("prompt"), "consent")
+            self.assertEqual(tok_path.read_text(encoding="utf-8"), '{"token": "new"}')
+
+    def test_load_credentials_successful_refresh_saves_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tok_path = Path(tmp) / "google_drive_token.json"
+            creds_path = Path(tmp) / "google_drive_credentials.json"
+            tok_path.write_text("{}", encoding="utf-8")
+            refreshed = MagicMock()
+            refreshed.expired = True
+            refreshed.refresh_token = "refresh"
+            refreshed.valid = True
+            refreshed.to_json.return_value = '{"token": "refreshed"}'
+
+            with patch("webapp.google_drive.Credentials") as mock_creds_cls:
+                mock_creds_cls.from_authorized_user_file.return_value = refreshed
+                result = load_google_drive_credentials(
+                    credentials_path=creds_path,
+                    token_path=tok_path,
+                    interactive=False,
+                )
+
+            self.assertIs(result, refreshed)
+            refreshed.refresh.assert_called_once()
+            self.assertEqual(tok_path.read_text(encoding="utf-8"), '{"token": "refreshed"}')
 
 
 if __name__ == "__main__":

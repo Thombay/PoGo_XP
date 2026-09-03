@@ -138,6 +138,33 @@ def remote_branch_exists(repo: Path, branch: str, remote: str = "origin") -> boo
     return any(line.strip().endswith(f"refs/heads/{branch}") for line in result.stdout.splitlines())
 
 
+def sync_site_dir_to_destination(
+    site_dir: Path,
+    destination: Path,
+    *,
+    replace_existing: bool = True,
+) -> None:
+    """Copy built pages into destination. Overlay keeps folders not in site_dir."""
+    if replace_existing:
+        for child in list(destination.iterdir()):
+            if child.name == ".git":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    for item in site_dir.iterdir():
+        target = destination / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            if target.exists() and target.is_dir():
+                shutil.rmtree(target)
+            shutil.copy2(item, target)
+
+
 def publish_site_dir_to_gh_pages(
     site_dir: Path,
     *,
@@ -145,8 +172,9 @@ def publish_site_dir_to_gh_pages(
     branch: str = DEFAULT_BRANCH,
     remote: str = "origin",
     commit_message: str = "Update hosted dashboard exports",
+    replace_existing: bool = True,
 ) -> dict[str, Any]:
-    """Replace gh-pages branch contents with site_dir and push to remote."""
+    """Copy site_dir onto the gh-pages branch and push to remote."""
     root = repo or repo_root()
     site_dir = site_dir.resolve()
     if not site_dir.exists() or not any(site_dir.iterdir()):
@@ -166,21 +194,7 @@ def publish_site_dir_to_gh_pages(
         else:
             _run_git(["worktree", "add", "--force", "--orphan", "-b", branch, str(worktree)], cwd=root)
 
-        # Clear existing published files (keep .git via worktree metadata outside dir contents).
-        for child in worktree.iterdir():
-            if child.name == ".git":
-                continue
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-
-        for item in site_dir.iterdir():
-            target = worktree / item.name
-            if item.is_dir():
-                shutil.copytree(item, target)
-            else:
-                shutil.copy2(item, target)
+        sync_site_dir_to_destination(site_dir, worktree, replace_existing=replace_existing)
 
         _run_git(["add", "-A"], cwd=worktree)
         status = _run_git(["status", "--porcelain"], cwd=worktree)
@@ -218,6 +232,8 @@ def publish_html_to_github_pages(
     pages_config: GithubPagesConfig | None = None,
     push: bool = True,
     repo: Path | None = None,
+    replace_existing: bool = True,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     cfg = pages_config or load_github_pages_config()
     if not cfg.enabled:
@@ -237,6 +253,8 @@ def publish_html_to_github_pages(
         group = str(row.get("group", "")).strip()
         if not dashboard or not group:
             continue
+        if on_progress:
+            on_progress(f"GitHub Pages: {dashboard} / {group}")
         try:
             html = build_html(dashboard, group, export_mode, window_days)
             pages.append({"dashboard": dashboard, "group": group, "html": html})
@@ -272,11 +290,14 @@ def publish_html_to_github_pages(
     write_export_site(site_dir, pages)
     push_result: dict[str, Any] = {"ok": True, "pushed": False, "message": "Push skipped."}
     if push:
+        if on_progress:
+            on_progress("Pushing gh-pages branch…")
         push_result = publish_site_dir_to_gh_pages(
             site_dir,
             repo=repo,
             branch=cfg.branch,
             commit_message=cfg.commit_message,
+            replace_existing=replace_existing,
         )
 
     ok_count = sum(1 for item in results if item.get("ok"))

@@ -8,6 +8,7 @@ import sys
 from datetime import date
 from html import escape
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import plotly.express as px
@@ -64,7 +65,11 @@ from webapp.exporting import (
     build_dashboard_export_png as build_dashboard_export_png_impl,
 )
 from webapp.google_drive import (
+    EXPORT_KIND_ALL,
+    EXPORT_KIND_MEDAL,
+    EXPORT_KIND_XP,
     build_drive_service,
+    dashboard_matches_export_kind,
     enabled_export_targets,
     format_publish_summary,
     load_google_drive_credentials,
@@ -6429,7 +6434,10 @@ def _build_dashboard_export_payload(
     }
 
 
-def enabled_github_pages_targets(config: dict[str, object]) -> list[dict[str, object]]:
+def enabled_github_pages_targets(
+    config: dict[str, object],
+    kind: str | None = None,
+) -> list[dict[str, object]]:
     """Enabled dashboard/group rows for GitHub Pages (folder IDs not required)."""
     rows: list[dict[str, object]] = []
     for row in list(config.get("exports") or []):
@@ -6439,7 +6447,7 @@ def enabled_github_pages_targets(config: dict[str, object]) -> list[dict[str, ob
             continue
         dashboard = str(row.get("dashboard", "")).strip()
         group = str(row.get("group", "")).strip()
-        if dashboard and group:
+        if dashboard and group and dashboard_matches_export_kind(dashboard, kind):
             rows.append(row)
     return rows
 
@@ -6502,10 +6510,13 @@ def build_export_html_callback(config: dict[str, object]):
     return _build_html
 
 
-def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
+def rebuild_and_upload_google_drive_exports(
+    kind: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, object]:
     """Reload latest dashboard data and upload configured Google Drive HTML exports."""
     config = load_google_drive_exports_config(google_drive_exports_config_path())
-    targets = enabled_export_targets(config)
+    targets = enabled_export_targets(config, kind=kind)
     if not targets:
         return {
             "ok": False,
@@ -6526,13 +6537,18 @@ def rebuild_and_upload_google_drive_exports() -> dict[str, object]:
         config,
         build_html=build_html,
         config_path=google_drive_exports_config_path(),
+        kind=kind,
+        on_progress=on_progress,
     )
 
 
-def rebuild_and_publish_github_pages_exports() -> dict[str, object]:
+def rebuild_and_publish_github_pages_exports(
+    kind: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, object]:
     """Reload latest dashboard data and publish HTML exports to the gh-pages branch."""
     config = load_google_drive_exports_config(google_drive_exports_config_path())
-    targets = enabled_github_pages_targets(config)
+    targets = enabled_github_pages_targets(config, kind=kind)
     if not targets:
         return {
             "ok": False,
@@ -6543,6 +6559,7 @@ def rebuild_and_publish_github_pages_exports() -> dict[str, object]:
             "error": "No enabled GitHub Pages export targets found.",
         }
     pages_config = load_github_pages_config()
+    export_kind = str(kind or EXPORT_KIND_ALL).strip().lower() or EXPORT_KIND_ALL
     return publish_html_to_github_pages(
         targets=targets,
         build_html=build_export_html_callback(config),
@@ -6551,13 +6568,42 @@ def rebuild_and_publish_github_pages_exports() -> dict[str, object]:
         site_dir=github_pages_site_dir(),
         pages_config=pages_config,
         push=True,
+        replace_existing=export_kind == EXPORT_KIND_ALL,
+        on_progress=on_progress,
     )
 
 
-def notify_google_drive_export_result(result: dict[str, object] | None = None) -> None:
+def _publish_progress_tracker(total_steps: int):
+    total = max(int(total_steps), 1)
+    bar = st.progress(0, text=f"0/{total} · Starting dashboard publish…")
+    done = {"n": 0}
+
+    def step(message: str) -> None:
+        done["n"] += 1
+        current = min(done["n"], total)
+        bar.progress(current / total, text=f"{current}/{total} · {message}")
+
+    def finish(message: str) -> None:
+        bar.progress(1.0, text=message)
+
+    return step, finish
+
+
+def notify_google_drive_export_result(
+    result: dict[str, object] | None = None,
+    *,
+    kind: str | None = None,
+) -> None:
+    config = load_google_drive_exports_config(google_drive_exports_config_path())
+    drive_count = len(enabled_export_targets(config, kind=kind))
+    pages_count = len(enabled_github_pages_targets(config, kind=kind))
+    total_steps = drive_count + pages_count + (1 if pages_count else 0)
+    st.caption("Keep the server running until the bar reaches the end.")
+    on_progress, finish_progress = _publish_progress_tracker(total_steps)
+
     if result is None:
         try:
-            result = rebuild_and_upload_google_drive_exports()
+            result = rebuild_and_upload_google_drive_exports(kind=kind, on_progress=on_progress)
         except FileNotFoundError as exc:
             st.warning(f"Google Drive export skipped: {exc}")
             result = None
@@ -6576,19 +6622,23 @@ def notify_google_drive_export_result(result: dict[str, object] | None = None) -
                 st.warning(summary)
 
     try:
-        pages_result = rebuild_and_publish_github_pages_exports()
+        pages_result = rebuild_and_publish_github_pages_exports(kind=kind, on_progress=on_progress)
     except Exception as exc:
+        finish_progress("Dashboard publish stopped.")
         st.warning(f"GitHub Pages export failed: {exc}")
         return
 
     if pages_result.get("skipped"):
+        finish_progress("Dashboard publish finished.")
         st.info(str(pages_result.get("error") or "GitHub Pages export skipped."))
         return
 
     pages_summary = format_github_pages_summary(pages_result)
     if pages_result.get("ok"):
+        finish_progress("Dashboard publish finished.")
         st.success(pages_summary)
     else:
+        finish_progress("Dashboard publish finished with warnings.")
         st.warning(pages_summary)
 
 
@@ -8340,7 +8390,7 @@ if page == "Data Input":
                         )
                         if skipped_unchanged:
                             st.caption(f"Unchanged without inactive marker stayed open: {', '.join(skipped_unchanged)}")
-                        notify_google_drive_export_result()
+                        notify_google_drive_export_result(kind=EXPORT_KIND_XP)
 
         if all_players:
             st.markdown("Input order for XP accounts")
@@ -8647,7 +8697,7 @@ if page == "Data Input":
                         st.error(str(e))
                     else:
                         st.success(f"Saved medal snapshot rows: {written} for {medal_account}")
-                        notify_google_drive_export_result()
+                        notify_google_drive_export_result(kind=EXPORT_KIND_MEDAL)
 
             medal_order = load_medal_input_order(goals_df, account=medal_account)
             st.markdown(f"Input order for `{medal_account}`")
@@ -9030,7 +9080,7 @@ if page == "Data Input":
                                 "Unchanged without inactive marker stayed open: "
                                 + ", ".join(skipped_unchanged)
                             )
-                        notify_google_drive_export_result()
+                        notify_google_drive_export_result(kind=EXPORT_KIND_XP)
 
         with st.expander("Pokemon Catalog (1-1025)", expanded=False):
             st.caption("Reference data comes from `inputs/reference/pokemon_catalog.csv`; edit availability or notes in the CSV.")

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
@@ -25,6 +26,10 @@ DEFAULT_EXPORT_MODE = "dark"
 DEFAULT_WINDOW_DAYS = 7
 MIME_FOLDER = "application/vnd.google-apps.folder"
 MIME_HTML = "text/html"
+EXPORT_KIND_ALL = "all"
+EXPORT_KIND_XP = "xp"
+EXPORT_KIND_MEDAL = "medal"
+MEDAL_DASHBOARD_NAME = "Medal Dashboard"
 
 
 def load_google_drive_credentials(
@@ -41,7 +46,12 @@ def load_google_drive_credentials(
         creds = Credentials.from_authorized_user_file(str(tok_path), SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+            tok_path.write_text(creds.to_json(), encoding="utf-8")
+        except RefreshError:
+            tok_path.unlink(missing_ok=True)
+            creds = None
 
     if not creds or not creds.valid:
         if not interactive:
@@ -55,7 +65,7 @@ def load_google_drive_credentials(
                 "Create an OAuth client in Google Cloud, download the JSON, and save it there."
             )
         flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
-        creds = flow.run_local_server(port=0)
+        creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
         tok_path.write_text(creds.to_json(), encoding="utf-8")
 
     return creds
@@ -261,7 +271,21 @@ def setup_google_drive_folder_structure(
     return cfg
 
 
-def enabled_export_targets(config: dict[str, Any]) -> list[dict[str, Any]]:
+def is_medal_dashboard(dashboard: str) -> bool:
+    return str(dashboard).strip().lower() == MEDAL_DASHBOARD_NAME.lower()
+
+
+def dashboard_matches_export_kind(dashboard: str, kind: str | None = None) -> bool:
+    normalized = str(kind or EXPORT_KIND_ALL).strip().lower() or EXPORT_KIND_ALL
+    medal = is_medal_dashboard(dashboard)
+    if normalized == EXPORT_KIND_MEDAL:
+        return medal
+    if normalized == EXPORT_KIND_XP:
+        return not medal
+    return True
+
+
+def enabled_export_targets(config: dict[str, Any], kind: str | None = None) -> list[dict[str, Any]]:
     rows = []
     for row in list(config.get("exports") or []):
         if not isinstance(row, dict):
@@ -273,6 +297,8 @@ def enabled_export_targets(config: dict[str, Any]) -> list[dict[str, Any]]:
         folder_id = str(row.get("folder_id", "")).strip()
         if not dashboard or not group or not folder_id:
             continue
+        if not dashboard_matches_export_kind(dashboard, kind):
+            continue
         rows.append(row)
     return rows
 
@@ -282,11 +308,14 @@ def publish_html_exports(
     config: dict[str, Any],
     build_html: Callable[[str, str, str, int], str],
     config_path: Path | None = None,
+    kind: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Rebuild and upload configured HTML exports.
 
     build_html(dashboard, group, export_mode, window_days) -> html string
+    kind: "all" (default), "xp" (non-medal dashboards), or "medal"
     """
     share_mode = str(config.get("share_mode") or DEFAULT_SHARE_MODE)
     export_mode = str(config.get("export_mode") or DEFAULT_EXPORT_MODE)
@@ -300,8 +329,12 @@ def publish_html_exports(
             continue
         dashboard = str(row.get("dashboard", "")).strip()
         group = str(row.get("group", "")).strip()
+        if not dashboard_matches_export_kind(dashboard, kind):
+            continue
         folder_id = str(row.get("folder_id", "")).strip()
         file_name = str(row.get("file_name") or DEFAULT_EXPORT_FILE_NAME).strip() or DEFAULT_EXPORT_FILE_NAME
+        if on_progress:
+            on_progress(f"Google Drive: {dashboard or '?'} / {group or '?'}")
         if not dashboard or not group or not folder_id:
             results.append(
                 {
