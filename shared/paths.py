@@ -103,6 +103,14 @@ def pokemon_catalog_path() -> Path:
     return reference_dir() / "pokemon_catalog.csv"
 
 
+def pokedex_species_entries_path() -> Path:
+    return data_dir() / "pokedex_species_entries.csv"
+
+
+def pokedex_category_availability_path() -> Path:
+    return reference_dir() / "pokedex_category_availability.csv"
+
+
 def medal_report_path() -> Path:
     return output_dir() / "medal-tracker" / "medal_report.csv"
 

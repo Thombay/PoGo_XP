@@ -154,6 +154,105 @@ def inject_responsive_styles() -> None:
         div[class*="st-key-pogo_activity_"] div[data-testid="stMetric"] + div[data-testid="stCaptionContainer"] + div[data-testid="stCaptionContainer"] p {
           opacity: 0.92;
         }
+        .pogo-dex-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(10.4rem, 1fr));
+          gap: 0.78rem;
+          margin: 0.35rem 0 0.8rem 0;
+        }
+        .pogo-dex-empty {
+          padding: 1.2rem 0.8rem;
+          border-radius: 0.9rem;
+          border: 1px dashed rgba(148, 163, 184, 0.35);
+          color: rgba(226, 232, 240, 0.78);
+          text-align: center;
+        }
+        .pogo-dex-card {
+          position: relative;
+          overflow: hidden;
+          border-radius: 1rem;
+          padding: 0.72rem 0.7rem 0.78rem 0.7rem;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background:
+            linear-gradient(180deg, rgba(15, 23, 42, 0.18), rgba(2, 6, 23, 0.72)),
+            var(--dex-accent, #334155);
+          box-shadow: 0 12px 24px rgba(2, 8, 23, 0.28);
+          min-height: 16.2rem;
+        }
+        .pogo-dex-card--registered { box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.45), 0 12px 24px rgba(2, 8, 23, 0.28); }
+        .pogo-dex-card--missing { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.38), 0 12px 24px rgba(2, 8, 23, 0.28); }
+        .pogo-dex-card--unavailable { filter: grayscale(0.55); opacity: 0.78; }
+        .pogo-dex-card-type--normal { --dex-accent: #64748b; }
+        .pogo-dex-card-type--fire { --dex-accent: #ea580c; }
+        .pogo-dex-card-type--water { --dex-accent: #2563eb; }
+        .pogo-dex-card-type--electric { --dex-accent: #ca8a04; }
+        .pogo-dex-card-type--grass { --dex-accent: #16a34a; }
+        .pogo-dex-card-type--ice { --dex-accent: #0ea5e9; }
+        .pogo-dex-card-type--fighting { --dex-accent: #b91c1c; }
+        .pogo-dex-card-type--poison { --dex-accent: #7e22ce; }
+        .pogo-dex-card-type--ground { --dex-accent: #a16207; }
+        .pogo-dex-card-type--flying { --dex-accent: #6366f1; }
+        .pogo-dex-card-type--psychic { --dex-accent: #db2777; }
+        .pogo-dex-card-type--bug { --dex-accent: #65a30d; }
+        .pogo-dex-card-type--rock { --dex-accent: #a8a29e; }
+        .pogo-dex-card-type--ghost { --dex-accent: #6d28d9; }
+        .pogo-dex-card-type--dragon { --dex-accent: #4f46e5; }
+        .pogo-dex-card-type--dark { --dex-accent: #44403c; }
+        .pogo-dex-card-type--steel { --dex-accent: #94a3b8; }
+        .pogo-dex-card-type--fairy { --dex-accent: #ec4899; }
+        .pogo-dex-art {
+          display: block;
+          width: 5.8rem;
+          height: 5.8rem;
+          margin: 0 auto 0.35rem auto;
+          object-fit: contain;
+          filter: drop-shadow(0 8px 10px rgba(2, 8, 23, 0.45));
+        }
+        .pogo-dex-num {
+          font-size: 0.72rem;
+          letter-spacing: 0.04em;
+          opacity: 0.78;
+          font-weight: 700;
+        }
+        .pogo-dex-name {
+          font-size: 0.98rem;
+          font-weight: 800;
+          line-height: 1.15;
+          margin-top: 0.08rem;
+        }
+        .pogo-dex-german {
+          font-size: 0.78rem;
+          opacity: 0.86;
+          margin-bottom: 0.28rem;
+        }
+        .pogo-dex-types { display: flex; flex-wrap: wrap; gap: 0.28rem; margin-bottom: 0.32rem; }
+        .pogo-dex-type {
+          font-size: 0.68rem;
+          font-weight: 700;
+          padding: 0.08rem 0.38rem;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.42);
+        }
+        .pogo-dex-status {
+          display: inline-block;
+          font-size: 0.72rem;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+          padding: 0.12rem 0.42rem;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.55);
+          margin-bottom: 0.28rem;
+        }
+        .pogo-dex-card--registered .pogo-dex-status { background: rgba(22, 163, 74, 0.78); }
+        .pogo-dex-card--missing .pogo-dex-status { background: rgba(202, 138, 4, 0.82); }
+        .pogo-dex-card--unavailable .pogo-dex-status { background: rgba(71, 85, 105, 0.86); }
+        .pogo-dex-extra {
+          display: block;
+          font-size: 0.7rem;
+          line-height: 1.25;
+          opacity: 0.9;
+        }
         @media (max-width: 1200px) {
           .block-container { padding-left: 1rem; padding-right: 1rem; }
         }

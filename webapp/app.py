@@ -30,8 +30,10 @@ from shared.paths import (
     medals_config_path,
     output_dir,
     player_groups_path,
+    pokedex_category_availability_path,
     pokedex_entry_config_path,
     pokedex_entry_snapshots_path,
+    pokedex_species_entries_path,
     pokemon_catalog_path,
     total_xp_curve_path,
     xp_history_path,
@@ -52,8 +54,10 @@ from webapp.data_files import (
     load_data_input_accounts,
     load_medal_goals,
     load_medal_snapshots,
+    load_pokedex_category_availability,
     load_pokedex_entry_config,
     load_pokedex_entry_snapshots,
+    load_pokedex_species_entries,
     load_pokemon_catalog,
     load_xp_history,
     parse_groups,
@@ -81,8 +85,13 @@ from webapp.github_pages import (
     load_github_pages_config,
     publish_html_to_github_pages,
 )
+from webapp.profile_screenshot import (
+    XpScreenshotFillReport,
+    fill_xp_inputs_from_screenshots,
+)
 from webapp.ui_styles import inject_responsive_styles
 from webapp.views.dashboard import render_dashboard_content_view
+from webapp.views.pokedex_dashboard import render_pokedex_dashboard_view
 from webapp.views.xp_explorer import render_xp_explorer_section_view
 
 ACCOUNT_ORDER = ["Thombay", "Cerius", "Thomzay"]
@@ -6911,6 +6920,14 @@ pokedex_entry_config_df = load_pokedex_entry_config(
 pokedex_entry_config = pokedex_entry_config_map(pokedex_entry_config_df)
 display_pokedex_df = with_pokedex_entry_display_rows(pokedex_df)
 pokemon_catalog_df = load_pokemon_catalog(pokemon_catalog_path())
+pokedex_species_df = load_pokedex_species_entries(
+    pokedex_species_entries_path(),
+    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+)
+pokedex_category_availability_df = load_pokedex_category_availability(
+    pokedex_category_availability_path(),
+    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
+)
 all_accounts = account_options_from_data(xp_input_df, medal_df, display_pokedex_df)
 data_input_accounts_df = load_data_input_accounts(data_input_accounts_path(), valid_input_types=DATA_INPUT_TYPES)
 xp_input_accounts = accounts_for_data_input("xp", all_accounts, data_input_accounts_df, fallback_accounts=all_accounts)
@@ -7170,252 +7187,29 @@ if page not in {"Dashboard Global", "Dashboard Personal"}:
         st.caption("-")
 
 if page == "Pokédex Dashboard":
-    st.subheader("Pokédex Dashboard")
-    st.caption("Read-only view of saved Pokédex Entry Snapshots with derived Overall rows.")
-    if display_pokedex_df.empty:
-        st.warning("No Pokédex entry history found.")
-    else:
-        pokedex_dashboard_rows = _normalize_pokedex_dashboard_rows(display_pokedex_df)
-        if pokedex_dashboard_rows.empty:
-            st.warning("No usable Pokédex entry rows found.")
-            st.stop()
-
-        pokedex_dashboard_accounts = [
-            a for a in all_accounts if a in set(pokedex_dashboard_rows["account"].dropna().astype(str).tolist())
-        ]
-        if not pokedex_dashboard_accounts:
-            pokedex_dashboard_accounts = sorted(pokedex_dashboard_rows["account"].dropna().astype(str).unique().tolist())
-
-        default_pokedex_accounts = pokedex_dashboard_accounts
-        selected_pokedex_accounts = st.multiselect(
-            "Accounts",
-            options=pokedex_dashboard_accounts,
-            default=default_pokedex_accounts,
-            key="pokedex_dashboard_accounts",
-        )
-
-        entry_type_options = [
-            entry_type
-            for entry_type in POKEDEX_ENTRY_TYPES
-            if entry_type in set(pokedex_dashboard_rows["entry_type"].dropna().astype(str).tolist())
-        ]
-        default_entry_types = [entry_type for entry_type in ["pokemon", "shiny", "lucky", "hundo"] if entry_type in entry_type_options]
-        if not default_entry_types:
-            default_entry_types = entry_type_options[:4]
-        selected_pokedex_entry_types = st.multiselect(
-            "Entry types",
-            options=entry_type_options,
-            default=default_entry_types,
-            format_func=lambda value: POKEDEX_ENTRY_TYPE_LABELS.get(str(value), str(value)),
-            key="pokedex_dashboard_entry_types",
-        )
-
-        min_pokedex_date = pokedex_dashboard_rows["date"].min().date()
-        max_pokedex_date = pokedex_dashboard_rows["date"].max().date()
-        pokedex_start_date, pokedex_end_date = select_date_range(
-            label="Date range",
-            min_date=min_pokedex_date,
-            max_date=max_pokedex_date,
-            key="pokedex_dashboard_date_range",
-        )
-
-        view_mode = st.radio(
-            "View mode",
-            options=["Latest", "Progress Over Time", "Region Breakdown"],
-            horizontal=True,
-            key="pokedex_dashboard_view_mode",
-        )
-
-        if not selected_pokedex_accounts:
-            st.info("Select at least one account.")
-        elif not selected_pokedex_entry_types:
-            st.info("Select at least one entry type.")
-        else:
-            account_color_map = build_account_color_map(
-                selected_pokedex_accounts,
-                xp_df[xp_df["Spieler"].isin(selected_pokedex_accounts)].copy(),
-            )
-            render_account_color_legend(selected_pokedex_accounts, account_color_map)
-
-            latest_overall = build_pokedex_dashboard_latest_rows(
-                display_pokedex_df,
-                accounts=selected_pokedex_accounts,
-                entry_types=selected_pokedex_entry_types,
-                regions=["overall"],
-                start_date=pokedex_start_date,
-                end_date=pokedex_end_date,
-            )
-            metric_overall = build_pokedex_dashboard_latest_rows(
-                display_pokedex_df,
-                accounts=selected_pokedex_accounts,
-                entry_types=["pokemon", "shiny", "lucky", "hundo"],
-                regions=["overall"],
-                start_date=pokedex_start_date,
-                end_date=pokedex_end_date,
-            )
-
-            metric_cols = st.columns(6)
-            latest_snapshot = pd.to_datetime(
-                _filter_pokedex_dashboard_rows(
-                    display_pokedex_df,
-                    accounts=selected_pokedex_accounts,
-                    start_date=pokedex_start_date,
-                    end_date=pokedex_end_date,
-                ).get("date"),
-                errors="coerce",
-            ).max()
-            metric_cols[0].metric(
-                "Latest Snapshot",
-                latest_snapshot.strftime("%Y-%m-%d") if pd.notna(latest_snapshot) else "-",
-            )
-            metric_cols[1].metric("Accounts", f"{len(selected_pokedex_accounts):,}")
-            for idx, entry_type in enumerate(["pokemon", "shiny", "lucky", "hundo"], start=2):
-                if idx >= len(metric_cols):
-                    break
-                entry_latest = metric_overall[metric_overall["entry_type"] == entry_type].copy()
-                value = pd.to_numeric(entry_latest.get("value"), errors="coerce").sum()
-                label = f"Overall {POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}"
-                metric_cols[idx].metric(label, format_kpi_number(value) if not entry_latest.empty else "-")
-
-            st.divider()
-
-            if view_mode == "Latest":
-                comparison_df = latest_overall.copy()
-                if comparison_df.empty:
-                    st.info("Latest comparison: no Overall rows for the selected filters.")
-                else:
-                    fig_latest = px.bar(
-                        comparison_df,
-                        x="account",
-                        y="value",
-                        color="entry_type_label",
-                        barmode="group",
-                        category_orders={
-                            "entry_type_label": [
-                                POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)
-                                for entry_type in selected_pokedex_entry_types
-                            ],
-                            "account": selected_pokedex_accounts,
-                        },
-                        labels={"account": "Account", "value": "Value", "entry_type_label": "Entry Type"},
-                        title="Latest Overall Values by Account",
-                    )
-                    fig_latest.update_yaxes(tickformat=",.0f")
-                    fig_latest.update_layout(height=460)
-                    render_plotly_chart(fig_latest, use_container_width=True, sort_legend=False)
-
-            if view_mode == "Progress Over Time":
-                trend_df = build_pokedex_dashboard_trend_rows(
-                    display_pokedex_df,
-                    accounts=selected_pokedex_accounts,
-                    entry_types=selected_pokedex_entry_types,
-                    start_date=pokedex_start_date,
-                    end_date=pokedex_end_date,
-                )
-                if trend_df.empty:
-                    st.info("Progress over time: no Overall rows for the selected filters.")
-                else:
-                    fig_trend = px.line(
-                        trend_df,
-                        x="date",
-                        y="value",
-                        color="account",
-                        line_dash="entry_type_label",
-                        color_discrete_map=account_color_map,
-                        markers=True,
-                        labels={"date": "Date", "value": "Value", "account": "Account", "entry_type_label": "Entry Type"},
-                        title="Overall Progress Over Time",
-                    )
-                    fig_trend.update_yaxes(tickformat=",.0f")
-                    fig_trend.update_layout(height=520)
-                    render_plotly_chart(fig_trend, use_container_width=True)
-
-            if view_mode == "Region Breakdown":
-                breakdown_col_1, breakdown_col_2, breakdown_col_3 = st.columns([1.1, 1.1, 1.0])
-                breakdown_account = breakdown_col_1.selectbox(
-                    "Breakdown account",
-                    options=selected_pokedex_accounts,
-                    key="pokedex_dashboard_breakdown_account",
-                )
-                breakdown_entry_type = breakdown_col_2.selectbox(
-                    "Breakdown entry type",
-                    options=selected_pokedex_entry_types,
-                    format_func=lambda value: POKEDEX_ENTRY_TYPE_LABELS.get(str(value), str(value)),
-                    key="pokedex_dashboard_breakdown_entry_type",
-                )
-                breakdown_rows_for_date = _filter_pokedex_dashboard_rows(
-                    display_pokedex_df,
-                    accounts=[breakdown_account],
-                    entry_types=[breakdown_entry_type],
-                    start_date=pokedex_start_date,
-                    end_date=pokedex_end_date,
-                )
-                if breakdown_rows_for_date.empty:
-                    st.info("Region breakdown: no rows for the selected account and entry type.")
-                else:
-                    latest_breakdown_date = breakdown_rows_for_date["date"].max().date()
-                    breakdown_date = breakdown_col_3.date_input(
-                        "As-of date",
-                        value=latest_breakdown_date,
-                        min_value=pokedex_start_date,
-                        max_value=pokedex_end_date,
-                        key="pokedex_dashboard_breakdown_date",
-                    )
-                    region_df = build_pokedex_dashboard_region_breakdown_rows(
-                        display_pokedex_df,
-                        account=breakdown_account,
-                        entry_type=breakdown_entry_type,
-                        as_of_date=breakdown_date,
-                    )
-                    if region_df.empty:
-                        st.info("Region breakdown: no regional rows at or before the selected date.")
-                    else:
-                        fig_region = px.bar(
-                            region_df,
-                            x="region_label",
-                            y="value",
-                            color="region_label",
-                            category_orders={
-                                "region_label": [POKEDEX_REGION_LABELS.get(region, region) for region in POKEDEX_REGIONS]
-                            },
-                            labels={"region_label": "Region", "value": "Value"},
-                            title=(
-                                f"{POKEDEX_ENTRY_TYPE_LABELS.get(str(breakdown_entry_type), str(breakdown_entry_type))} "
-                                f"Region Breakdown for {breakdown_account}"
-                            ),
-                        )
-                        fig_region.update_yaxes(tickformat=",.0f")
-                        fig_region.update_layout(height=460, showlegend=False)
-                        render_plotly_chart(fig_region, use_container_width=True, sort_legend=False)
-                        st.caption(f"Values are latest saved Pokédex Entry Counts at or before {breakdown_date.isoformat()}.")
-
-            st.markdown("Latest Detail")
-            detail_df = build_pokedex_dashboard_latest_rows(
-                display_pokedex_df,
-                accounts=selected_pokedex_accounts,
-                entry_types=selected_pokedex_entry_types,
-                start_date=pokedex_start_date,
-                end_date=pokedex_end_date,
-            )
-            if detail_df.empty:
-                st.info("No detail rows for the selected filters.")
-            else:
-                detail_view = detail_df.rename(
-                    columns={
-                        "date": "Date",
-                        "account": "Account",
-                        "entry_type_label": "Entry Type",
-                        "region_label": "Region",
-                        "value": "Value",
-                    }
-                )[["Date", "Account", "Entry Type", "Region", "Value"]].copy()
-                detail_view["Date"] = pd.to_datetime(detail_view["Date"], errors="coerce").dt.date.astype(str)
-                st.dataframe(
-                    detail_view,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"Value": st.column_config.NumberColumn(format="%d")},
-                )
+    render_pokedex_dashboard_view(
+        display_pokedex_df,
+        pokedex_entry_config_df,
+        pokemon_catalog_df,
+        pokedex_species_df,
+        pokedex_category_availability_df,
+        all_accounts,
+        xp_df,
+        entry_types=POKEDEX_ENTRY_TYPES,
+        entry_type_labels=POKEDEX_ENTRY_TYPE_LABELS,
+        regions=POKEDEX_REGIONS,
+        region_labels=POKEDEX_REGION_LABELS,
+        normalize_rows_fn=_normalize_pokedex_dashboard_rows,
+        latest_rows_fn=build_pokedex_dashboard_latest_rows,
+        trend_rows_fn=build_pokedex_dashboard_trend_rows,
+        region_breakdown_fn=build_pokedex_dashboard_region_breakdown_rows,
+        filter_rows_fn=_filter_pokedex_dashboard_rows,
+        select_date_range_fn=select_date_range,
+        build_account_color_map_fn=build_account_color_map,
+        render_account_color_legend_fn=render_account_color_legend,
+        render_plotly_chart_fn=render_plotly_chart,
+        format_kpi_number_fn=format_kpi_number,
+    )
 
 if page == "Medal Explorer":
     header_left, header_right = st.columns([3.6, 1.4])
@@ -8053,6 +7847,63 @@ if page == "Data Input":
                     )
                     for _, r in medal_latest.iterrows():
                         latest_activity_map[(str(r["account"]), str(r["medal_id"]))] = float(r["value"])
+
+            last_known: dict[str, dict[str, object]] = {}
+            for acc in selected_xp_accounts:
+                lvl_default, xp_default = latest_map.get(str(acc), (1, 0))
+                last_known[str(acc)] = {
+                    "level": int(lvl_default),
+                    "xp_bar": int(xp_default),
+                    "battles_won": float(latest_battles_map.get(str(acc), 0.0)),
+                    "distance_walked": float(
+                        latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["distance_walked"]), 0.0)
+                    ),
+                    "pokemon_caught": float(
+                        latest_activity_map.get((str(acc), XP_TAB_ACTIVITY_MEDAL_IDS["pokemon_caught"]), 0.0)
+                    ),
+                }
+
+            uploaded_shots = st.file_uploader(
+                "Trainer profile screenshots",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key=f"xp_screenshot_uploads_{xp_date.isoformat()}",
+                help="Prefills Level, XP Bar, Battles, Distance, and Caught, and sets Inactive from last known values. Check inputs is still required before save.",
+            )
+            st.caption("Screenshots only prefill this form. Check inputs is still required before save.")
+            if st.button("Fill form from screenshots", key=f"xp_fill_from_screenshots_{xp_date.isoformat()}"):
+                if not uploaded_shots:
+                    st.warning("Choose at least one screenshot first.")
+                else:
+                    files = [(str(item.name), bytes(item.getvalue())) for item in uploaded_shots]
+                    with st.spinner("Reading screenshots..."):
+                        fill_report = fill_xp_inputs_from_screenshots(
+                            files,
+                            xp_date=xp_date,
+                            selected_accounts=list(selected_xp_accounts),
+                            known_accounts=list(all_players),
+                            session_state=st.session_state,
+                            last_known=last_known,
+                        )
+                    st.session_state["xp_screenshot_fill_report"] = fill_report
+                    st.session_state["xp_screenshot_fill_report_date"] = xp_date.isoformat()
+            fill_report = st.session_state.get("xp_screenshot_fill_report")
+            fill_report_date = str(st.session_state.get("xp_screenshot_fill_report_date") or "")
+            if isinstance(fill_report, XpScreenshotFillReport) and fill_report_date == xp_date.isoformat():
+                if fill_report.filled:
+                    st.info(
+                        "Filled from screenshots: "
+                        + ", ".join(fill_report.filled)
+                        + ". Check inputs before save."
+                    )
+                elif not fill_report.warnings:
+                    st.warning("No selected accounts could be filled from the screenshots.")
+                if fill_report.activated:
+                    st.caption("Set active: " + ", ".join(fill_report.activated))
+                if fill_report.deactivated:
+                    st.caption("Set inactive: " + ", ".join(fill_report.deactivated))
+                for warning in fill_report.warnings:
+                    st.warning(warning)
 
             medal_existing_for_validation = (
                 medal_df[["date", "account", "medal_id", "value"]].copy()

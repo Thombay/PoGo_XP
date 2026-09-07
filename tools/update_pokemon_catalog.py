@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -15,14 +15,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from shared.paths import pokemon_catalog_path
-from webapp.data_files import POKEMON_CATALOG_COLUMNS, load_pokemon_catalog, merge_pokemon_catalog
+from shared.paths import pokedex_category_availability_path, pokemon_catalog_path
+from webapp.data_files import (
+    POKEMON_CATALOG_COLUMNS,
+    load_pokedex_category_availability,
+    load_pokemon_catalog,
+    merge_pokedex_category_availability,
+    merge_pokemon_catalog,
+)
+from webapp.pokedex import (
+    apply_catalog_community_fields,
+    build_category_availability_rows,
+    extract_pogoapi_dex_numbers,
+)
 
 POKEAPI_CSV_BASE = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv"
 POKEMINERS_GAME_MASTER_URL = (
     "https://raw.githubusercontent.com/pokemongo-dev-contrib/pokemongo-game-master/"
     "master/versions/latest/V2_GAME_MASTER.json"
 )
+POGOAPI_BASE = "https://pogoapi.net/api/v1"
 MAX_DEX_NUMBER = 1025
 
 REGION_BY_GENERATION_ID = {
@@ -46,8 +58,16 @@ def _region_for_species(dex_number: int, generation_id: int) -> str:
 
 
 def _read_url_text(url: str) -> str:
-    with urlopen(url, timeout=60) as response:
+    request = Request(
+        url,
+        headers={"User-Agent": "PoGo_XP catalog updater (https://github.com/local/PoGo_XP)"},
+    )
+    with urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
+
+
+def _read_json(url: str) -> object:
+    return json.loads(_read_url_text(url))
 
 
 def _read_pokeapi_csv(name: str) -> pd.DataFrame:
@@ -82,14 +102,42 @@ def _load_pogo_species_numbers() -> set[int]:
     return numbers
 
 
-def build_seed_catalog() -> pd.DataFrame:
+def _load_pogoapi_payload(name: str) -> object:
+    try:
+        return _read_json(f"{POGOAPI_BASE}/{name}")
+    except Exception:
+        return None
+
+
+def load_pogoapi_seed_data() -> dict[str, object]:
+    released = extract_pogoapi_dex_numbers(_load_pogoapi_payload("released_pokemon.json") or {})
+    shiny = extract_pogoapi_dex_numbers(_load_pogoapi_payload("shiny_pokemon.json") or {})
+    shadow = extract_pogoapi_dex_numbers(_load_pogoapi_payload("shadow_pokemon.json") or {})
+    mega = extract_pogoapi_dex_numbers(_load_pogoapi_payload("mega_pokemon.json") or {})
+    community_days = _load_pogoapi_payload("community_days.json")
+    if not isinstance(community_days, list):
+        community_days = []
+    return {
+        "released": released,
+        "shiny": shiny,
+        "shadow": shadow,
+        "mega": mega,
+        "community_days": community_days,
+    }
+
+
+def build_seed_catalog(
+    *,
+    released_dex_numbers: set[int] | None = None,
+    community_days: list[dict[str, object]] | None = None,
+) -> pd.DataFrame:
     species = _read_pokeapi_csv("pokemon_species.csv")
     pokemon = _read_pokeapi_csv("pokemon.csv")
     pokemon_types = _read_pokeapi_csv("pokemon_types.csv")
     types = _read_pokeapi_csv("types.csv")
     english_names = _species_names(9)
     german_names = _species_names(6)
-    pogo_species_numbers = _load_pogo_species_numbers()
+    pogo_species_numbers = released_dex_numbers if released_dex_numbers else _load_pogo_species_numbers()
 
     species = species[species["id"].between(1, MAX_DEX_NUMBER)].copy()
     pokemon = pokemon[pokemon["is_default"] == 1].copy()
@@ -117,20 +165,55 @@ def build_seed_catalog() -> pd.DataFrame:
                 "region": _region_for_species(dex_number, generation_id),
                 "type_1": type_slots.get(1, ""),
                 "type_2": type_slots.get(2, ""),
-                "available_in_pogo": "yes" if in_pogo else "unknown",
+                "available_in_pogo": "yes" if in_pogo else "no",
+                "location_restriction": "",
+                "last_event": "",
+                "last_event_date": "",
                 "extra_info": "",
             }
         )
-    return pd.DataFrame(rows, columns=POKEMON_CATALOG_COLUMNS)
+    seeded = pd.DataFrame(rows, columns=POKEMON_CATALOG_COLUMNS)
+    return apply_catalog_community_fields(
+        seeded,
+        released_dex_numbers=set(pogo_species_numbers),
+        community_days=community_days or [],
+    )
 
 
-def update_catalog(path: Path | None = None, overwrite_editable: bool = False) -> pd.DataFrame:
+def update_catalog(
+    path: Path | None = None,
+    overwrite_editable: bool = False,
+    availability_path: Path | None = None,
+) -> pd.DataFrame:
     target = path or pokemon_catalog_path()
-    seeded = build_seed_catalog()
+    pogoapi = load_pogoapi_seed_data()
+    seeded = build_seed_catalog(
+        released_dex_numbers=pogoapi["released"] or None,
+        community_days=list(pogoapi["community_days"]),
+    )
     existing = load_pokemon_catalog(target)
     merged = merge_pokemon_catalog(seeded, existing, preserve_editable=not overwrite_editable)
+    merged = apply_catalog_community_fields(
+        merged,
+        community_days=list(pogoapi["community_days"]),
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(target, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+
+    availability_target = availability_path or pokedex_category_availability_path()
+    seeded_availability = build_category_availability_rows(
+        shiny_dex=pogoapi["shiny"],
+        shadow_dex=pogoapi["shadow"],
+        mega_dex=pogoapi["mega"],
+    )
+    existing_availability = load_pokedex_category_availability(availability_target)
+    merged_availability = merge_pokedex_category_availability(
+        seeded_availability,
+        existing_availability,
+        preserve_editable=not overwrite_editable,
+    )
+    availability_target.parent.mkdir(parents=True, exist_ok=True)
+    merged_availability.to_csv(availability_target, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
     return merged
 
 
@@ -138,13 +221,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh inputs/reference/pokemon_catalog.csv from external Pokemon data.")
     parser.add_argument("--output", type=Path, default=pokemon_catalog_path(), help="Catalog CSV path to write.")
     parser.add_argument(
+        "--availability-output",
+        type=Path,
+        default=pokedex_category_availability_path(),
+        help="Category availability CSV path to write.",
+    )
+    parser.add_argument(
         "--overwrite-editable",
         action="store_true",
         help="Overwrite editable columns instead of preserving existing local edits.",
     )
     args = parser.parse_args()
 
-    catalog = update_catalog(args.output, overwrite_editable=args.overwrite_editable)
+    catalog = update_catalog(
+        args.output,
+        overwrite_editable=args.overwrite_editable,
+        availability_path=args.availability_output,
+    )
     print(f"Wrote {len(catalog)} Pokemon rows to {args.output}")
     return 0
 

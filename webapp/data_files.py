@@ -18,9 +18,30 @@ POKEMON_CATALOG_COLUMNS = [
     "type_1",
     "type_2",
     "available_in_pogo",
+    "location_restriction",
+    "last_event",
+    "last_event_date",
     "extra_info",
 ]
-POKEMON_CATALOG_EDITABLE_COLUMNS = ["available_in_pogo", "extra_info"]
+POKEMON_CATALOG_EDITABLE_COLUMNS = [
+    "available_in_pogo",
+    "location_restriction",
+    "last_event",
+    "last_event_date",
+    "extra_info",
+]
+POKEDEX_SPECIES_ENTRY_COLUMNS = [
+    "date",
+    "account",
+    "entry_type",
+    "dex_number",
+    "registered",
+    "can_evolve_now",
+    "notes",
+]
+POKEDEX_CATEGORY_AVAILABILITY_COLUMNS = ["entry_type", "dex_number", "available", "notes"]
+POKEDEX_CATEGORY_AVAILABILITY_EDITABLE_COLUMNS = ["available", "notes"]
+TRUE_TEXT_VALUES = {"1", "true", "yes", "y"}
 
 
 def to_int_series(series: pd.Series) -> pd.Series:
@@ -483,8 +504,134 @@ def merge_pokemon_catalog(
             if col not in existing.columns:
                 continue
             preserved = existing[col].fillna("").astype(str).str.strip()
+            preserved = preserved[preserved != ""]
+            if preserved.empty:
+                continue
             seeded[col] = seeded["dex_number"].map(preserved).fillna(seeded[col])
 
     for col in [c for c in cols if c != "dex_number"]:
         seeded[col] = seeded[col].fillna("").astype(str).str.strip()
     return seeded[cols].sort_values("dex_number").reset_index(drop=True)
+
+
+def parse_bool_text(value: object) -> bool:
+    return str(value).strip().lower() in TRUE_TEXT_VALUES
+
+
+def load_pokedex_species_entries(
+    path: Path,
+    valid_entry_types: set[str] | None = None,
+) -> pd.DataFrame:
+    cols = POKEDEX_SPECIES_ENTRY_COLUMNS
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    if not {"date", "account", "entry_type", "dex_number"}.issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            if col in {"registered", "can_evolve_now"}:
+                df[col] = False
+            else:
+                df[col] = ""
+    df = df[cols].copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["account"] = df["account"].astype(str).str.strip()
+    df["entry_type"] = df["entry_type"].astype(str).str.strip().str.lower()
+    df["dex_number"] = pd.to_numeric(df["dex_number"], errors="coerce")
+    df["registered"] = df["registered"].map(parse_bool_text)
+    df["can_evolve_now"] = df["can_evolve_now"].map(parse_bool_text)
+    df["notes"] = df["notes"].fillna("").astype(str).str.strip()
+    df = df.dropna(subset=["date", "account", "entry_type", "dex_number"]).copy()
+    df = df[(df["account"] != "") & (df["entry_type"] != "")].copy()
+    df["dex_number"] = df["dex_number"].astype(int)
+    df = df[df["dex_number"] > 0].copy()
+    allowed_types = {str(t).strip().lower() for t in (valid_entry_types or set()) if str(t).strip()}
+    if allowed_types:
+        df = df[df["entry_type"].isin(allowed_types)].copy()
+    return df.sort_values(["date", "account", "entry_type", "dex_number"]).reset_index(drop=True)
+
+
+def load_pokedex_category_availability(
+    path: Path,
+    valid_entry_types: set[str] | None = None,
+) -> pd.DataFrame:
+    cols = POKEDEX_CATEGORY_AVAILABILITY_COLUMNS
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    if not {"entry_type", "dex_number"}.issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            df[col] = "" if col != "available" else False
+    df = df[cols].copy()
+    df["entry_type"] = df["entry_type"].astype(str).str.strip().str.lower()
+    df["dex_number"] = pd.to_numeric(df["dex_number"], errors="coerce")
+    df["available"] = df["available"].map(parse_bool_text)
+    df["notes"] = df["notes"].fillna("").astype(str).str.strip()
+    df = df.dropna(subset=["entry_type", "dex_number"]).copy()
+    df = df[df["entry_type"] != ""].copy()
+    df["dex_number"] = df["dex_number"].astype(int)
+    df = df[df["dex_number"] > 0].copy()
+    allowed_types = {str(t).strip().lower() for t in (valid_entry_types or set()) if str(t).strip()}
+    if allowed_types:
+        df = df[df["entry_type"].isin(allowed_types)].copy()
+    return df.drop_duplicates(subset=["entry_type", "dex_number"], keep="last").sort_values(
+        ["entry_type", "dex_number"]
+    ).reset_index(drop=True)
+
+
+def merge_pokedex_category_availability(
+    seeded_availability: pd.DataFrame,
+    existing_availability: pd.DataFrame | None = None,
+    preserve_editable: bool = True,
+) -> pd.DataFrame:
+    cols = POKEDEX_CATEGORY_AVAILABILITY_COLUMNS
+    seeded = seeded_availability.copy()
+    for col in cols:
+        if col not in seeded.columns:
+            seeded[col] = "" if col != "available" else False
+    seeded = seeded[cols].copy()
+    seeded["entry_type"] = seeded["entry_type"].astype(str).str.strip().str.lower()
+    seeded["dex_number"] = pd.to_numeric(seeded["dex_number"], errors="coerce")
+    seeded = seeded.dropna(subset=["entry_type", "dex_number"]).copy()
+    seeded["dex_number"] = seeded["dex_number"].astype(int)
+    seeded["available"] = seeded["available"].map(lambda value: value if isinstance(value, bool) else parse_bool_text(value))
+    seeded["notes"] = seeded["notes"].fillna("").astype(str).str.strip()
+    seeded = seeded.drop_duplicates(subset=["entry_type", "dex_number"], keep="last")
+
+    existing = existing_availability.copy() if existing_availability is not None else pd.DataFrame(columns=cols)
+    if preserve_editable and not existing.empty and {"entry_type", "dex_number"}.issubset(existing.columns):
+        existing = existing.copy()
+        existing["entry_type"] = existing["entry_type"].astype(str).str.strip().str.lower()
+        existing["dex_number"] = pd.to_numeric(existing["dex_number"], errors="coerce")
+        existing = existing.dropna(subset=["entry_type", "dex_number"]).copy()
+        existing["dex_number"] = existing["dex_number"].astype(int)
+        existing = existing.drop_duplicates(subset=["entry_type", "dex_number"], keep="last")
+        existing["_key"] = existing["entry_type"] + ":" + existing["dex_number"].astype(str)
+        seeded["_key"] = seeded["entry_type"] + ":" + seeded["dex_number"].astype(str)
+        existing_indexed = existing.set_index("_key")
+        for col in POKEDEX_CATEGORY_AVAILABILITY_EDITABLE_COLUMNS:
+            if col not in existing_indexed.columns:
+                continue
+            if col == "available":
+                preserved = existing_indexed[col]
+                mapped = seeded["_key"].map(preserved)
+                seeded[col] = mapped.where(mapped.notna(), seeded[col]).astype(bool)
+            else:
+                preserved = existing_indexed[col].fillna("").astype(str).str.strip()
+                preserved = preserved[preserved != ""]
+                if not preserved.empty:
+                    seeded[col] = seeded["_key"].map(preserved).fillna(seeded[col])
+        seeded = seeded.drop(columns=["_key"])
+
+    seeded["notes"] = seeded["notes"].fillna("").astype(str).str.strip()
+    seeded["available"] = seeded["available"].map(lambda value: value if isinstance(value, bool) else parse_bool_text(value))
+    return seeded[cols].sort_values(["entry_type", "dex_number"]).reset_index(drop=True)
