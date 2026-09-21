@@ -9,7 +9,7 @@ pip install -r requirements-localhost.txt
 python run_server.py
 ```
 
-→ `http://127.0.0.1:8050`
+→ `http://127.0.0.1:8502`
 
 | Command | Purpose |
 | --- | --- |

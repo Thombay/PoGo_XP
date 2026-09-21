@@ -36,7 +36,7 @@ def connect_google_drive(root: Path) -> int:
 def main() -> int:
     root = Path(__file__).resolve().parent
     host = "127.0.0.1"
-    port = 8050
+    port = 8502
     try:
         connect_rc = connect_google_drive(root)
     except KeyboardInterrupt:
