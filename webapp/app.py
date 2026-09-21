@@ -8017,34 +8017,39 @@ if page == "Data Input":
                         label_visibility="collapsed",
                         disabled=xp_locked or inactive_current,
                     )
+                    xp_bar_key = f"xp_bar_input_{xp_date.isoformat()}_{acc}"
+                    if xp_bar_key not in st.session_state:
+                        st.session_state[xp_bar_key] = str(int(row["xp_bar"]))
                     xp_bar_value = c7.text_input(
                         "XP Bar",
-                        value=str(int(row["xp_bar"])),
-                        key=f"xp_bar_input_{xp_date.isoformat()}_{acc}",
+                        key=xp_bar_key,
                         label_visibility="collapsed",
                         disabled=xp_locked or inactive_current,
                     )
-                    battles_default = _fmt_input_default(row.get("battles_last", 0.0), 0)
-                    distance_default = _fmt_input_default(row.get("distance_last", 0.0), 1)
-                    caught_default = _fmt_input_default(row.get("caught_last", 0.0), 0)
+                    battles_key = f"xp_battles_input_{xp_date.isoformat()}_{acc}"
+                    distance_key = f"xp_distance_input_{xp_date.isoformat()}_{acc}"
+                    caught_key = f"xp_caught_input_{xp_date.isoformat()}_{acc}"
+                    if battles_key not in st.session_state:
+                        st.session_state[battles_key] = _fmt_input_default(row.get("battles_last", 0.0), 0)
+                    if distance_key not in st.session_state:
+                        st.session_state[distance_key] = _fmt_input_default(row.get("distance_last", 0.0), 1)
+                    if caught_key not in st.session_state:
+                        st.session_state[caught_key] = _fmt_input_default(row.get("caught_last", 0.0), 0)
                     battles_value = c9.text_input(
                         "Battles Won",
-                        value=battles_default,
-                        key=f"xp_battles_input_{xp_date.isoformat()}_{acc}",
+                        key=battles_key,
                         label_visibility="collapsed",
                         disabled=inactive_current,
                     )
                     distance_value = c11.text_input(
                         "Distance Walked",
-                        value=distance_default,
-                        key=f"xp_distance_input_{xp_date.isoformat()}_{acc}",
+                        key=distance_key,
                         label_visibility="collapsed",
                         disabled=inactive_current,
                     )
                     caught_value = c13.text_input(
                         "Pokemon Caught",
-                        value=caught_default,
-                        key=f"xp_caught_input_{xp_date.isoformat()}_{acc}",
+                        key=caught_key,
                         label_visibility="collapsed",
                         disabled=inactive_current,
                     )

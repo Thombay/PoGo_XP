@@ -85,6 +85,76 @@ class ParseProfileOcrTextTest(unittest.TestCase):
         self.assertEqual(parsed.level, 62)
         self.assertEqual(parsed.xp_bar, 3_743_983)
 
+    def test_reads_fairphone_ocr_with_xp_between_level_and_label(self):
+        text = """
+        13TurboDoudl12
+        &Zekrom100%
+        67
+        6,073,942 / 6,250,000
+        LEVEL
+        TOTALACTIVITY
+        3,500
+        BattlesWon
+        6,623.2
+        Distance Walke
+        Pokémon Caught
+        63,719
+        """
+        parsed = parse_profile_ocr_text(text, known_accounts=["13TurboDoudl12", "Thomzay"])
+        self.assertEqual(parsed.account, "13TurboDoudl12")
+        self.assertEqual(parsed.level, 67)
+        self.assertEqual(parsed.xp_bar, 6_073_942)
+        self.assertEqual(parsed.battles_won, 3500.0)
+        self.assertEqual(parsed.distance_walked, 6623.2)
+        self.assertEqual(parsed.pokemon_caught, 63_719.0)
+
+    def test_fuzzy_matches_ocr_trainer_name(self):
+        parsed = parse_profile_ocr_text(
+            "PhiiDhill\n75\n35,328,094/12,000,000\nLEVEL\nTOTALACTIVITY\n7,056\nBattlesWon\n4,353.6\nDistance Walked\nPokémon Caughi\n96,613",
+            known_accounts=["PhilDhill", "PhilDlow", "Thomzay"],
+        )
+        self.assertEqual(parsed.account, "PhilDhill")
+        self.assertEqual(parsed.level, 75)
+        self.assertEqual(parsed.battles_won, 7056.0)
+        self.assertEqual(parsed.distance_walked, 4353.6)
+        self.assertEqual(parsed.pokemon_caught, 96_613.0)
+
+    def test_matches_account_name_with_trailing_ocr_digits(self):
+        parsed = parse_profile_ocr_text(
+            "Babsi5760\n66\n3,286,046 / 5,750,000\nLEVEL\nTOTALACTIVITY\n1,604\nBattlesWon\nDistance Walkea\n4,754.4\nPokemonCaught\n23,792",
+            known_accounts=["Babsi", "Thomzay"],
+        )
+        self.assertEqual(parsed.account, "Babsi")
+        self.assertEqual(parsed.level, 66)
+        self.assertEqual(parsed.battles_won, 1604.0)
+        self.assertEqual(parsed.distance_walked, 4754.4)
+        self.assertEqual(parsed.pokemon_caught, 23_792.0)
+
+    def test_maps_trainer_alias_cmanthehero_to_simon(self):
+        text = """
+        cmanthehero
+        &Mew2
+        71
+        145,848,563 / 8,750,000
+        LEVEL
+        TOTALACTIVITY
+        5,848
+        BattlesWon
+        Distance Walked
+        17,693.9
+        121,276
+        Pokemon Caught
+        """
+        parsed = parse_profile_ocr_text(
+            text,
+            known_accounts=["Simon", "Thomzay", "PhilDhill"],
+        )
+        self.assertEqual(parsed.account, "Simon")
+        self.assertEqual(parsed.level, 71)
+        self.assertEqual(parsed.battles_won, 5848.0)
+        self.assertEqual(parsed.distance_walked, 17693.9)
+        self.assertEqual(parsed.pokemon_caught, 121_276.0)
+
 
 class ApplyXpScreenshotFillsTest(unittest.TestCase):
     def test_writes_widget_keys_without_saving(self):

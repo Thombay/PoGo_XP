@@ -78,6 +78,10 @@ def data_input_accounts_path() -> Path:
     return config_dir() / "data_input_accounts.csv"
 
 
+def screenshot_account_aliases_path() -> Path:
+    return config_dir() / "screenshot_account_aliases.csv"
+
+
 def xp_snapshots_path() -> Path:
     # Reserved for canonical per-account XP snapshots used by medal-tracker.
     return data_dir() / "xp_snapshots.csv"

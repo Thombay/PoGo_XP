@@ -471,3 +471,4 @@ output/github_pages_site/
 .gh-pages-worktree/
 pogo-xp/out/
 inputs/private/
+.scratch/screenshot-debug/

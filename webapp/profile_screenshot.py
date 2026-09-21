@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import csv
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import MutableMapping
+
+from shared.paths import screenshot_account_aliases_path
+
+SCREENSHOT_ACCOUNT_ALIASES = {
+    "cmanthehero": "Simon",
+}
 
 
 @dataclass
@@ -228,47 +236,98 @@ def _get_ocr_engine():
     return _OCR_ENGINE
 
 
+def load_screenshot_account_aliases(path: Path | None = None) -> dict[str, str]:
+    mapping = {key.lower(): value for key, value in SCREENSHOT_ACCOUNT_ALIASES.items()}
+    target = path or screenshot_account_aliases_path()
+    if not target.is_file():
+        return mapping
+    with target.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            alias = str(row.get("alias") or "").strip()
+            account = str(row.get("account") or "").strip()
+            if alias and account:
+                mapping[alias.lower()] = account
+    return mapping
+
+
 def parse_profile_ocr_text(
     text: str,
     *,
     known_accounts: list[str] | None = None,
+    account_aliases: Mapping[str, str] | None = None,
     source_name: str = "",
 ) -> ProfileScreenshotParse:
     raw = str(text or "")
     parsed = ProfileScreenshotParse(source_name=source_name)
-    parsed.account = _match_known_account(raw, known_accounts or [])
+    parsed.account = _match_known_account(
+        raw,
+        known_accounts or [],
+        aliases=account_aliases if account_aliases is not None else load_screenshot_account_aliases(),
+    )
     parsed.level = _parse_level(raw)
     parsed.xp_bar, parsed.xp_to_next = _parse_xp_pair(raw)
-    parsed.battles_won = _parse_labeled_number(raw, r"battles\s*won")
-    parsed.distance_walked = _parse_labeled_number(raw, r"distance\s*walked")
-    parsed.pokemon_caught = _parse_labeled_number(raw, r"pok[eé]mon\s*caught")
+    activity = _parse_activity_metrics(raw)
+    parsed.battles_won = activity["battles_won"]
+    parsed.distance_walked = activity["distance_walked"]
+    parsed.pokemon_caught = activity["pokemon_caught"]
     return parsed
 
 
-def _match_known_account(text: str, known_accounts: list[str]) -> str | None:
-    if not known_accounts:
+def _match_known_account(
+    text: str,
+    known_accounts: list[str],
+    aliases: Mapping[str, str] | None = None,
+) -> str | None:
+    known_set = {str(name).strip() for name in known_accounts if str(name).strip()}
+    if not known_set:
         return None
-    lower = text.lower()
-    ranked = sorted(known_accounts, key=lambda name: len(str(name).strip()), reverse=True)
-    for name in ranked:
-        account = str(name).strip()
-        if not account:
+    candidates: dict[str, str] = {name: name for name in known_set}
+    for alias, canonical in (aliases or {}).items():
+        alias_name = str(alias).strip()
+        account = str(canonical).strip()
+        if alias_name and account in known_set:
+            candidates[alias_name] = account
+    ranked = sorted(candidates, key=len, reverse=True)
+    for search_name in ranked:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(search_name)}(?![A-Za-z])", text, flags=re.IGNORECASE):
+            return candidates[search_name]
+    return _fuzzy_match_account(text, sorted(known_set, key=len, reverse=True))
+
+
+def _fuzzy_match_account(text: str, known_accounts: list[str]) -> str | None:
+    from difflib import SequenceMatcher
+
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_]{3,}", text.split("TOTAL")[0] if "TOTAL" in text.upper() else text[:400])
+    best_name = None
+    best_ratio = 0.0
+    for account in known_accounts:
+        if len(account) < 5:
             continue
-        if re.search(rf"(?<![A-Za-z0-9]){re.escape(account)}(?![A-Za-z0-9])", text, flags=re.IGNORECASE):
-            return account
-        if account.lower() in lower:
-            return account
+        for token in tokens:
+            if abs(len(token) - len(account)) > 2:
+                continue
+            ratio = SequenceMatcher(None, token.lower(), account.lower()).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_name = account
+    if best_name is not None and best_ratio >= 0.82:
+        return best_name
     return None
 
 
 def _parse_level(text: str) -> int | None:
+    stripped = re.sub(
+        r"[0-9][0-9,\. ]{2,}/\s*[0-9][0-9,\. ]{2,}",
+        " ",
+        text,
+    )
     standalone = r"(?<![\d,])(\d{1,2})(?![\d,])"
-    match = re.search(rf"\blevel\b\s+{standalone}", text, flags=re.IGNORECASE)
-    if match:
-        value = int(match.group(1))
+    matches = list(re.finditer(rf"{standalone}\s+\blevel\b", stripped, flags=re.IGNORECASE))
+    if matches:
+        value = int(matches[-1].group(1))
         if 1 <= value <= 80:
             return value
-    match = re.search(rf"{standalone}\s+\blevel\b", text, flags=re.IGNORECASE)
+    match = re.search(rf"\blevel\b\s+{standalone}", stripped, flags=re.IGNORECASE)
     if match:
         value = int(match.group(1))
         if 1 <= value <= 80:
@@ -288,15 +347,93 @@ def _parse_xp_pair(text: str) -> tuple[int | None, int | None]:
     return left, right
 
 
-def _parse_labeled_number(text: str, label_pattern: str) -> float | None:
-    match = re.search(
-        rf"{label_pattern}\s*[^\d]{{0,40}}([0-9][0-9,\.]*)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if not match:
-        return None
-    return _parse_float_us(match.group(1))
+_NUM_RE = r"[0-9][0-9,\.]*"
+_BATTLES_RE = re.compile(r"battles\s*won", re.IGNORECASE)
+_DISTANCE_RE = re.compile(r"distance\s*walk\w*", re.IGNORECASE)
+_CAUGHT_RE = re.compile(r"pok[eéè]?\s*mon.{0,16}caugh\w*|caugh[ti]\w*", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_activity_metrics(text: str) -> dict[str, float | None]:
+    section = text
+    total = re.search(r"total\s*activity", text, flags=re.IGNORECASE)
+    if total:
+        section = text[total.end() :]
+    section = re.sub(r"[0-9][0-9,\. ]{2,}/\s*[0-9][0-9,\. ]{2,}", " ", section)
+    tokens = _activity_tokens(section)
+    assigned: dict[str, float | None] = {
+        "battles_won": None,
+        "distance_walked": None,
+        "pokemon_caught": None,
+    }
+    used: set[int] = set()
+    label_indexes = {kind: [] for kind in assigned}
+    for idx, token in enumerate(tokens):
+        if token[0] == "label":
+            label_indexes[str(token[1])].append(idx)
+
+    def adjacent(idx: int) -> list[int]:
+        found: list[int] = []
+        for neighbor in (idx + 1, idx - 1):
+            if 0 <= neighbor < len(tokens) and tokens[neighbor][0] == "num" and neighbor not in used:
+                found.append(neighbor)
+        return found
+
+    def assign(kind: str, idx: int) -> None:
+        if assigned[kind] is not None or idx in used:
+            return
+        assigned[kind] = float(tokens[idx][1])
+        used.add(idx)
+
+    for idx in label_indexes["distance_walked"]:
+        decimals = [i for i in adjacent(idx) if _is_one_decimal(float(tokens[i][1]))]
+        if decimals:
+            assign("distance_walked", decimals[0])
+    for idx in label_indexes["battles_won"]:
+        ints = [i for i in adjacent(idx) if not _is_one_decimal(float(tokens[i][1]))]
+        if ints:
+            assign("battles_won", ints[0])
+    for idx in label_indexes["pokemon_caught"]:
+        ints = [i for i in adjacent(idx) if not _is_one_decimal(float(tokens[i][1]))]
+        if ints:
+            assign("pokemon_caught", ints[0])
+    for idx in label_indexes["distance_walked"]:
+        if assigned["distance_walked"] is None:
+            nearby = adjacent(idx)
+            if nearby:
+                assign("distance_walked", nearby[0])
+    unused_nums = [i for i, token in enumerate(tokens) if token[0] == "num" and i not in used]
+    if assigned["distance_walked"] is None:
+        for idx in unused_nums:
+            if _is_one_decimal(float(tokens[idx][1])):
+                assign("distance_walked", idx)
+                break
+    unused_nums = [i for i, token in enumerate(tokens) if token[0] == "num" and i not in used]
+    for kind in ("battles_won", "pokemon_caught", "distance_walked"):
+        if assigned[kind] is None and unused_nums:
+            assign(kind, unused_nums.pop(0))
+    return assigned
+
+
+def _activity_tokens(section: str) -> list[tuple[str, object]]:
+    matches: list[tuple[int, int, str, object]] = []
+    for match in re.finditer(_NUM_RE, section):
+        value = _parse_float_us(match.group(0))
+        if value is None:
+            continue
+        matches.append((match.start(), match.end(), "num", value))
+    for kind, pattern in (
+        ("battles_won", _BATTLES_RE),
+        ("distance_walked", _DISTANCE_RE),
+        ("pokemon_caught", _CAUGHT_RE),
+    ):
+        for match in pattern.finditer(section):
+            matches.append((match.start(), match.end(), "label", kind))
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return [(kind, value) for _start, _end, kind, value in matches]
+
+
+def _is_one_decimal(value: float) -> bool:
+    return abs(value - round(value, 1)) < 1e-9 and abs(value - round(value)) > 0.05
 
 
 def _parse_int_us(raw: str) -> int | None:
@@ -310,7 +447,9 @@ def _parse_float_us(raw: str) -> float | None:
     s = str(raw).strip().replace(" ", "")
     if not s:
         return None
-    if "," in s and "." in s:
+    if re.fullmatch(r"\d{1,3}\.\d{3}", s):
+        s = s.replace(".", "")
+    elif "," in s and "." in s:
         s = s.replace(",", "")
     elif "," in s:
         parts = s.split(",")
