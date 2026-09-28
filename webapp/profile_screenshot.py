@@ -34,6 +34,7 @@ class XpScreenshotFillReport:
     unmatched: list[str] = field(default_factory=list)
     skipped_unselected: list[str] = field(default_factory=list)
     incomplete: list[str] = field(default_factory=list)
+    kept_xp: list[str] = field(default_factory=list)
     activated: list[str] = field(default_factory=list)
     deactivated: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -83,8 +84,10 @@ def apply_xp_screenshot_fills(
                 ("distance_walked", parsed.distance_walked),
                 ("pokemon_caught", parsed.pokemon_caught),
             )
-            if value is None
+            if value is None and not (name == "xp_bar" and parsed.level == 80)
         ]
+        if parsed.level == 80 and parsed.xp_bar is None:
+            report.kept_xp.append(account)
         if missing_fields:
             report.incomplete.append(account)
             report.warnings.append(f"{account}: could not read {', '.join(missing_fields)}.")
@@ -112,17 +115,33 @@ def apply_xp_screenshot_fills(
     return report
 
 
+def screenshot_fill_outcome(report: XpScreenshotFillReport) -> tuple[str, str]:
+    filled = [str(account) for account in report.filled if str(account).strip()]
+    details = [str(warning).strip() for warning in report.warnings if str(warning).strip()]
+    detail_text = " ".join(details[:4])
+    if not filled:
+        message = "Failed. No accounts were filled."
+        if detail_text:
+            message = f"{message} {detail_text}"
+        return "failed", message
+    if not details:
+        return "finished", "Finished. Filled " + ", ".join(filled) + ". Check inputs before save."
+    return "other", "Other. Partly filled " + ", ".join(filled) + ". " + detail_text
+
+
 def _inactive_from_screenshot(
     parsed: ProfileScreenshotParse,
     last_known: Mapping[str, object] | None,
 ) -> bool | None:
-    fields = (
+    fields = [
         ("level", parsed.level, 0),
         ("xp_bar", parsed.xp_bar, 0),
         ("battles_won", parsed.battles_won, 0),
         ("distance_walked", parsed.distance_walked, 1),
         ("pokemon_caught", parsed.pokemon_caught, 0),
-    )
+    ]
+    if parsed.level == 80 and parsed.xp_bar is None:
+        fields = [field for field in fields if field[0] != "xp_bar"]
     if any(value is None for _name, value, _decimals in fields):
         return None
     known = last_known or {}
@@ -266,6 +285,8 @@ def parse_profile_ocr_text(
     )
     parsed.level = _parse_level(raw)
     parsed.xp_bar, parsed.xp_to_next = _parse_xp_pair(raw)
+    if parsed.xp_bar is None and parsed.level == 80:
+        parsed.xp_bar, parsed.xp_to_next = _parse_max_level_xp(raw)
     activity = _parse_activity_metrics(raw)
     parsed.battles_won = activity["battles_won"]
     parsed.distance_walked = activity["distance_walked"]
@@ -316,11 +337,8 @@ def _fuzzy_match_account(text: str, known_accounts: list[str]) -> str | None:
 
 
 def _parse_level(text: str) -> int | None:
-    stripped = re.sub(
-        r"[0-9][0-9,\. ]{2,}/\s*[0-9][0-9,\. ]{2,}",
-        " ",
-        text,
-    )
+    stripped = _XP_SLASH_RE.sub(" ", text)
+    stripped = _XP_GLUED_RE.sub(" ", stripped)
     standalone = r"(?<![\d,])(\d{1,2})(?![\d,])"
     matches = list(re.finditer(rf"{standalone}\s+\blevel\b", stripped, flags=re.IGNORECASE))
     if matches:
@@ -335,16 +353,47 @@ def _parse_level(text: str) -> int | None:
     return None
 
 
+_XP_SLASH_RE = re.compile(r"[0-9][0-9,\. ]{2,}/\s*[0-9][0-9,\. ]{2,}")
+_XP_GLUED_RE = re.compile(r"\d{1,3}(?:,\d{3})+\d{1,3}(?:,\d{3})+")
+
+
 def _parse_xp_pair(text: str) -> tuple[int | None, int | None]:
     match = re.search(
         r"([0-9][0-9,\.]{2,})\s*/\s*([0-9][0-9,\.]{2,})",
         text,
     )
-    if not match:
-        return None, None
+    if match is None:
+        match = _XP_GLUED_RE.search(text)
+        if match is None:
+            return None, None
+        raw = match.group(0)
+        split = re.match(r"(\d{1,3}(?:,\d{3})+)(\d{1,3}(?:,\d{3})+)", raw)
+        if split is None:
+            return None, None
+        return _parse_int_us(split.group(1)), _parse_int_us(split.group(2))
     left = _parse_int_us(match.group(1))
     right = _parse_int_us(match.group(2))
     return left, right
+
+
+def _parse_max_level_xp(text: str) -> tuple[int | None, int | None]:
+    header = text
+    activity = re.search(r"total\s*activity|battles\s*won", text, flags=re.IGNORECASE)
+    if activity:
+        header = text[: activity.start()]
+    zero_denominator = re.search(r"([0-9][0-9,\.]{2,})\s*/\s*0(?!\d)", header)
+    if zero_denominator:
+        left = _parse_int_us(zero_denominator.group(1))
+        if left is not None:
+            return left, 0
+    candidates: list[int] = []
+    for match in re.finditer(r"[0-9][0-9,\.]{5,}", header):
+        value = _parse_int_us(match.group(0))
+        if value is not None and value >= 1000:
+            candidates.append(value)
+    if len(candidates) == 1:
+        return candidates[0], 0
+    return None, None
 
 
 _NUM_RE = r"[0-9][0-9,\.]*"
@@ -385,15 +434,15 @@ def _parse_activity_metrics(text: str) -> dict[str, float | None]:
         used.add(idx)
 
     for idx in label_indexes["distance_walked"]:
-        decimals = [i for i in adjacent(idx) if _is_one_decimal(float(tokens[i][1]))]
+        decimals = [i for i in adjacent(idx) if _is_distance_token(tokens[i])]
         if decimals:
             assign("distance_walked", decimals[0])
     for idx in label_indexes["battles_won"]:
-        ints = [i for i in adjacent(idx) if not _is_one_decimal(float(tokens[i][1]))]
+        ints = [i for i in adjacent(idx) if not _is_distance_token(tokens[i])]
         if ints:
             assign("battles_won", ints[0])
     for idx in label_indexes["pokemon_caught"]:
-        ints = [i for i in adjacent(idx) if not _is_one_decimal(float(tokens[i][1]))]
+        ints = [i for i in adjacent(idx) if not _is_distance_token(tokens[i])]
         if ints:
             assign("pokemon_caught", ints[0])
     for idx in label_indexes["distance_walked"]:
@@ -404,7 +453,7 @@ def _parse_activity_metrics(text: str) -> dict[str, float | None]:
     unused_nums = [i for i, token in enumerate(tokens) if token[0] == "num" and i not in used]
     if assigned["distance_walked"] is None:
         for idx in unused_nums:
-            if _is_one_decimal(float(tokens[idx][1])):
+            if _is_distance_token(tokens[idx]):
                 assign("distance_walked", idx)
                 break
     unused_nums = [i for i, token in enumerate(tokens) if token[0] == "num" and i not in used]
@@ -414,13 +463,25 @@ def _parse_activity_metrics(text: str) -> dict[str, float | None]:
     return assigned
 
 
-def _activity_tokens(section: str) -> list[tuple[str, object]]:
+def _is_distance_literal(raw: str) -> bool:
+    compact = str(raw).strip().replace(" ", "")
+    return re.fullmatch(r"\d{1,3}(?:[.,]\d{3})*[.,]\d", compact) is not None
+
+
+def _is_distance_token(token: tuple[object, ...]) -> bool:
+    return len(token) > 2 and bool(token[2])
+
+
+def _activity_tokens(section: str) -> list[tuple[object, ...]]:
     matches: list[tuple[int, int, str, object]] = []
     for match in re.finditer(_NUM_RE, section):
-        value = _parse_float_us(match.group(0))
+        if match.start() > 0 and section[match.start() - 1] == ",":
+            continue
+        raw = match.group(0)
+        value = _parse_float_us(raw)
         if value is None:
             continue
-        matches.append((match.start(), match.end(), "num", value))
+        matches.append((match.start(), match.end(), "num", value, _is_distance_literal(raw)))
     for kind, pattern in (
         ("battles_won", _BATTLES_RE),
         ("distance_walked", _DISTANCE_RE),
@@ -429,11 +490,13 @@ def _activity_tokens(section: str) -> list[tuple[str, object]]:
         for match in pattern.finditer(section):
             matches.append((match.start(), match.end(), "label", kind))
     matches.sort(key=lambda item: (item[0], item[1]))
-    return [(kind, value) for _start, _end, kind, value in matches]
-
-
-def _is_one_decimal(value: float) -> bool:
-    return abs(value - round(value, 1)) < 1e-9 and abs(value - round(value)) > 0.05
+    tokens: list[tuple[object, ...]] = []
+    for item in matches:
+        if item[2] == "num":
+            tokens.append(("num", item[3], item[4]))
+        else:
+            tokens.append(("label", item[3]))
+    return tokens
 
 
 def _parse_int_us(raw: str) -> int | None:

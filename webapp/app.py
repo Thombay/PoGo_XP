@@ -88,6 +88,7 @@ from webapp.github_pages import (
 from webapp.profile_screenshot import (
     XpScreenshotFillReport,
     fill_xp_inputs_from_screenshots,
+    screenshot_fill_outcome,
 )
 from webapp.ui_styles import inject_responsive_styles
 from webapp.views.dashboard import render_dashboard_content_view
@@ -7873,7 +7874,7 @@ if page == "Data Input":
             st.caption("Screenshots only prefill this form. Check inputs is still required before save.")
             if st.button("Fill form from screenshots", key=f"xp_fill_from_screenshots_{xp_date.isoformat()}"):
                 if not uploaded_shots:
-                    st.warning("Choose at least one screenshot first.")
+                    fill_report = XpScreenshotFillReport(warnings=["Choose at least one screenshot first."])
                 else:
                     files = [(str(item.name), bytes(item.getvalue())) for item in uploaded_shots]
                     with st.spinner("Reading screenshots..."):
@@ -7885,25 +7886,31 @@ if page == "Data Input":
                             session_state=st.session_state,
                             last_known=last_known,
                         )
-                    st.session_state["xp_screenshot_fill_report"] = fill_report
-                    st.session_state["xp_screenshot_fill_report_date"] = xp_date.isoformat()
+                st.session_state["xp_screenshot_fill_report"] = fill_report
+                st.session_state["xp_screenshot_fill_report_date"] = xp_date.isoformat()
+                _fill_kind, fill_message = screenshot_fill_outcome(fill_report)
+                st.toast(fill_message)
             fill_report = st.session_state.get("xp_screenshot_fill_report")
             fill_report_date = str(st.session_state.get("xp_screenshot_fill_report_date") or "")
             if isinstance(fill_report, XpScreenshotFillReport) and fill_report_date == xp_date.isoformat():
-                if fill_report.filled:
-                    st.info(
-                        "Filled from screenshots: "
-                        + ", ".join(fill_report.filled)
-                        + ". Check inputs before save."
-                    )
-                elif not fill_report.warnings:
-                    st.warning("No selected accounts could be filled from the screenshots.")
+                fill_kind, fill_message = screenshot_fill_outcome(fill_report)
+                if fill_kind == "finished":
+                    st.success(fill_message)
+                elif fill_kind == "failed":
+                    st.error(fill_message)
+                else:
+                    st.warning(fill_message)
                 if fill_report.activated:
                     st.caption("Set active: " + ", ".join(fill_report.activated))
                 if fill_report.deactivated:
                     st.caption("Set inactive: " + ", ".join(fill_report.deactivated))
+                if fill_report.kept_xp:
+                    st.caption(
+                        "Level 80 profile has no XP bar, kept the previous XP bar: "
+                        + ", ".join(fill_report.kept_xp)
+                    )
                 for warning in fill_report.warnings:
-                    st.warning(warning)
+                    st.caption(warning)
 
             medal_existing_for_validation = (
                 medal_df[["date", "account", "medal_id", "value"]].copy()
