@@ -2,9 +2,12 @@
 # python -m pip install -r requirements-localhost.txt
 # py -m pip install -r requirements-localhost.txt
 # Optional (direct install without file):
-# python -m pip install streamlit==1.41.1 plotly==6.5.2 pandas==2.3.3 kaleido==1.2.0 Pillow==11.3.0 google-api-python-client==2.196.0 google-auth-oauthlib==1.4.0 google-auth-httplib2==0.4.0 rapidocr-onnxruntime==1.4.4
-# py -m pip install streamlit==1.41.1 plotly==6.5.2 pandas==2.3.3 kaleido==1.2.0 Pillow==11.3.0 google-api-python-client==2.196.0 google-auth-oauthlib==1.4.0 google-auth-httplib2==0.4.0 rapidocr-onnxruntime==1.4.4
-streamlit==1.41.1
+# python -m pip install streamlit==1.45.1 plotly==6.5.2 pandas==2.3.3 kaleido==1.2.0 Pillow==11.3.0 google-api-python-client==2.196.0 google-auth-oauthlib==1.4.0 google-auth-httplib2==0.4.0 rapidocr-onnxruntime==1.4.4
+# py -m pip install streamlit==1.45.1 plotly==6.5.2 pandas==2.3.3 kaleido==1.2.0 Pillow==11.3.0 google-api-python-client==2.196.0 google-auth-oauthlib==1.4.0 google-auth-httplib2==0.4.0 rapidocr-onnxruntime==1.4.4
+# 1.45.1 keeps SessionInfo across websocket reconnects. 1.41.1 shows
+# "Bad message format: Tried to use SessionInfo before it was initialized"
+# when the trainer-profile screenshot uploader runs after a reconnect.
+streamlit==1.45.1
 plotly==6.5.2
 pandas==2.3.3
 kaleido==1.2.0
