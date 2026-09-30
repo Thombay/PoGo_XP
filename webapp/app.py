@@ -26,6 +26,8 @@ from shared.paths import (
     data_input_accounts_path,
     github_pages_site_dir,
     google_drive_exports_config_path,
+    level_requirement_progress_path,
+    level_requirements_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
@@ -85,6 +87,7 @@ from webapp.github_pages import (
     load_github_pages_config,
     publish_html_to_github_pages,
 )
+from webapp.level_requirements import load_level_requirement_progress, load_level_requirements
 from webapp.profile_screenshot import (
     XpScreenshotFillReport,
     fill_xp_inputs_from_screenshots,
@@ -92,6 +95,7 @@ from webapp.profile_screenshot import (
 )
 from webapp.ui_styles import inject_responsive_styles
 from webapp.views.dashboard import render_dashboard_content_view
+from webapp.views.level_requirements_page import render_level_requirements_page
 from webapp.views.pokedex_dashboard import render_pokedex_dashboard_view
 from webapp.views.xp_explorer import render_xp_explorer_section_view
 
@@ -6897,6 +6901,8 @@ st.caption("Interactive XP + medal dashboard.")
 curve_map = load_curve_map(total_xp_curve_path())
 xp_input_df = load_xp_history(xp_history_path(), curve_map)
 xp_df = carry_forward_max_level_rows(xp_input_df, curve_map)
+level_requirements_df = load_level_requirements(level_requirements_path())
+level_requirement_progress_df = load_level_requirement_progress(level_requirement_progress_path())
 additional_activity_df = load_additional_activity(additional_activity_path())
 groups = parse_groups(player_groups_path())
 medal_df = load_medal_snapshots(
@@ -6949,6 +6955,7 @@ latest_xp_df = latest_xp_snapshot(xp_input_df)
 pages = [
     "Dashboard Global",
     "Dashboard Personal",
+    "Level Requirements",
     "Medal Explorer",
     "Pokédex Dashboard",
     "Data Input",
@@ -7179,6 +7186,14 @@ if page == "Dashboard Personal":
                     xp_explorer_date_range=st.session_state.get("dashboard_personal_xp_explorer_date_range"),
                     xp_explorer_players=st.session_state.get("dashboard_personal_xp_explorer_players"),
                 )
+if page == "Level Requirements":
+    render_level_requirements_page(
+        xp_df=xp_df,
+        curve_totals=curve_map,
+        requirements_df=level_requirements_df,
+        progress_df=level_requirement_progress_df,
+        progress_path=level_requirement_progress_path(),
+    )
 if page not in {"Dashboard Global", "Dashboard Personal"}:
     with group_slot.container():
         st.caption("Group")

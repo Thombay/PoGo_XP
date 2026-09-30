@@ -121,3 +121,11 @@ def medal_report_path() -> Path:
 
 def additional_activity_path() -> Path:
     return data_dir() / "additional_activity.csv"
+
+
+def level_requirements_path() -> Path:
+    return reference_dir() / "level_requirements.csv"
+
+
+def level_requirement_progress_path() -> Path:
+    return data_dir() / "level_requirement_progress.csv"

@@ -1,0 +1,13 @@
+requirement_id,target_level,label,goal,sort_order
+platinum_medals_78,78,Earn platinum medals,45,1
+buddy_hearts_78,78,Earn hearts with your buddy,400,2
+explore_km_78,78,Explore km,400,3
+field_research_78,78,Complete Field Research tasks,500,4
+platinum_medals_79,79,Earn platinum medals,47,1
+rocket_leaders_79,79,Defeat a Team GO Rocket Leader,30,2
+eggs_hatched_79,79,Hatch eggs,100,3
+lucky_trades_79,79,Obtain Lucky Pokémon in trades,50,4
+platinum_medals_80,80,Earn platinum medals,50,1
+gbl_wins_80,80,Win Trainer Battles in the GO Battle League,80,2
+excellent_throws_80,80,Make Excellent Throws,999,3
+raids_won_80,80,Win raids,80,4
