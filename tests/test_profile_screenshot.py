@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
+from shared.paths import total_xp_curve_path
+from webapp.data_files import load_xp_to_next_map
 from webapp.profile_screenshot import (
+    ProfileScreenshotParse,
     XpScreenshotFillReport,
     apply_xp_screenshot_fills,
     parse_profile_ocr_text,
@@ -279,6 +282,25 @@ class ParseProfileOcrTextTest(unittest.TestCase):
         self.assertEqual(parsed.xp_bar, 431_512_558)
         self.assertEqual(parsed.xp_to_next, 0)
 
+    def test_reads_caught_when_ocr_uses_a_dot_for_thousands(self):
+        text = """
+        Thomzay
+        63
+        3,257,686 / 4,400,000
+        LEVEL
+        TOTALACTIVITY
+        954
+        BattlesWon
+        1,065.4
+        Distance Walked
+        Pokemon Caught
+        29.675
+        """
+        parsed = parse_profile_ocr_text(text, known_accounts=["Thomzay"])
+        self.assertEqual(parsed.pokemon_caught, 29_675.0)
+        self.assertEqual(parsed.distance_walked, 1065.4)
+        self.assertEqual(parsed.battles_won, 954.0)
+
 
 class ApplyXpScreenshotFillsTest(unittest.TestCase):
     def test_writes_widget_keys_without_saving(self):
@@ -397,6 +419,131 @@ class ApplyXpScreenshotFillsTest(unittest.TestCase):
         self.assertEqual(session_state["xp_bar_input_2026-09-28_AnSaCruiser"], "431512558")
         self.assertEqual(session_state["xp_battles_input_2026-09-28_AnSaCruiser"], "16021")
         self.assertFalse(session_state["xp_inactive_2026-09-28_AnSaCruiser"])
+
+    def test_level_80_without_xp_line_does_not_blank_xp_bar(self):
+        parsed = parse_profile_ocr_text(
+            """
+            AnSaCruiser
+            80
+            LEVEL
+            TOTAL ACTIVITY
+            Battles Won
+            16,021
+            Distance Walked
+            10,489.0
+            Pokemon Caught
+            323,896
+            """,
+            known_accounts=["AnSaCruiser"],
+        )
+        session_state: dict[str, object] = {}
+        report = apply_xp_screenshot_fills(
+            [parsed],
+            xp_date=date(2026, 9, 28),
+            selected_accounts=["AnSaCruiser"],
+            session_state=session_state,
+            xp_to_next_by_level=load_xp_to_next_map(total_xp_curve_path()),
+        )
+        self.assertNotIn("xp_bar_input_2026-09-28_AnSaCruiser", session_state)
+        self.assertEqual(report.kept_xp, ["AnSaCruiser"])
+        self.assertEqual(report.warnings, [])
+        self.assertEqual(session_state["xp_caught_input_2026-09-28_AnSaCruiser"], "323896")
+
+    def test_blanks_caught_below_last_saved_and_does_not_set_inactive(self):
+        parsed = ProfileScreenshotParse(
+            account="Azog",
+            level=75,
+            xp_bar=93_001_669,
+            xp_to_next=12_000_000,
+            battles_won=7652,
+            distance_walked=9436.1,
+            pokemon_caught=6177,
+        )
+        session_state: dict[str, object] = {"xp_inactive_2026-10-08_Azog": True}
+        report = apply_xp_screenshot_fills(
+            [parsed],
+            xp_date=date(2026, 10, 8),
+            selected_accounts=["Azog"],
+            session_state=session_state,
+            last_known={
+                "Azog": {
+                    "level": 75,
+                    "xp_bar": 93_001_669,
+                    "battles_won": 7652.0,
+                    "distance_walked": 9436.1,
+                    "pokemon_caught": 105_326.0,
+                }
+            },
+            xp_to_next_by_level={75: 12_000_000},
+        )
+        self.assertEqual(session_state["xp_caught_input_2026-10-08_Azog"], "")
+        self.assertFalse(session_state["xp_inactive_2026-10-08_Azog"])
+        self.assertNotIn("Azog", report.deactivated)
+        self.assertEqual(session_state["xp_bar_input_2026-10-08_Azog"], "93001669")
+        self.assertTrue(any("6,177" in warning and "105,326" in warning for warning in report.warnings))
+
+    def test_blanks_xp_when_denominator_does_not_match_level(self):
+        parsed = parse_profile_ocr_text(
+            """
+            Gloria
+            53
+            LEVEL
+            1,838,85/1,860,00
+            TOTAL ACTIVITY
+            Battles Won
+            1,384
+            Distance Walked
+            4,711.7
+            Pokemon Caught
+            13,956
+            """,
+            known_accounts=["Gloria"],
+        )
+        self.assertEqual(parsed.level, 53)
+        self.assertEqual(parsed.xp_bar, 183_885)
+        self.assertEqual(parsed.xp_to_next, 186_000)
+        session_state: dict[str, object] = {}
+        report = apply_xp_screenshot_fills(
+            [parsed],
+            xp_date=date(2026, 10, 8),
+            selected_accounts=["Gloria"],
+            session_state=session_state,
+            xp_to_next_by_level=load_xp_to_next_map(total_xp_curve_path()),
+        )
+        self.assertEqual(session_state["xp_bar_input_2026-10-08_Gloria"], "")
+        self.assertEqual(session_state["xp_level_input_2026-10-08_Gloria"], 53)
+        self.assertEqual(session_state["xp_caught_input_2026-10-08_Gloria"], "13956")
+        self.assertFalse(session_state["xp_inactive_2026-10-08_Gloria"])
+        self.assertTrue(any("1,860,000" in warning and "left blank" in warning for warning in report.warnings))
+
+    def test_keeps_xp_when_denominator_matches_level(self):
+        parsed = parse_profile_ocr_text(
+            """
+            Gloria
+            53
+            LEVEL
+            1,838,385 / 1,860,000
+            TOTAL ACTIVITY
+            Battles Won
+            1,384
+            Distance Walked
+            4,711.7
+            Pokemon Caught
+            13,956
+            """,
+            known_accounts=["Gloria"],
+        )
+        session_state: dict[str, object] = {}
+        report = apply_xp_screenshot_fills(
+            [parsed],
+            xp_date=date(2026, 10, 8),
+            selected_accounts=["Gloria"],
+            session_state=session_state,
+            xp_to_next_by_level=load_xp_to_next_map(total_xp_curve_path()),
+        )
+        self.assertEqual(session_state["xp_bar_input_2026-10-08_Gloria"], "1838385")
+        self.assertEqual(report.warnings, [])
+        self.assertNotIn("Gloria", report.incomplete)
 
 
 class ScreenshotFillOutcomeTest(unittest.TestCase):

@@ -52,6 +52,13 @@ def xp_screenshot_widget_keys(xp_date: date, account: str) -> dict[str, str]:
     }
 
 
+_ACTIVITY_SPECS = (
+    ("battles_won", "Battles Won", 0),
+    ("distance_walked", "Distance Walked", 1),
+    ("pokemon_caught", "Pokémon Caught", 0),
+)
+
+
 def apply_xp_screenshot_fills(
     parses: list[ProfileScreenshotParse],
     *,
@@ -59,6 +66,7 @@ def apply_xp_screenshot_fills(
     selected_accounts: list[str],
     session_state: MutableMapping[str, object],
     last_known: Mapping[str, Mapping[str, object]] | None = None,
+    xp_to_next_by_level: Mapping[int, int] | None = None,
 ) -> XpScreenshotFillReport:
     selected = [str(name).strip() for name in selected_accounts if str(name).strip()]
     selected_set = set(selected)
@@ -75,34 +83,37 @@ def apply_xp_screenshot_fills(
             report.skipped_unselected.append(account)
             report.warnings.append(f"{account}: not in the current missing-account list.")
             continue
-        missing_fields = [
-            name
-            for name, value in (
-                ("level", parsed.level),
-                ("xp_bar", parsed.xp_bar),
-                ("battles_won", parsed.battles_won),
-                ("distance_walked", parsed.distance_walked),
-                ("pokemon_caught", parsed.pokemon_caught),
-            )
-            if value is None and not (name == "xp_bar" and parsed.level == 80)
-        ]
+        refused, xp_bar, activity_values, field_warnings = _refuse_unread_screenshot_fields(
+            parsed,
+            account=account,
+            last_known=known_by_account.get(account),
+            xp_to_next_by_level=xp_to_next_by_level,
+        )
         if parsed.level == 80 and parsed.xp_bar is None:
             report.kept_xp.append(account)
-        if missing_fields:
+        if refused:
             report.incomplete.append(account)
-            report.warnings.append(f"{account}: could not read {', '.join(missing_fields)}.")
+            report.warnings.extend(field_warnings)
         keys = xp_screenshot_widget_keys(xp_date, account)
         if parsed.level is not None:
             session_state[keys["level"]] = int(parsed.level)
-        if parsed.xp_bar is not None:
-            session_state[keys["xp_bar"]] = str(int(parsed.xp_bar))
-        if parsed.battles_won is not None:
-            session_state[keys["battles_won"]] = str(int(round(float(parsed.battles_won))))
-        if parsed.distance_walked is not None:
-            session_state[keys["distance_walked"]] = f"{float(parsed.distance_walked):.1f}"
-        if parsed.pokemon_caught is not None:
-            session_state[keys["pokemon_caught"]] = str(int(round(float(parsed.pokemon_caught))))
-        inactive = _inactive_from_screenshot(parsed, known_by_account.get(account))
+        if "xp_bar" in refused:
+            session_state[keys["xp_bar"]] = ""
+        elif xp_bar is not None:
+            session_state[keys["xp_bar"]] = str(int(xp_bar))
+        for key, _label, decimals in _ACTIVITY_SPECS:
+            value = activity_values[key]
+            if key in refused or value is None:
+                session_state[keys[key]] = ""
+            elif decimals <= 0:
+                session_state[keys[key]] = str(int(round(float(value))))
+            else:
+                session_state[keys[key]] = f"{float(value):.1f}"
+        inactive = _inactive_from_screenshot(
+            parsed,
+            known_by_account.get(account),
+            refused_fields=refused,
+        )
         if inactive is not None:
             session_state[keys["inactive"]] = bool(inactive)
             if inactive:
@@ -129,10 +140,74 @@ def screenshot_fill_outcome(report: XpScreenshotFillReport) -> tuple[str, str]:
     return "other", "Other. Partly filled " + ", ".join(filled) + ". " + detail_text
 
 
+def _refuse_unread_screenshot_fields(
+    parsed: ProfileScreenshotParse,
+    *,
+    account: str,
+    last_known: Mapping[str, object] | None,
+    xp_to_next_by_level: Mapping[int, int] | None,
+) -> tuple[set[str], int | None, dict[str, float | None], list[str]]:
+    refused: set[str] = set()
+    warnings: list[str] = []
+    level = parsed.level
+    xp_bar = parsed.xp_bar
+    if level is None:
+        refused.add("level")
+        warnings.append(f"{account}: level could not be read.")
+    keep_level_80_xp = level == 80 and xp_bar is None
+    if not keep_level_80_xp and xp_bar is None:
+        refused.add("xp_bar")
+        warnings.append(f"{account}: XP bar could not be read, so it was left blank.")
+    elif not keep_level_80_xp and xp_bar is not None and xp_to_next_by_level is not None and level is not None:
+        expected = xp_to_next_by_level.get(int(level))
+        if expected is not None and int(parsed.xp_to_next if parsed.xp_to_next is not None else -1) != int(expected):
+            refused.add("xp_bar")
+            warnings.append(
+                f"{account}: XP bar {int(xp_bar):,} / {int(parsed.xp_to_next or 0):,} does not match level {int(level)} "
+                f"(expected / {int(expected):,}), so XP was left blank."
+            )
+            xp_bar = None
+    activity_values: dict[str, float | None] = {
+        "battles_won": parsed.battles_won,
+        "distance_walked": parsed.distance_walked,
+        "pokemon_caught": parsed.pokemon_caught,
+    }
+    has_baseline = isinstance(last_known, Mapping)
+    baseline = last_known or {}
+    for key, label, decimals in _ACTIVITY_SPECS:
+        value = activity_values[key]
+        if value is None:
+            refused.add(key)
+            warnings.append(f"{account}: {label} could not be read, so it was left blank.")
+            continue
+        if has_baseline and _is_below_last(value, baseline.get(key, 0), decimals):
+            refused.add(key)
+            warnings.append(
+                f"{account}: {label} {_format_activity_value(value, decimals)} is below the last saved "
+                f"{_format_activity_value(baseline.get(key, 0), decimals)}, so it was left blank."
+            )
+            activity_values[key] = None
+    return refused, xp_bar, activity_values, warnings
+
+
+def _is_below_last(value: object, previous: object, decimals: int) -> bool:
+    return round(float(value), decimals) < round(float(previous or 0), decimals)
+
+
+def _format_activity_value(value: object, decimals: int) -> str:
+    if decimals <= 0:
+        return f"{int(round(float(value))):,}"
+    return f"{float(value):,.1f}"
+
+
 def _inactive_from_screenshot(
     parsed: ProfileScreenshotParse,
     last_known: Mapping[str, object] | None,
+    *,
+    refused_fields: set[str] | None = None,
 ) -> bool | None:
+    if refused_fields:
+        return False
     fields = [
         ("level", parsed.level, 0),
         ("xp_bar", parsed.xp_bar, 0),
@@ -162,6 +237,7 @@ def fill_xp_inputs_from_screenshots(
     session_state: MutableMapping[str, object],
     ocr_fn: Callable[[bytes], str] | None = None,
     last_known: Mapping[str, Mapping[str, object]] | None = None,
+    xp_to_next_by_level: Mapping[int, int] | None = None,
 ) -> XpScreenshotFillReport:
     parses: list[ProfileScreenshotParse] = []
     ocr_warnings: list[str] = []
@@ -184,6 +260,7 @@ def fill_xp_inputs_from_screenshots(
         selected_accounts=selected_accounts,
         session_state=session_state,
         last_known=last_known,
+        xp_to_next_by_level=xp_to_next_by_level,
     )
     report.warnings = ocr_warnings + report.warnings
     return report

@@ -53,6 +53,7 @@ from webapp.data_files import (
     add_account_to_groups,
     accounts_for_selected_group,
     load_curve_map,
+    load_xp_to_next_map,
     load_data_input_accounts,
     load_medal_goals,
     load_medal_snapshots,
@@ -6899,6 +6900,7 @@ st.title("PoGo Local Dashboard")
 st.caption("Interactive XP + medal dashboard.")
 
 curve_map = load_curve_map(total_xp_curve_path())
+xp_to_next_by_level = load_xp_to_next_map(total_xp_curve_path())
 xp_input_df = load_xp_history(xp_history_path(), curve_map)
 xp_df = carry_forward_max_level_rows(xp_input_df, curve_map)
 level_requirements_df = load_level_requirements(level_requirements_path())
@@ -7884,9 +7886,16 @@ if page == "Data Input":
                 type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True,
                 key=f"xp_screenshot_uploads_{xp_date.isoformat()}",
-                help="Prefills Level, XP Bar, Battles, Distance, and Caught, and sets Inactive from last known values. Check inputs is still required before save.",
+                help=(
+                    "Prefills Level, XP Bar, Battles, Distance, and Caught, and sets Inactive from last known values. "
+                    "Move the round X off Pokémon Caught before the shot. "
+                    "Check inputs is still required before save."
+                ),
             )
-            st.caption("Screenshots only prefill this form. Check inputs is still required before save.")
+            st.caption(
+                "Screenshots only prefill this form. Move the round X off Pokémon Caught before the shot. "
+                "Check inputs is still required before save."
+            )
             if st.button("Fill form from screenshots", key=f"xp_fill_from_screenshots_{xp_date.isoformat()}"):
                 if not uploaded_shots:
                     fill_report = XpScreenshotFillReport(warnings=["Choose at least one screenshot first."])
@@ -7900,6 +7909,7 @@ if page == "Data Input":
                             known_accounts=list(all_players),
                             session_state=st.session_state,
                             last_known=last_known,
+                            xp_to_next_by_level=xp_to_next_by_level,
                         )
                 st.session_state["xp_screenshot_fill_report"] = fill_report
                 st.session_state["xp_screenshot_fill_report_date"] = xp_date.isoformat()

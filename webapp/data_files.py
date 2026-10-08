@@ -299,6 +299,21 @@ def load_curve_map(path: Path) -> dict[int, int]:
     return dict(zip(curve["Level"], curve["Total XP"]))
 
 
+def load_xp_to_next_map(path: Path) -> dict[int, int]:
+    if not path.exists():
+        return {}
+    curve = pd.read_csv(path, sep=";", engine="python", encoding="utf-8-sig")
+    next_col = "XP to next Lvl."
+    if not {"Level", next_col}.issubset(curve.columns):
+        return {}
+    curve["Level"] = to_int_series(curve["Level"])
+    curve[next_col] = to_int_series(curve[next_col])
+    curve = curve.dropna(subset=["Level", next_col]).copy()
+    curve["Level"] = curve["Level"].astype(int)
+    curve[next_col] = curve[next_col].astype(int)
+    return dict(zip(curve["Level"], curve[next_col]))
+
+
 def load_xp_history(path: Path, curve_map: dict[int, int]) -> pd.DataFrame:
     cols = ["Date", "Spieler", "Lvl", "XP Bar", "Total XP"]
     if not path.exists():
