@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 
 from webapp.metrics import (
+    build_activity_pace_list,
     build_cumulative_gain_df,
     compute_player_kpis_30d,
     compute_player_kpis_window,
@@ -182,6 +183,31 @@ class MetricsTest(unittest.TestCase):
         self.assertListEqual(a["gain_value"].tolist(), [0.0, 40.0])
         self.assertListEqual(b["date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-01-08", "2026-01-15"])
         self.assertListEqual(b["gain_value"].tolist(), [0.0, 50.0])
+
+    def test_activity_pace_list(self):
+        series = pd.DataFrame(
+            {
+                "date": ["2026-01-01", "2026-01-08", "2026-01-01", "2026-01-08", "2026-01-08"],
+                "account": ["Fast", "Fast", "Slow", "Slow", "OnlyOne"],
+                "value": [0, 70, 0, 14, 100],
+            }
+        )
+        result = build_activity_pace_list(
+            series,
+            ["Slow", "Fast", "Missing", "OnlyOne", "Fast"],
+            window_days=7,
+        )
+        self.assertEqual(list(result.columns), ["Account", "pace"])
+        self.assertEqual(result["Account"].tolist(), ["Fast", "Slow", "Missing", "OnlyOne"])
+        by_account = result.set_index("Account")["pace"]
+        self.assertEqual(float(by_account.loc["Fast"]), 10.0)
+        self.assertEqual(float(by_account.loc["Slow"]), 2.0)
+        self.assertTrue(pd.isna(by_account.loc["Missing"]))
+        self.assertTrue(pd.isna(by_account.loc["OnlyOne"]))
+
+        empty = build_activity_pace_list(series, [], window_days=7)
+        self.assertEqual(list(empty.columns), ["Account", "pace"])
+        self.assertTrue(empty.empty)
 
 
 if __name__ == "__main__":

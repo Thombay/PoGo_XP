@@ -45,6 +45,7 @@ from shared.xp_utils import carry_forward_max_level_rows, is_max_level, max_conf
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
     WINDOW_DAYS_DEFAULT,
+    build_activity_pace_list,
     build_cumulative_gain_df,
     compute_player_kpis_window,
     recent_gain_table_from_metrics,
@@ -2494,6 +2495,47 @@ def _render_xp_explorer_section_impl(
             _render_activity_kpi_row(battles_series, "Battles", "", "Battles")
             _render_activity_kpi_row(caught_series, "Pokemon", "", "Pokemon")
             _render_activity_kpi_row(km_series, "Distance Walked", "km", "Km")
+
+            def _render_activity_pace_table(series_df: pd.DataFrame, label: str, container_key: str) -> None:
+                st.markdown(f"**{label}**")
+                pace_df = build_activity_pace_list(
+                    series_df,
+                    activity_accounts,
+                    window_days,
+                    baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+                ).rename(columns={"pace": label})
+                pace_view = pace_df.style.format({label: "{:,.2f}"}, na_rep="--").map(
+                    lambda value: account_cell_style(value, account_color_map),
+                    subset=["Account"],
+                )
+                with st.container(key=container_key):
+                    st.dataframe(
+                        pace_view,
+                        hide_index=True,
+                        use_container_width=True,
+                        height=min(1100, 48 + 35 * max(len(pace_df), 1)),
+                    )
+
+            st.caption(f"Activity Pace ({w_label})")
+            pace_battles_col, pace_pokemon_col, pace_km_col = st.columns(3)
+            with pace_battles_col:
+                _render_activity_pace_table(
+                    battles_series,
+                    "Battles/day",
+                    f"pogo_activity_pace_battles_{w_label}",
+                )
+            with pace_pokemon_col:
+                _render_activity_pace_table(
+                    caught_series,
+                    "Pokemon/day",
+                    f"pogo_activity_pace_pokemon_{w_label}",
+                )
+            with pace_km_col:
+                _render_activity_pace_table(
+                    km_series,
+                    "Km/day",
+                    f"pogo_activity_pace_km_{w_label}",
+                )
 
             def _clip_series_to_selected_range(series_df: pd.DataFrame) -> pd.DataFrame:
                 if series_df.empty:
@@ -6359,11 +6401,35 @@ def _build_dashboard_export_payload(
             fig_km_total.update_yaxes(title="km", tickformat=",.1f")
             activity_chart_items.append(("Activity: Distance Walked Total Over Time", fig_km_total))
 
+        def _activity_pace_table(series_df: pd.DataFrame, column_name: str) -> pd.DataFrame:
+            pace_df = build_activity_pace_list(
+                series_df,
+                activity_accounts,
+                w,
+                baseline_min_windows=BASELINE_MIN_WINDOWS_DEFAULT,
+            )
+
+            def _fmt_pace(value: object) -> str:
+                if pd.isna(value):
+                    return "--"
+                return f"{float(value):,.2f}"
+
+            if not isinstance(pace_df, pd.DataFrame) or "Account" not in pace_df.columns or "pace" not in pace_df.columns:
+                return pd.DataFrame(columns=["Account", column_name])
+            frame = pace_df.loc[:, ["Account", "pace"]].copy()
+            frame["pace"] = frame["pace"].map(_fmt_pace)
+            return frame.rename(columns={"pace": column_name})
+
         activity_ordered_blocks: list[dict[str, object]] = [
             {
                 "type": "card_group",
                 "title": f"Activity Summary: Battles ({w_label})",
                 "cards": _build_activity_export_cards(battles_series, "", "Battles"),
+            },
+            {
+                "type": "table",
+                "title": f"Battles Pace ({w_label})",
+                "dataframe": _activity_pace_table(battles_series, "Battles/day"),
             },
             {"type": "chart", "title": "Activity: Battles Gained Over Time", "figure": fig_battles if 'fig_battles' in locals() else None},
             {"type": "chart", "title": "Activity: Battles Total Over Time", "figure": fig_battles_total if 'fig_battles_total' in locals() else None},
@@ -6372,12 +6438,22 @@ def _build_dashboard_export_payload(
                 "title": f"Activity Summary: Pokemon ({w_label})",
                 "cards": _build_activity_export_cards(caught_series, "", "Pokemon"),
             },
+            {
+                "type": "table",
+                "title": f"Pokemon Pace ({w_label})",
+                "dataframe": _activity_pace_table(caught_series, "Pokemon/day"),
+            },
             {"type": "chart", "title": "Activity: Pokemon Gained Over Time", "figure": fig_caught if 'fig_caught' in locals() else None},
             {"type": "chart", "title": "Activity: Pokemon Total Over Time", "figure": fig_caught_total if 'fig_caught_total' in locals() else None},
             {
                 "type": "card_group",
                 "title": f"Activity Summary: Distance Walked ({w_label})",
                 "cards": _build_activity_export_cards(km_series, "km", "Km"),
+            },
+            {
+                "type": "table",
+                "title": f"Distance Walked Pace ({w_label})",
+                "dataframe": _activity_pace_table(km_series, "Km/day"),
             },
             {"type": "chart", "title": "Activity: Distance Walked Gained Over Time", "figure": fig_km if 'fig_km' in locals() else None},
             {"type": "chart", "title": "Activity: Distance Walked Total Over Time", "figure": fig_km_total if 'fig_km_total' in locals() else None},

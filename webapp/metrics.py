@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import re
 
@@ -319,6 +320,61 @@ def compute_player_kpis_window(
     out = pd.DataFrame(rows, columns=cols)
     out = out.sort_values("Spieler").reset_index(drop=True)
     return out
+
+
+def build_activity_pace_list(
+    series_df: pd.DataFrame,
+    accounts: Sequence[str],
+    window_days: int,
+    *,
+    baseline_min_windows: int = BASELINE_MIN_WINDOWS_DEFAULT,
+) -> pd.DataFrame:
+    columns = ["Account", "pace"]
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw in accounts:
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        requested.append(name)
+    if not requested:
+        return pd.DataFrame(columns=columns)
+
+    pace_lookup: dict[str, float] = {}
+    required = {"date", "account", "value"}
+    if not series_df.empty and required.issubset(series_df.columns):
+        xp = series_df.loc[:, ["date", "account", "value"]].copy()
+        xp = xp.dropna(subset=["date", "account", "value"])
+        xp = xp.rename(columns={"date": "Date", "account": "Spieler", "value": "Total XP"})
+        kpis = compute_player_kpis_window(
+            xp,
+            window_days=window_days,
+            baseline_min_windows=baseline_min_windows,
+        )
+        colmap = _window_col_map(window_days)
+        pace_col = colmap["xp_per_day"]
+        eligible_col = colmap["eligible"]
+        if not kpis.empty and {pace_col, eligible_col, "Spieler"}.issubset(kpis.columns):
+            eligible_rows = kpis.loc[kpis[eligible_col].eq(True)]
+            for player, pace in zip(eligible_rows["Spieler"], eligible_rows[pace_col]):
+                if pd.isna(pace):
+                    continue
+                pace_lookup[str(player).strip()] = float(pace)
+
+    out = pd.DataFrame(
+        {
+            "Account": requested,
+            "pace": pd.array([pace_lookup.get(name, pd.NA) for name in requested], dtype="Float64"),
+        }
+    )
+    out = out.assign(_blank=out["pace"].isna())
+    out = (
+        out.sort_values(["_blank", "pace", "Account"], ascending=[True, False, True], kind="mergesort")
+        .drop(columns="_blank")
+        .reset_index(drop=True)
+    )
+    return out.loc[:, columns]
 
 
 def _rename_window_suffix(df: pd.DataFrame, from_suffix: str, to_suffix: str) -> pd.DataFrame:

@@ -41,6 +41,12 @@ def _format_export_df(df: pd.DataFrame) -> pd.DataFrame:
             numeric_like = int(vals.notna().sum())
             is_numeric_col = non_empty > 0 and (numeric_like / non_empty) >= 0.6
         if is_numeric_col:
+            # Pace tables preformat decimals as strings ("10.00"). Leave those
+            # cells as written so this integer rounding does not collapse them.
+            if not pd.api.types.is_numeric_dtype(out[col]):
+                text = out[col].map(lambda v: "" if pd.isna(v) else str(v).strip())
+                if bool(text.str.contains(r"\d\.\d", regex=True).any()):
+                    continue
             out[col] = vals.map(lambda v: "--" if pd.isna(v) else f"{int(round(float(v))):,}")
     return out
 
@@ -362,6 +368,13 @@ def build_dashboard_export_html(
                     )
                     content_blocks.append("</section>")
                     include_plotly = False
+                    continue
+                if block_type == "table":
+                    table_title = str(block.get("title", ""))
+                    table_df = block.get("dataframe")
+                    if not isinstance(table_df, pd.DataFrame):
+                        table_df = pd.DataFrame()
+                    content_blocks.append(_df_section_html(table_title, table_df))
         else:
             for chart_title, fig in chart_items:
                 if fig is None:
@@ -1035,6 +1048,17 @@ def build_dashboard_export_png(
         blocks.append(chart_img)
         return True, None
 
+    def _append_text_table(title: str, frame: object) -> None:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            blocks.append(text_block(title, ["No data."], title_color=muted, title_font=font_section, body_font=font_body))
+            return
+        formatted = _format_export_df(frame)
+        preview_rows = min(len(formatted), 40)
+        lines = formatted.head(preview_rows).to_string(index=False).splitlines()
+        if len(formatted) > preview_rows:
+            lines += [f"... ({len(formatted) - preview_rows} more rows)"]
+        blocks.append(text_block(title, lines, title_color=muted, title_font=font_section, body_font=font_mono))
+
     if ordered_blocks:
         for block in ordered_blocks:
             block_type = str(block.get("type", "")).strip().lower() if isinstance(block, dict) else ""
@@ -1045,6 +1069,9 @@ def build_dashboard_export_png(
                 ok, err = _append_chart_block(block.get("figure"))
                 if not ok:
                     return None, err
+                continue
+            if block_type == "table":
+                _append_text_table(str(block.get("title", "")), block.get("dataframe"))
     else:
         for _, fig in chart_items:
             ok, err = _append_chart_block(fig)
@@ -1052,16 +1079,7 @@ def build_dashboard_export_png(
                 return None, err
 
     for sec_title, sec_df in sections_data:
-        if sec_df.empty:
-            blocks.append(text_block(sec_title, ["No data."], title_color=muted, title_font=font_section, body_font=font_body))
-            continue
-        formatted = _format_export_df(sec_df)
-        preview_rows = min(len(formatted), 40)
-        table_text = formatted.head(preview_rows).to_string(index=False).splitlines()
-        lines = table_text
-        if len(formatted) > preview_rows:
-            lines += [f"... ({len(formatted) - preview_rows} more rows)"]
-        blocks.append(text_block(sec_title, lines, title_color=muted, title_font=font_section, body_font=font_mono))
+        _append_text_table(sec_title, sec_df)
 
     total_h = pad
     for b in blocks:
