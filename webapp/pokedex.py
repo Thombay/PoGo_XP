@@ -26,6 +26,18 @@ POKEAPI_SPRITE_FALLBACK_URL = "https://raw.githubusercontent.com/PokeAPI/sprites
 RELEASED_LIKE_ENTRY_TYPES = {"lucky", "xxl", "xxs", "hundo", "purified"}
 SEEDED_AVAILABILITY_ENTRY_TYPES = {"shiny", "shadow", "mega"}
 
+# Mega and gmax are catalog categories, not atlas kinds.
+ATLAS_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
+    ("pokemon", "Pokemon"),
+    ("shiny", "Shiny"),
+    ("lucky", "Lucky"),
+    ("hundo", "100%"),
+    ("xxl", "XXL"),
+    ("xxs", "XXS"),
+    ("shadow", "Shadow"),
+    ("purified", "Purified"),
+)
+
 # National-dex regionals. Form-only regionals are intentionally omitted.
 LOCATION_RESTRICTION_BY_DEX: dict[int, str] = {
     83: "East Asia",
@@ -635,19 +647,159 @@ def build_pokedex_missing_count_rows(
     ].sort_values(["account", "entry_type", "region"]).reset_index(drop=True)
 
 
-def build_pokedex_atlas_cards(
+def _ordered_unique_text(values: Sequence[object] | None) -> list[str]:
+    if not values:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _selected_atlas_kinds(entry_types: Sequence[object] | None) -> list[tuple[str, str]]:
+    if entry_types is None:
+        return list(ATLAS_ENTRY_KINDS)
+    requested = {str(item).strip().lower() for item in entry_types if str(item).strip()}
+    return [(kind, label) for kind, label in ATLAS_ENTRY_KINDS if kind in requested]
+
+
+def _prepare_atlas_catalog(catalog_df: pd.DataFrame, regions: Sequence[object] | None) -> pd.DataFrame:
+    if catalog_df.empty or "dex_number" not in catalog_df.columns:
+        columns = list(catalog_df.columns) if len(getattr(catalog_df, "columns", [])) else ["dex_number"]
+        return pd.DataFrame(columns=columns)
+    catalog = catalog_df.copy()
+    catalog["dex_number"] = pd.to_numeric(catalog["dex_number"], errors="coerce")
+    catalog = catalog.dropna(subset=["dex_number"]).copy()
+    if catalog.empty:
+        return catalog
+    catalog["dex_number"] = catalog["dex_number"].astype(int)
+    if regions is not None and "region" in catalog.columns:
+        region_set = {
+            str(region).strip().lower()
+            for region in regions
+            if str(region).strip() and str(region).strip().lower() != "overall"
+        }
+        if region_set:
+            catalog = catalog[catalog["region"].astype(str).str.strip().str.lower().isin(region_set)].copy()
+    return catalog
+
+
+def _in_go_dex_numbers(catalog: pd.DataFrame) -> set[int]:
+    if catalog.empty or "dex_number" not in catalog.columns or "available_in_pogo" not in catalog.columns:
+        return set()
+    available = catalog["available_in_pogo"].map(is_available_in_pogo).astype(bool)
+    return set(catalog.loc[available, "dex_number"].astype(int).tolist())
+
+
+def _atlas_targets_by_kind(
+    catalog: pd.DataFrame,
+    availability_df: pd.DataFrame | None,
+    kinds: Sequence[str],
+) -> dict[str, set[int]]:
+    in_go = _in_go_dex_numbers(catalog)
+    if catalog.empty or "dex_number" not in catalog.columns:
+        catalog_dex: set[int] = set()
+    else:
+        catalog_dex = set(catalog["dex_number"].astype(int).tolist())
+    targets: dict[str, set[int]] = {}
+    for kind in kinds:
+        raw = category_target_dex_numbers(kind, catalog, availability_df)
+        targets[str(kind)] = {int(dex) for dex in raw if int(dex) in catalog_dex and int(dex) in in_go}
+    return targets
+
+
+_SPECIES_MISSING_SUMMARY_COLUMNS = [
+    "account",
+    "entry_type",
+    "entry_type_label",
+    "target_count",
+    "registered_count",
+    "missing_count",
+]
+
+
+def _registered_dex_by_account_kind(
+    species_df: pd.DataFrame,
+    accounts: Sequence[str],
+    kinds: Sequence[str],
+    targets_by_kind: dict[str, set[int]],
+    as_of_date: object | None,
+) -> dict[tuple[str, str], set[int]]:
+    found: dict[tuple[str, str], set[int]] = {}
+    if not accounts or not kinds:
+        return found
+    latest = latest_pokedex_species_state(
+        species_df,
+        accounts=list(accounts),
+        entry_types=list(kinds),
+        as_of_date=as_of_date,
+    )
+    if latest.empty:
+        return found
+    registered_rows = latest[latest["registered"] == True]  # noqa: E712
+    for row in registered_rows.itertuples(index=False):
+        account_name = str(row.account)
+        kind = str(row.entry_type)
+        dex = int(row.dex_number)
+        if dex not in targets_by_kind.get(kind, set()):
+            continue
+        found.setdefault((account_name, kind), set()).add(dex)
+    return found
+
+
+def build_species_missing_summary(
     catalog_df: pd.DataFrame,
     species_df: pd.DataFrame,
     *,
-    account: object,
-    entry_type: object,
-    region: object | None = None,
+    accounts: Sequence[object],
+    regions: Sequence[object] | None = None,
     availability_df: pd.DataFrame | None = None,
-    search: object = "",
-    status_filter: object = "all",
     as_of_date: object | None = None,
+    entry_types: Sequence[object] | None = None,
 ) -> pd.DataFrame:
-    cols = [
+    columns = list(_SPECIES_MISSING_SUMMARY_COLUMNS)
+    empty = pd.DataFrame(columns=columns)
+    account_list = _ordered_unique_text(accounts)
+    if not account_list or catalog_df.empty or "dex_number" not in catalog_df.columns:
+        return empty
+    base = _prepare_atlas_catalog(catalog_df, None)
+    if base.empty:
+        return empty
+    kinds = _selected_atlas_kinds(entry_types)
+    if not kinds:
+        return empty
+    catalog = _prepare_atlas_catalog(base, regions)
+    kind_ids = [kind for kind, _label in kinds]
+    targets = _atlas_targets_by_kind(catalog, availability_df, kind_ids)
+    registered = _registered_dex_by_account_kind(species_df, account_list, kind_ids, targets, as_of_date)
+    rows: list[dict[str, object]] = []
+    for account_name in account_list:
+        for kind, label in kinds:
+            target_count = len(targets.get(kind, set()))
+            registered_count = len(registered.get((account_name, kind), set()))
+            rows.append(
+                {
+                    "account": account_name,
+                    "entry_type": kind,
+                    "entry_type_label": label,
+                    "target_count": target_count,
+                    "registered_count": registered_count,
+                    "missing_count": max(target_count - registered_count, 0),
+                }
+            )
+    summary = pd.DataFrame(rows, columns=columns)
+    for column in ("target_count", "registered_count", "missing_count"):
+        summary[column] = summary[column].astype(int)
+    return summary
+
+
+def _atlas_card_columns() -> list[str]:
+    return [
         "dex_number",
         "name",
         "german_name",
@@ -662,41 +814,65 @@ def build_pokedex_atlas_cards(
         "last_event",
         "last_event_date",
         "status",
+        "status_label",
+        "missing_kinds",
         "notes",
+        *[f"registered_{kind}" for kind, _label in ATLAS_ENTRY_KINDS],
     ]
-    if catalog_df.empty:
-        return pd.DataFrame(columns=cols)
-    catalog = catalog_df.copy()
-    catalog["dex_number"] = pd.to_numeric(catalog["dex_number"], errors="coerce")
-    catalog = catalog.dropna(subset=["dex_number"]).copy()
-    catalog["dex_number"] = catalog["dex_number"].astype(int)
-    region_key = str(region or "").strip().lower()
-    if region_key and region_key != "overall" and "region" in catalog.columns:
-        catalog = catalog[catalog["region"].astype(str).str.strip().str.lower() == region_key].copy()
 
+
+def build_pokedex_atlas_cards(
+    catalog_df: pd.DataFrame,
+    species_df: pd.DataFrame,
+    *,
+    account: object,
+    region: object | None = None,
+    availability_df: pd.DataFrame | None = None,
+    search: object = "",
+    status_filter: object = "all",
+    as_of_date: object | None = None,
+    entry_type: object | None = None,
+) -> pd.DataFrame:
+    # entry_type is ignored. Cards evaluate every atlas kind for this account.
+    _ = entry_type
+    cols = _atlas_card_columns()
+    if catalog_df.empty or "dex_number" not in catalog_df.columns:
+        return pd.DataFrame(columns=cols)
+    region_key = str(region or "").strip().lower()
+    region_filter = None if not region_key or region_key == "overall" else [region_key]
+    catalog = _prepare_atlas_catalog(catalog_df, region_filter)
+    if catalog.empty:
+        return pd.DataFrame(columns=cols)
+
+    kind_ids = [kind for kind, _label in ATLAS_ENTRY_KINDS]
+    targets = _atlas_targets_by_kind(catalog, availability_df, kind_ids)
     account_name = str(account).strip()
-    entry = str(entry_type).strip().lower()
-    targets = category_target_dex_numbers(entry, catalog_df, availability_df)
     latest = latest_pokedex_species_state(
         species_df,
         accounts=[account_name] if account_name else [],
-        entry_types=[entry] if entry else [],
+        entry_types=kind_ids,
         as_of_date=as_of_date,
     )
-    registered_map: dict[int, bool] = {}
+    registered_by_kind = {kind: set() for kind in kind_ids}
     notes_map: dict[int, str] = {}
     if not latest.empty:
-        for _, row in latest.iterrows():
-            dex = int(row["dex_number"])
-            registered_map[dex] = bool(row.get("registered"))
-            notes_map[dex] = str(row.get("notes") or "").strip()
+        for row in latest.itertuples(index=False):
+            dex = int(row.dex_number)
+            kind = str(row.entry_type)
+            if kind == "pokemon":
+                notes_map[dex] = str(getattr(row, "notes", "") or "").strip()
+            if bool(row.registered) and kind in registered_by_kind:
+                registered_by_kind[kind].add(dex)
 
     cards = catalog.copy()
     cards["sprite_url"] = cards["dex_number"].map(pokemon_sprite_url)
-    cards["available_in_pogo"] = cards.get("available_in_pogo", "").fillna("").astype(str)
-    cards["category_available"] = cards["dex_number"].map(lambda dex: int(dex) in targets)
-    cards["registered"] = cards["dex_number"].map(lambda dex: bool(registered_map.get(int(dex), False)))
-    cards["notes"] = cards["dex_number"].map(lambda dex: notes_map.get(int(dex), ""))
+    if "available_in_pogo" in cards.columns:
+        in_go = cards["available_in_pogo"].map(is_available_in_pogo).astype(bool)
+    else:
+        in_go = pd.Series(False, index=cards.index)
+        cards["available_in_pogo"] = ""
+    cards["available_in_pogo"] = cards["available_in_pogo"].fillna("").astype(str)
+    cards["notes"] = cards["dex_number"].map(lambda dex: notes_map.get(int(dex), "")).fillna("")
     if "location_restriction" not in cards.columns:
         cards["location_restriction"] = cards["dex_number"].map(location_restriction_for_dex)
     else:
@@ -708,16 +884,52 @@ def build_pokedex_atlas_cards(
             cards[col] = ""
         cards[col] = cards[col].fillna("").astype(str).str.strip()
 
-    def status_for_row(row: pd.Series) -> str:
-        if not bool(row["category_available"]):
-            return "unavailable"
-        if entry == "pokemon" and not is_available_in_pogo(row.get("available_in_pogo")):
-            return "unavailable"
-        if bool(row["registered"]):
-            return "registered"
-        return "missing"
+    statuses: list[str] = []
+    status_labels: list[str] = []
+    missing_kind_values: list[str] = []
+    category_available: list[bool] = []
+    per_kind_values: dict[str, list[object]] = {kind: [] for kind in kind_ids}
+    for dex, species_in_go in zip(cards["dex_number"].astype(int).tolist(), in_go.tolist(), strict=True):
+        missing_labels: list[str] = []
+        available_kinds = 0
+        registered_kinds = 0
+        for kind, label in ATLAS_ENTRY_KINDS:
+            kind_available = bool(species_in_go) and dex in targets.get(kind, set())
+            if not kind_available:
+                per_kind_values[kind].append(pd.NA)
+                continue
+            available_kinds += 1
+            is_registered = dex in registered_by_kind[kind]
+            per_kind_values[kind].append(bool(is_registered))
+            if is_registered:
+                registered_kinds += 1
+            else:
+                missing_labels.append(label)
+        pokemon_available = bool(species_in_go) and dex in targets.get("pokemon", set())
+        if not species_in_go:
+            status = "unavailable"
+            status_label = "Not in GO"
+            missing_text = ""
+        elif pokemon_available and available_kinds > 0 and registered_kinds == available_kinds:
+            status = "registered"
+            status_label = "Registered"
+            missing_text = ""
+        else:
+            status = "missing"
+            missing_text = ", ".join(missing_labels)
+            status_label = f"Missing: {missing_text}" if missing_text else "Missing"
+        statuses.append(status)
+        status_labels.append(status_label)
+        missing_kind_values.append(missing_text)
+        category_available.append(bool(available_kinds))
 
-    cards["status"] = cards.apply(status_for_row, axis=1)
+    cards["status"] = statuses
+    cards["status_label"] = status_labels
+    cards["missing_kinds"] = missing_kind_values
+    cards["category_available"] = category_available
+    cards["registered"] = [status == "registered" for status in statuses]
+    for kind in kind_ids:
+        cards[f"registered_{kind}"] = pd.array(per_kind_values[kind], dtype="boolean")
 
     query = normalize_pokemon_name(search)
     if query:
@@ -754,7 +966,10 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
         type_1 = str(row.get("type_1") or "").strip().lower()
         type_2 = str(row.get("type_2") or "").strip().lower()
         sprite = escape(str(row.get("sprite_url") or pokemon_sprite_url(dex)), quote=True)
-        status = str(row.get("status") or "missing")
+        status = str(row.get("status") or "missing").strip() or "missing"
+        badge = str(row.get("status_label") or "").strip()
+        if not badge:
+            badge = status.replace("_", " ").title()
         location = str(row.get("location_restriction") or "").strip()
         last_event = str(row.get("last_event") or "").strip()
         last_event_date = str(row.get("last_event_date") or "").strip()
@@ -781,7 +996,7 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
                 f'<div class="pogo-dex-name">{name}</div>'
                 f'<div class="pogo-dex-german">{german}</div>'
                 f'<div class="pogo-dex-types">{type_chips}</div>'
-                f'<div class="pogo-dex-status">{escape(status.replace("_", " ").title())}</div>'
+                f'<div class="pogo-dex-status">{escape(badge)}</div>'
                 f"{extras}"
                 "</article>"
             )

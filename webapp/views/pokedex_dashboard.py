@@ -10,8 +10,10 @@ import streamlit as st
 
 from shared.paths import pokedex_species_entries_path
 from webapp.pokedex import (
+    ATLAS_ENTRY_KINDS,
     build_pokedex_atlas_cards,
     build_pokedex_missing_count_rows,
+    build_species_missing_summary,
     pokedex_atlas_html,
     upsert_pokedex_species_rows,
 )
@@ -109,9 +111,6 @@ def render_pokedex_dashboard_view(
     if not selected_pokedex_accounts:
         st.info("Select at least one account.")
         return
-    if not selected_pokedex_entry_types:
-        st.info("Select at least one entry type.")
-        return
 
     account_color_map = build_account_color_map_fn(
         selected_pokedex_accounts,
@@ -119,50 +118,24 @@ def render_pokedex_dashboard_view(
     )
     render_account_color_legend_fn(selected_pokedex_accounts, account_color_map)
 
-    missing_counts = build_pokedex_missing_count_rows(
-        display_pokedex_df,
-        pokedex_entry_config_df,
+    species_missing = build_species_missing_summary(
+        pokemon_catalog_df,
+        species_df,
         accounts=selected_pokedex_accounts,
-        entry_types=selected_pokedex_entry_types,
-        regions=["overall"],
-        start_date=pokedex_start_date,
-        end_date=pokedex_end_date,
-        entry_type_labels=entry_type_labels,
-        region_labels=region_labels,
+        availability_df=availability_df,
+        as_of_date=pokedex_end_date,
     )
-    latest_snapshot = pd.to_datetime(
-        filter_rows_fn(
-            display_pokedex_df,
-            accounts=selected_pokedex_accounts,
-            start_date=pokedex_start_date,
-            end_date=pokedex_end_date,
-        ).get("date") if not pokedex_dashboard_rows.empty else pd.Series(dtype="datetime64[ns]"),
-        errors="coerce",
-    ).max()
-
-    metric_cols = st.columns(6)
-    metric_cols[0].metric(
-        "Latest Snapshot",
-        latest_snapshot.strftime("%Y-%m-%d") if pd.notna(latest_snapshot) else "-",
+    species_missing_table = _species_missing_table(selected_pokedex_accounts, species_missing)
+    st.dataframe(
+        species_missing_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            label: st.column_config.NumberColumn(format="%d")
+            for _kind_id, label in ATLAS_ENTRY_KINDS
+        },
     )
-    metric_cols[1].metric("Accounts", f"{len(selected_pokedex_accounts):,}")
-    overall_missing = missing_counts[missing_counts["region"] == "overall"].copy() if not missing_counts.empty else missing_counts
-    if overall_missing.empty:
-        metric_cols[2].metric("Latest value", "-")
-        metric_cols[3].metric("Target max", "-")
-        metric_cols[4].metric("Missing", "-")
-        metric_cols[5].metric("Progress", "-")
-    else:
-        latest_value = pd.to_numeric(overall_missing["value"], errors="coerce").sum()
-        max_value = pd.to_numeric(overall_missing["max_value"], errors="coerce").sum()
-        missing_value = pd.to_numeric(overall_missing["missing_count"], errors="coerce").sum()
-        progress = float(latest_value) / float(max_value) if float(max_value) > 0 else 0.0
-        metric_cols[2].metric("Latest value", format_kpi_number_fn(latest_value))
-        metric_cols[3].metric("Target max", format_kpi_number_fn(max_value))
-        metric_cols[4].metric("Missing", format_kpi_number_fn(missing_value))
-        metric_cols[5].metric("Progress", f"{progress:.0%}")
-
-    st.caption("Missing counts use Pokédex Entry Snapshots minus configured max values. Exact names come from species-level rows.")
+    st.caption("Missing counts are unchecked species for that account and kind.")
     st.divider()
 
     if view_mode == "Atlas":
@@ -178,6 +151,22 @@ def render_pokedex_dashboard_view(
             as_of_date=pokedex_end_date,
         )
         return
+
+    if not selected_pokedex_entry_types:
+        st.info("Select at least one entry type.")
+        return
+
+    missing_counts = build_pokedex_missing_count_rows(
+        display_pokedex_df,
+        pokedex_entry_config_df,
+        accounts=selected_pokedex_accounts,
+        entry_types=selected_pokedex_entry_types,
+        regions=["overall"],
+        start_date=pokedex_start_date,
+        end_date=pokedex_end_date,
+        entry_type_labels=entry_type_labels,
+        region_labels=region_labels,
+    )
 
     if view_mode == "Progress":
         _render_progress_view(
@@ -210,6 +199,127 @@ def render_pokedex_dashboard_view(
     )
 
 
+def _registered_is_blank(value: object) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(missing, bool) and missing
+
+
+def _missing_counts_by_kind(summary: pd.DataFrame) -> dict[tuple[str, str], int]:
+    lookup: dict[tuple[str, str], int] = {}
+    if summary is None or summary.empty:
+        return lookup
+    required = {"account", "entry_type", "missing_count"}
+    if not required.issubset(summary.columns):
+        return lookup
+    cleaned = summary.loc[:, ["account", "entry_type", "missing_count"]].copy()
+    cleaned["account"] = cleaned["account"].astype(str).str.strip()
+    cleaned["entry_type"] = cleaned["entry_type"].astype(str).str.strip().str.lower()
+    cleaned["missing_count"] = pd.to_numeric(cleaned["missing_count"], errors="coerce")
+    cleaned = cleaned.dropna(subset=["missing_count"])
+    cleaned = cleaned.drop_duplicates(subset=["account", "entry_type"], keep="last")
+    for _, row in cleaned.iterrows():
+        lookup[(str(row["account"]), str(row["entry_type"]))] = int(row["missing_count"])
+    return lookup
+
+
+def _species_missing_table(accounts: Sequence[str], summary: pd.DataFrame) -> pd.DataFrame:
+    lookup = _missing_counts_by_kind(summary)
+    kind_labels = [label for _kind_id, label in ATLAS_ENTRY_KINDS]
+    records: list[dict[str, object]] = []
+    for account in accounts:
+        account_name = str(account)
+        record: dict[str, object] = {"Account": account_name}
+        for kind_id, label in ATLAS_ENTRY_KINDS:
+            record[label] = lookup.get((account_name.strip(), kind_id), 0)
+        records.append(record)
+    return pd.DataFrame(records, columns=["Account", *kind_labels])
+
+
+def _checkbox_series(cards: pd.DataFrame, kind_id: str) -> pd.Series:
+    column = f"registered_{kind_id}"
+    if column not in cards.columns:
+        return pd.Series(pd.NA, index=cards.index, dtype="boolean")
+    values: list[object] = []
+    for value in cards[column].tolist():
+        values.append(pd.NA if _registered_is_blank(value) else bool(value))
+    return pd.Series(values, index=cards.index, dtype="boolean")
+
+
+def _text_series(cards: pd.DataFrame, column: str) -> pd.Series:
+    if column not in cards.columns:
+        return pd.Series([""] * len(cards), index=cards.index, dtype="object")
+    return cards[column].fillna("").astype(str)
+
+
+def _atlas_editor_frame(cards: pd.DataFrame) -> pd.DataFrame:
+    frame = pd.DataFrame(index=cards.index)
+    frame["Dex"] = pd.to_numeric(cards["dex_number"], errors="coerce").astype("Int64")
+    frame["Name"] = _text_series(cards, "name")
+    frame["German"] = _text_series(cards, "german_name")
+    for kind_id, label in ATLAS_ENTRY_KINDS:
+        frame[label] = _checkbox_series(cards, kind_id)
+    frame["Location"] = _text_series(cards, "location_restriction")
+    frame["Last event"] = _text_series(cards, "last_event")
+    return frame
+
+
+def _available_kinds_by_dex(cards: pd.DataFrame) -> dict[int, set[str]]:
+    available: dict[int, set[str]] = {}
+    for _, card in cards.iterrows():
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        kinds: set[str] = set()
+        for kind_id, _label in ATLAS_ENTRY_KINDS:
+            column = f"registered_{kind_id}"
+            raw = card[column] if column in card.index else pd.NA
+            if not _registered_is_blank(raw):
+                kinds.add(kind_id)
+        available[int(dex_number)] = kinds
+    return available
+
+
+def _species_rows_from_editor(
+    cards: pd.DataFrame,
+    edited: pd.DataFrame,
+    *,
+    account: object,
+    save_date: date,
+) -> list[dict[str, object]]:
+    available_by_dex = _available_kinds_by_dex(cards)
+    rows: list[dict[str, object]] = []
+    date_text = save_date.isoformat()
+    account_name = str(account)
+    for _, row in edited.iterrows():
+        dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        dex = int(dex_number)
+        available = available_by_dex.get(dex, set())
+        for kind_id, label in ATLAS_ENTRY_KINDS:
+            if kind_id not in available:
+                continue
+            edited_value = row[label] if label in row.index else False
+            registered = False if _registered_is_blank(edited_value) else bool(edited_value)
+            rows.append(
+                {
+                    "date": date_text,
+                    "account": account_name,
+                    "entry_type": kind_id,
+                    "dex_number": dex,
+                    "registered": registered,
+                    "can_evolve_now": False,
+                    "notes": "",
+                }
+            )
+    return rows
+
+
 def _render_atlas_view(
     *,
     pokemon_catalog_df: pd.DataFrame,
@@ -222,22 +332,13 @@ def _render_atlas_view(
     region_labels: dict[str, str],
     as_of_date: object,
 ) -> None:
+    # Page-level entry types filter Progress and Detail only. Atlas always shows all eight kinds.
+    del selected_entry_types, entry_type_labels
+
     if pokemon_catalog_df.empty:
         st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
         return
 
-    atlas_col_1, atlas_col_2, atlas_col_3, atlas_col_4 = st.columns([1.1, 1.1, 1.4, 1.4])
-    atlas_account = atlas_col_1.selectbox(
-        "Atlas account",
-        options=list(selected_accounts),
-        key="pokedex_dashboard_atlas_account",
-    )
-    atlas_entry_type = atlas_col_2.selectbox(
-        "Atlas entry type",
-        options=list(selected_entry_types),
-        format_func=lambda value: entry_type_labels.get(str(value), str(value)),
-        key="pokedex_dashboard_atlas_entry_type",
-    )
     region_options = [region for region in regions if region != "overall"]
     catalog_regions = (
         set(pokemon_catalog_df["region"].dropna().astype(str).str.strip().str.lower().tolist())
@@ -246,19 +347,25 @@ def _render_atlas_view(
     )
     region_options = [region for region in region_options if not catalog_regions or region in catalog_regions] or region_options
     default_region = "kanto" if "kanto" in region_options else region_options[0]
-    atlas_region = atlas_col_3.selectbox(
+    atlas_col_account, atlas_col_region, atlas_col_status = st.columns([1.1, 1.4, 1.5])
+    atlas_account = atlas_col_account.selectbox(
+        "Atlas account",
+        options=list(selected_accounts),
+        key="pokedex_dashboard_atlas_account",
+    )
+    atlas_region = atlas_col_region.selectbox(
         "Region",
         options=region_options,
         index=region_options.index(default_region) if default_region in region_options else 0,
         format_func=lambda value: region_labels.get(str(value), str(value)),
         key="pokedex_dashboard_atlas_region",
     )
-    status_filter = atlas_col_4.selectbox(
+    status_filter = atlas_col_status.selectbox(
         "Status",
         options=["all", "missing", "registered", "unavailable", "restricted"],
         format_func=lambda value: {
             "all": "All",
-            "missing": "Missing",
+            "missing": "Missing any kind",
             "registered": "Registered",
             "unavailable": "Not in GO",
             "restricted": "Location restricted",
@@ -271,63 +378,63 @@ def _render_atlas_view(
         pokemon_catalog_df,
         species_df,
         account=atlas_account,
-        entry_type=atlas_entry_type,
         region=atlas_region,
         availability_df=availability_df,
         search=search,
         status_filter=status_filter,
         as_of_date=as_of_date,
     )
-    counts = cards["status"].value_counts() if not cards.empty and "status" in cards.columns else pd.Series(dtype=int)
-    summary_cols = st.columns(4)
-    summary_cols[0].metric("Shown", f"{len(cards):,}")
-    summary_cols[1].metric("Missing", f"{int(counts.get('missing', 0)):,}")
-    summary_cols[2].metric("Registered", f"{int(counts.get('registered', 0)):,}")
-    summary_cols[3].metric("Not in GO", f"{int(counts.get('unavailable', 0)):,}")
+    region_missing = build_species_missing_summary(
+        pokemon_catalog_df,
+        species_df,
+        accounts=[atlas_account],
+        regions=[atlas_region],
+        availability_df=availability_df,
+        as_of_date=as_of_date,
+    )
+    kind_missing = _missing_counts_by_kind(region_missing)
+    account_key = str(atlas_account).strip()
+    metric_items = [("Shown", f"{len(cards):,}")]
+    for kind_id, label in ATLAS_ENTRY_KINDS:
+        missing = kind_missing.get((account_key, kind_id), 0)
+        metric_items.append((f"Missing {label}", f"{missing:,}"))
+    # Two rows keep labels like "Missing Pokemon" readable. One row of nine clips them.
+    for start in (0, 5):
+        row_items = metric_items[start : start + 5]
+        row_cols = st.columns(len(row_items))
+        for column, (metric_label, metric_value) in zip(row_cols, row_items):
+            column.metric(metric_label, metric_value)
 
     st.markdown(pokedex_atlas_html(cards), unsafe_allow_html=True)
 
-    with st.expander("Mark registered for this region", expanded=False):
+    region_name = region_labels.get(str(atlas_region), str(atlas_region))
+    with st.expander(f"Mark registered for {atlas_account} in {region_name}", expanded=False):
         if cards.empty:
             st.info("Nothing to edit for the current Atlas filters.")
             return
-        editor_source = cards[["dex_number", "name", "german_name", "status", "registered", "location_restriction", "last_event"]].copy()
-        editor_source = editor_source.rename(
-            columns={
-                "dex_number": "Dex",
-                "name": "Name",
-                "german_name": "German",
-                "status": "Status",
-                "registered": "Registered",
-                "location_restriction": "Location",
-                "last_event": "Last event",
-            }
-        )
+        editor_source = _atlas_editor_frame(cards)
+        kind_labels = [label for _kind_id, label in ATLAS_ENTRY_KINDS]
         edited = st.data_editor(
             editor_source,
             use_container_width=True,
             hide_index=True,
-            disabled=["Dex", "Name", "German", "Status", "Location", "Last event"],
-            column_config={"Registered": st.column_config.CheckboxColumn(default=False)},
-            key="pokedex_dashboard_atlas_editor",
+            disabled=["Dex", "Name", "German", "Location", "Last event"],
+            column_config={
+                label: st.column_config.CheckboxColumn(width="small")
+                for label in kind_labels
+            },
+            key=f"pokedex_dashboard_atlas_editor_{atlas_account}_{atlas_region}",
         )
         if st.button("Save species progress", type="primary", key="pokedex_dashboard_atlas_save"):
             save_date = pd.to_datetime(as_of_date, errors="coerce")
             if pd.isna(save_date):
                 save_date = pd.Timestamp.today()
-            rows = []
-            for _, row in edited.iterrows():
-                rows.append(
-                    {
-                        "date": pd.Timestamp(save_date).date().isoformat(),
-                        "account": atlas_account,
-                        "entry_type": atlas_entry_type,
-                        "dex_number": int(row["Dex"]),
-                        "registered": bool(row["Registered"]),
-                        "can_evolve_now": False,
-                        "notes": "",
-                    }
-                )
+            rows = _species_rows_from_editor(
+                cards,
+                edited,
+                account=atlas_account,
+                save_date=pd.Timestamp(save_date).date(),
+            )
             written = upsert_pokedex_species_rows(pokedex_species_entries_path(), rows)
             st.success(f"Saved {written} species rows for {atlas_account}.")
             st.rerun()

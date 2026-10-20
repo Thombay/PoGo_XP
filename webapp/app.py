@@ -1141,32 +1141,42 @@ def build_xp_catchup_projection_trace(
     if leader_fit is None:
         return None, f"not possible (leader {leader} needs at least 2 valid snapshots)"
 
-    p_series, p_slope, p_intercept = player_fit
-    l_series, l_slope, l_intercept = leader_fit
+    p_series, p_slope, _ = player_fit
+    l_series, l_slope, _ = leader_fit
     overlap = p_series.merge(l_series, on="Date", how="inner", suffixes=("_player", "_leader"))
     if overlap.empty:
         return None, f"not possible (no overlapping dates with {leader})"
 
-    latest_overlap = overlap.sort_values("Date").iloc[-1]
-    current_date = pd.Timestamp(latest_overlap["Date"])
-    current_gap = float(latest_overlap["Total XP_leader"]) - float(latest_overlap["Total XP_player"])
-    if current_gap <= 0:
+    player_last_date = pd.Timestamp(p_series["Date"].iloc[-1])
+    leader_last_date = pd.Timestamp(l_series["Date"].iloc[-1])
+    player_actual = float(p_series["Total XP"].iloc[-1])
+    leader_actual = float(l_series["Total XP"].iloc[-1])
+    player_last_x = float(player_last_date.toordinal())
+    leader_last_x = float(leader_last_date.toordinal())
+    later_x = max(player_last_x, leader_last_x)
+    player_at_later = player_actual + p_slope * (later_x - player_last_x)
+    leader_at_later = leader_actual + l_slope * (later_x - leader_last_x)
+
+    if player_last_date == leader_last_date and (leader_actual - player_actual) <= 0:
         return None, f"not possible (already tied or ahead of {leader})"
 
     rel_slope = p_slope - l_slope
     if rel_slope <= 0:
+        if player_last_date != leader_last_date and player_at_later >= leader_at_later:
+            return None, f"not possible (already tied or ahead of {leader})"
         return None, f"not possible (trend does not close gap to {leader})"
 
-    current_x = float(current_date.toordinal())
-    target_x = (l_intercept - p_intercept) / rel_slope
-    if target_x <= current_x:
+    target_x = (leader_actual - player_actual - l_slope * leader_last_x + p_slope * player_last_x) / rel_slope
+    if target_x <= later_x:
+        if player_at_later >= leader_at_later:
+            return None, f"not possible (already tied or ahead of {leader})"
         return None, f"not possible (intersection is not in the future vs {leader})"
-    if (target_x - current_x) > 3650:
+    if (target_x - later_x) > 3650:
         return None, f"not possible (ETA beyond 10 years vs {leader})"
 
     eta = pd.Timestamp.fromordinal(int(round(target_x)))
-    y_start = p_intercept + p_slope * current_x
-    y_end = p_intercept + p_slope * target_x
+    y_start = player_actual
+    y_end = player_actual + p_slope * (eta.toordinal() - player_last_x)
 
     line_style: dict[str, object] = {"dash": "dot"}
     if color:
@@ -1174,7 +1184,7 @@ def build_xp_catchup_projection_trace(
 
     return (
         go.Scatter(
-            x=[current_date, eta],
+            x=[player_last_date, eta],
             y=[y_start, y_end],
             mode="lines",
             name=f"{player} catch {leader} -> {eta.date().isoformat()}",
@@ -1196,7 +1206,7 @@ def build_selected_leader_trend_trace(
     if leader_fit is None:
         return None, f"not possible (leader {leader} needs at least 2 valid snapshots)"
 
-    s, slope, intercept = leader_fit
+    s, slope, _ = leader_fit
     last_date = pd.Timestamp(s["Date"].iloc[-1])
     if pd.isna(last_date):
         return None, f"not possible (leader {leader} has no valid latest date)"
@@ -1213,8 +1223,8 @@ def build_selected_leader_trend_trace(
 
     start_x = float(last_date.toordinal())
     end_x = float(pd.Timestamp(target_end).toordinal())
-    y_start = intercept + slope * start_x
-    y_end = intercept + slope * end_x
+    y_start = float(s["Total XP"].iloc[-1])
+    y_end = y_start + slope * (end_x - start_x)
 
     line_style: dict[str, object] = {"dash": "dash"}
     if color:
@@ -1244,7 +1254,7 @@ def build_player_trend_projection_trace(
     if player_fit is None:
         return None, f"not possible ({player} needs at least 2 valid snapshots)"
 
-    s, slope, intercept = player_fit
+    s, slope, _ = player_fit
     last_date = pd.Timestamp(s["Date"].iloc[-1])
     if pd.isna(last_date):
         return None, f"not possible ({player} has no valid latest date)"
@@ -1261,8 +1271,8 @@ def build_player_trend_projection_trace(
 
     start_x = float(last_date.toordinal())
     end_x = float(pd.Timestamp(target_end).toordinal())
-    y_start = intercept + slope * start_x
-    y_end = intercept + slope * end_x
+    y_start = float(s["Total XP"].iloc[-1])
+    y_end = y_start + slope * (end_x - start_x)
 
     line_style: dict[str, object] = {"dash": "dot"}
     if color:

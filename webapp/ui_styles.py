@@ -235,14 +235,19 @@ def inject_responsive_styles() -> None:
         }
         .pogo-dex-status {
           display: inline-block;
-          font-size: 0.72rem;
+          max-width: 100%;
+          box-sizing: border-box;
+          font-size: 0.68rem;
           font-weight: 800;
-          letter-spacing: 0.02em;
+          letter-spacing: 0.01em;
           text-transform: uppercase;
-          padding: 0.12rem 0.42rem;
-          border-radius: 999px;
+          padding: 0.14rem 0.42rem;
+          border-radius: 0.45rem;
           background: rgba(15, 23, 42, 0.55);
           margin-bottom: 0.28rem;
+          line-height: 1.3;
+          white-space: normal;
+          overflow-wrap: break-word;
         }
         .pogo-dex-card--registered .pogo-dex-status { background: rgba(22, 163, 74, 0.78); }
         .pogo-dex-card--missing .pogo-dex-status { background: rgba(202, 138, 4, 0.82); }
