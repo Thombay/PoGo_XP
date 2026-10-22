@@ -1,0 +1,8 @@
+{
+  "appId": "com.pogo.pokedex",
+  "appName": "PoGo Pokedex",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

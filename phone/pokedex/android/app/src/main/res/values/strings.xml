@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PoGo Pokedex</string>
+    <string name="title_activity_main">PoGo Pokedex</string>
+    <string name="package_name">com.pogo.pokedex</string>
+    <!-- Replace with com.googleusercontent.apps.CLIENT_PREFIX before building the APK. See README. -->
+    <string name="custom_url_scheme">com.pogo.pokedex</string>
+</resources>

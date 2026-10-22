@@ -1,0 +1,20 @@
+{
+  "name": "pogo-pokedex",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/model.test.js"
+  },
+  "dependencies": {
+    "@capacitor-community/generic-oauth2": "^7.1.0",
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/filesystem": "^7.1.9",
+    "@capacitor/preferences": "^7.0.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.6.9"
+  }
+}

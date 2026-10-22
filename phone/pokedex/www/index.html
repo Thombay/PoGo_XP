@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#000000">
+  <title>PoGo Pokedex</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="gate" class="gate" hidden>
+    <button type="button" id="sign-in" class="sign-in">Sign in with Google</button>
+    <p id="gate-error" class="gate-error" hidden></p>
+  </main>
+  <div id="shell" class="shell" hidden>
+    <div class="sticky">
+      <header class="header">
+        <h1>PoGo Pokedex</h1>
+        <button type="button" id="sync">Sync</button>
+      </header>
+      <p id="status" class="status" aria-live="polite"></p>
+      <div id="controls" hidden>
+        <div id="control-panel">
+          <div class="pair">
+            <select id="account" aria-label="Account"></select>
+            <select id="region" aria-label="Region"></select>
+          </div>
+          <div class="search">
+            <input id="search" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search name or number" aria-label="Search German name, English name, or dex number">
+            <button type="button" id="clear">Clear</button>
+          </div>
+          <div id="kinds" class="kinds" role="toolbar" aria-label="Kind"></div>
+          <div class="filter-row">
+            <p id="missing" class="missing"></p>
+            <div class="segmented" role="group" aria-label="Filter">
+              <button type="button" data-filter="missing">Missing</button>
+              <button type="button" data-filter="all">All</button>
+              <button type="button" data-filter="registered">Registered</button>
+            </div>
+          </div>
+        </div>
+        <button type="button" id="summary" class="summary" hidden></button>
+      </div>
+    </div>
+    <div id="list" class="list" hidden></div>
+    <section id="detail" class="detail" hidden>
+      <button type="button" id="back">Back</button>
+      <h2 id="detail-german"></h2>
+      <p id="detail-english" class="detail-english"></p>
+      <div id="detail-kinds"></div>
+      <h3>Location restriction</h3>
+      <p id="detail-location" class="wrap"></p>
+      <h3>Last event</h3>
+      <p id="detail-event" class="wrap"></p>
+    </section>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
