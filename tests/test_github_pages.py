@@ -44,6 +44,10 @@ class GithubPagesHelpersTest(unittest.TestCase):
             )
 
             self.assertTrue((site_dir / ".nojekyll").exists())
+            self.assertIn("privacy.html", (site_dir / "index.html").read_text(encoding="utf-8"))
+            privacy = (site_dir / "privacy.html").read_text(encoding="utf-8")
+            self.assertIn("PoGo Sync", privacy)
+            self.assertIn("not shared with anyone else", privacy)
             self.assertEqual(
                 (site_dir / "Dashboard-Global" / "All" / "index.html").read_text(encoding="utf-8"),
                 "<html>all</html>",

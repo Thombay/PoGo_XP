@@ -80,6 +80,40 @@ def export_pages_url(base_url: str, dashboard: str, group: str) -> str:
     return f"{base_url.rstrip('/')}/{rel}/"
 
 
+def privacy_page_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PoGo XP privacy</title>
+</head>
+<body>
+  <h1>PoGo XP</h1>
+  <p>PoGo XP is a personal Pokémon GO progress tracker.</p>
+  <p>It uses your Google account only to read and write files in the private Drive folder named PoGo Sync.</p>
+  <p>Those files are not shared with anyone else.</p>
+  <p>Contact: thomas.humitsch@gmail.com</p>
+</body>
+</html>
+"""
+
+
+def home_page_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PoGo XP</title>
+</head>
+<body>
+  <h1>PoGo XP</h1>
+  <p>Personal Pokémon GO progress dashboards.</p>
+  <p><a href="privacy.html">Privacy</a></p>
+</body>
+</html>
+"""
+
+
 def write_export_site(
     site_dir: Path,
     pages: list[dict[str, str]],
@@ -94,6 +128,8 @@ def write_export_site(
         shutil.rmtree(site_dir)
     site_dir.mkdir(parents=True, exist_ok=True)
     (site_dir / ".nojekyll").write_text("", encoding="utf-8")
+    (site_dir / "index.html").write_text(home_page_html(), encoding="utf-8")
+    (site_dir / "privacy.html").write_text(privacy_page_html(), encoding="utf-8")
 
     written: list[dict[str, str]] = []
     for page in pages:
