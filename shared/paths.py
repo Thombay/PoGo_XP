@@ -119,6 +119,18 @@ def pokedex_category_availability_path() -> Path:
     return reference_dir() / "pokedex_category_availability.csv"
 
 
+def pokedex_sync_config_path() -> Path:
+    return config_dir() / "pokedex_sync.json"
+
+
+def pokedex_sync_token_path() -> Path:
+    return private_dir() / "pokedex_sync_token.json"
+
+
+def pokedex_sync_state_path() -> Path:
+    return output_dir() / "pokedex_sync_state.json"
+
+
 def medal_report_path() -> Path:
     return output_dir() / "medal-tracker" / "medal_report.csv"
 

@@ -7,9 +7,19 @@ import sys
 import time
 from pathlib import Path
 
+from webapp.pokedex_sync import pokedex_sync_status_line, run_configured_sync
+
 # A listening TCP row has no remote peer. Matching that is independent of the
 # localized state word (LISTENING, ABHÖREN, ...).
 _LISTEN_REMOTES = {"0.0.0.0:0", "[::]:0", "*:*", "*:0"}
+
+
+def _print_pokedex_sync() -> None:
+    try:
+        print(pokedex_sync_status_line(run_configured_sync()), flush=True)
+    except Exception as exc:
+        detail = " ".join(str(exc).split()) or exc.__class__.__name__
+        print(f"Pokedex sync: error ({detail})", flush=True)
 
 
 def _print_local_url(host: str, port: int) -> None:
@@ -191,6 +201,12 @@ def main() -> int:
             "Pokemon catalog refresh failed; starting the server with the catalog already on disk.",
             flush=True,
         )
+
+    try:
+        _print_pokedex_sync()
+    except KeyboardInterrupt:
+        print("\nPokedex sync cancelled; not starting the server.", flush=True)
+        return 130
 
     _print_local_url(host, port)
     proc = subprocess.Popen(_streamlit_cmd(root, host, port), cwd=root)

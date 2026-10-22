@@ -6,12 +6,22 @@ from unittest.mock import MagicMock, patch
 
 import run_server
 
+_SKIPPED_SYNC = {
+    "ok": True,
+    "skipped": True,
+    "status": "skipped",
+    "reason": "missing_token",
+    "species_action": "untouched",
+    "errors": [],
+}
+
 
 class RunServerTest(unittest.TestCase):
+    @patch("run_server.run_configured_sync", return_value=_SKIPPED_SYNC)
     @patch("run_server.free_dashboard_port", return_value=0)
     @patch("run_server.subprocess.Popen")
     @patch("run_server.subprocess.run")
-    def test_starts_streamlit_after_successful_connect(self, mock_run, mock_popen, mock_free):
+    def test_starts_streamlit_after_successful_connect(self, mock_run, mock_popen, mock_free, mock_sync):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         proc = MagicMock()
         proc.wait.return_value = 0
@@ -28,11 +38,13 @@ class RunServerTest(unittest.TestCase):
         streamlit_cmd = mock_popen.call_args.args[0]
         self.assertIn("streamlit", streamlit_cmd)
         self.assertEqual(mock_free.call_args.args[0], 8502)
+        mock_sync.assert_called_once_with()
 
+    @patch("run_server.run_configured_sync", return_value=_SKIPPED_SYNC)
     @patch("run_server.free_dashboard_port", return_value=0)
     @patch("run_server.subprocess.Popen")
     @patch("run_server.subprocess.run")
-    def test_starts_streamlit_when_catalog_refresh_fails(self, mock_run, mock_popen, mock_free):
+    def test_starts_streamlit_when_catalog_refresh_fails(self, mock_run, mock_popen, mock_free, mock_sync):
         mock_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0),
             subprocess.CompletedProcess(args=[], returncode=1),
@@ -51,11 +63,13 @@ class RunServerTest(unittest.TestCase):
         mock_popen.assert_called_once()
         self.assertIn("streamlit", mock_popen.call_args.args[0])
         self.assertEqual(mock_free.call_args.args[0], 8502)
+        mock_sync.assert_called_once_with()
 
+    @patch("run_server.run_configured_sync", return_value=_SKIPPED_SYNC)
     @patch("run_server.free_dashboard_port", return_value=0)
     @patch("run_server.subprocess.Popen")
     @patch("run_server.subprocess.run")
-    def test_skips_streamlit_when_catalog_refresh_is_cancelled(self, mock_run, mock_popen, _mock_free):
+    def test_skips_streamlit_when_catalog_refresh_is_cancelled(self, mock_run, mock_popen, _mock_free, mock_sync):
         mock_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0),
             KeyboardInterrupt(),
@@ -66,11 +80,13 @@ class RunServerTest(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 2)
         catalog_cmd = mock_run.call_args_list[1].args[0]
         self.assertTrue(catalog_cmd[-1].replace("\\", "/").endswith("tools/update_pokemon_catalog.py"))
+        mock_sync.assert_not_called()
 
+    @patch("run_server.run_configured_sync", return_value=_SKIPPED_SYNC)
     @patch("run_server.free_dashboard_port", return_value=0)
     @patch("run_server.subprocess.Popen")
     @patch("run_server.subprocess.run")
-    def test_skips_streamlit_when_connect_fails(self, mock_run, mock_popen, mock_free):
+    def test_skips_streamlit_when_connect_fails(self, mock_run, mock_popen, mock_free, mock_sync):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1)
 
         self.assertEqual(run_server.main(), 1)
@@ -79,11 +95,13 @@ class RunServerTest(unittest.TestCase):
         mock_run.assert_called_once()
         connect_cmd = mock_run.call_args.args[0]
         self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
+        mock_sync.assert_not_called()
 
+    @patch("run_server.run_configured_sync", return_value=_SKIPPED_SYNC)
     @patch("run_server.free_dashboard_port", return_value=1)
     @patch("run_server.subprocess.Popen")
     @patch("run_server.subprocess.run")
-    def test_skips_streamlit_when_port_stays_busy(self, mock_run, mock_popen, _mock_free):
+    def test_skips_streamlit_when_port_stays_busy(self, mock_run, mock_popen, _mock_free, mock_sync):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
 
         self.assertEqual(run_server.main(), 1)
@@ -91,6 +109,26 @@ class RunServerTest(unittest.TestCase):
         mock_run.assert_called_once()
         connect_cmd = mock_run.call_args.args[0]
         self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
+        mock_sync.assert_not_called()
+
+    @patch("run_server.run_configured_sync", side_effect=RuntimeError("drive down"))
+    @patch("run_server.free_dashboard_port", return_value=0)
+    @patch("run_server.subprocess.Popen")
+    @patch("run_server.subprocess.run")
+    def test_starts_streamlit_when_pokedex_sync_raises(self, mock_run, mock_popen, _mock_free, _mock_sync):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        self.assertEqual(run_server.main(), 0)
+
+        mock_popen.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
+        connect_cmd = mock_run.call_args_list[0].args[0]
+        catalog_cmd = mock_run.call_args_list[1].args[0]
+        self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
+        self.assertTrue(catalog_cmd[-1].replace("\\", "/").endswith("tools/update_pokemon_catalog.py"))
 
     def test_netstat_parser_keeps_listen_rows_only(self):
         output = """

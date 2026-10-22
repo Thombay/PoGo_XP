@@ -468,6 +468,7 @@ Thumbs.db
 medal-tracker/out/
 output/medal-tracker/
 output/github_pages_site/
+output/pokedex_sync_state.json
 .gh-pages-worktree/
 pogo-xp/out/
 inputs/private/
