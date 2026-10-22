@@ -4,7 +4,6 @@ import argparse
 import csv
 import io
 import json
-import re
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -15,9 +14,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from shared.paths import pokedex_category_availability_path, pokemon_catalog_path
+from shared.paths import (
+    pokedex_category_availability_path,
+    pokemon_catalog_path,
+)
 from webapp.data_files import (
     POKEMON_CATALOG_COLUMNS,
+    drop_superseded_blank_mega_forms,
     load_pokedex_category_availability,
     load_pokemon_catalog,
     merge_pokedex_category_availability,
@@ -26,15 +29,24 @@ from webapp.data_files import (
 from webapp.pokedex import (
     apply_catalog_community_fields,
     build_category_availability_rows,
+    extract_gigantamax_dex_numbers,
+    extract_mega_forms,
     extract_pogoapi_dex_numbers,
+    extract_pvpoke_mega_forms,
 )
 
 POKEAPI_CSV_BASE = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv"
 POKEMINERS_GAME_MASTER_URL = (
+    "https://raw.githubusercontent.com/PokeMiners/game_masters/master/latest/latest.json"
+)
+LEGACY_GAME_MASTER_URL = (
     "https://raw.githubusercontent.com/pokemongo-dev-contrib/pokemongo-game-master/"
     "master/versions/latest/V2_GAME_MASTER.json"
 )
 POGOAPI_BASE = "https://pogoapi.net/api/v1"
+PVPOKE_POKEMON_URL = (
+    "https://raw.githubusercontent.com/pvpoke/pvpoke/master/src/data/gamemaster/pokemon.json"
+)
 MAX_DEX_NUMBER = 1025
 
 REGION_BY_GENERATION_ID = {
@@ -81,25 +93,50 @@ def _species_names(local_language_id: int) -> dict[int, str]:
     return dict(zip(names["pokemon_species_id"].astype(int), names["name"].astype(str)))
 
 
-def _load_pogo_species_numbers() -> set[int]:
-    try:
-        payload = json.loads(_read_url_text(POKEMINERS_GAME_MASTER_URL))
-    except Exception:
-        return set()
+def _load_game_master_payload() -> object | None:
+    for url in (POKEMINERS_GAME_MASTER_URL, LEGACY_GAME_MASTER_URL):
+        try:
+            return json.loads(_read_url_text(url))
+        except Exception:
+            continue
+    return None
 
-    templates = payload.get("template", payload) if isinstance(payload, dict) else payload
-    numbers: set[int] = set()
-    for item in templates:
-        if not isinstance(item, dict):
-            continue
-        template_id = str(item.get("templateId", ""))
-        match = re.search(r"(?:FORMS_)?V(\d{4})_POKEMON_", template_id)
-        if not match:
-            continue
-        dex_number = int(match.group(1))
-        if 1 <= dex_number <= MAX_DEX_NUMBER:
-            numbers.add(dex_number)
-    return numbers
+
+def _category_rows(existing: pd.DataFrame | None, entry_type: str) -> pd.DataFrame:
+    if existing is None or existing.empty or "entry_type" not in existing.columns:
+        return pd.DataFrame()
+    entry = existing["entry_type"].astype(str).str.strip().str.lower()
+    return existing.loc[entry == entry_type].copy()
+
+
+def _prepend_category_rows(seeded: pd.DataFrame, existing: pd.DataFrame | None, entry_type: str) -> pd.DataFrame:
+    kept = _category_rows(existing, entry_type)
+    if kept.empty:
+        return seeded
+    return pd.concat([kept, seeded], ignore_index=True)
+
+
+def preserve_unavailable_category_rows(
+    seeded_availability: pd.DataFrame,
+    existing_availability: pd.DataFrame | None = None,
+    *,
+    mega_forms: list[tuple[int, str]] | None = None,
+    gmax_dex: set[int] | None = None,
+) -> pd.DataFrame:
+    """Keep saved mega rows, and keep gmax rows when that refresh produced none.
+
+    Mega rows are copied into the seed because merge keeps only seeded rows.
+    When ``mega_forms`` is non-empty, blank mega rows are removed for dexes that
+    now have a non-blank form. Other mega rows stay. G-Max rows are copied only
+    when ``gmax_dex`` is missing or empty.
+    """
+    seeded = seeded_availability.copy()
+    seeded = _prepend_category_rows(seeded, existing_availability, "mega")
+    if mega_forms:
+        seeded = drop_superseded_blank_mega_forms(seeded)
+    if not gmax_dex:
+        seeded = _prepend_category_rows(seeded, existing_availability, "gmax")
+    return seeded
 
 
 def _load_pogoapi_payload(name: str) -> object:
@@ -109,11 +146,53 @@ def _load_pogoapi_payload(name: str) -> object:
         return None
 
 
+def _load_pvpoke_pokemon() -> object | None:
+    try:
+        return _read_json(PVPOKE_POKEMON_URL)
+    except Exception:
+        return None
+
+
+def _union_mega_forms(
+    base: list[tuple[int, str]] | None,
+    extra: list[tuple[int, str]],
+) -> list[tuple[int, str]] | None:
+    if base is None and not extra:
+        return None
+    seen: set[tuple[int, str]] = set()
+    combined: list[tuple[int, str]] = []
+    for dex, form in [*(base or []), *extra]:
+        dex_number = int(dex)
+        form_text = str(form).strip()
+        key = (dex_number, form_text.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append((dex_number, form_text))
+    combined.sort(key=lambda pair: (pair[0], pair[1].casefold()))
+    return combined
+
+
 def load_pogoapi_seed_data() -> dict[str, object]:
     released = extract_pogoapi_dex_numbers(_load_pogoapi_payload("released_pokemon.json") or {})
     shiny = extract_pogoapi_dex_numbers(_load_pogoapi_payload("shiny_pokemon.json") or {})
     shadow = extract_pogoapi_dex_numbers(_load_pogoapi_payload("shadow_pokemon.json") or {})
-    mega = extract_pogoapi_dex_numbers(_load_pogoapi_payload("mega_pokemon.json") or {})
+    mega_payload = _load_pogoapi_payload("mega_pokemon.json")
+    if mega_payload is None:
+        mega_forms = None
+    else:
+        try:
+            mega_forms = extract_mega_forms(mega_payload)
+        except Exception:
+            mega_forms = None
+    game_master = _load_game_master_payload()
+    if game_master is None:
+        gmax_dex = None
+    else:
+        try:
+            gmax_dex = extract_gigantamax_dex_numbers(game_master)
+        except Exception:
+            gmax_dex = None
     community_days = _load_pogoapi_payload("community_days.json")
     if not isinstance(community_days, list):
         community_days = []
@@ -121,9 +200,20 @@ def load_pogoapi_seed_data() -> dict[str, object]:
         "released": released,
         "shiny": shiny,
         "shadow": shadow,
-        "mega": mega,
+        "mega": extract_pogoapi_dex_numbers(mega_payload or {}),
+        "mega_forms": mega_forms,
+        "gmax": gmax_dex,
         "community_days": community_days,
     }
+
+
+def pogoapi_released_dex_numbers(released: object) -> set[int]:
+    if not isinstance(released, set) or not released:
+        raise RuntimeError(
+            "The PoGO API released_pokemon list was empty and the updater is refusing "
+            "to refresh availability from the game master."
+        )
+    return {int(number) for number in released}
 
 
 def build_seed_catalog(
@@ -131,13 +221,13 @@ def build_seed_catalog(
     released_dex_numbers: set[int] | None = None,
     community_days: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
+    pogo_species_numbers = pogoapi_released_dex_numbers(released_dex_numbers)
     species = _read_pokeapi_csv("pokemon_species.csv")
     pokemon = _read_pokeapi_csv("pokemon.csv")
     pokemon_types = _read_pokeapi_csv("pokemon_types.csv")
     types = _read_pokeapi_csv("types.csv")
     english_names = _species_names(9)
     german_names = _species_names(6)
-    pogo_species_numbers = released_dex_numbers if released_dex_numbers else _load_pogo_species_numbers()
 
     species = species[species["id"].between(1, MAX_DEX_NUMBER)].copy()
     pokemon = pokemon[pokemon["is_default"] == 1].copy()
@@ -187,8 +277,16 @@ def update_catalog(
 ) -> pd.DataFrame:
     target = path or pokemon_catalog_path()
     pogoapi = load_pogoapi_seed_data()
+    released_numbers = pogoapi_released_dex_numbers(pogoapi["released"])
+    pvpoke_megas: list[tuple[int, str]] = []
+    pvpoke_payload = _load_pvpoke_pokemon()
+    if pvpoke_payload is not None:
+        try:
+            pvpoke_megas = extract_pvpoke_mega_forms(pvpoke_payload)
+        except Exception:
+            pvpoke_megas = []
     seeded = build_seed_catalog(
-        released_dex_numbers=pogoapi["released"] or None,
+        released_dex_numbers=released_numbers,
         community_days=list(pogoapi["community_days"]),
     )
     existing = load_pokemon_catalog(target)
@@ -201,12 +299,22 @@ def update_catalog(
     merged.to_csv(target, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
 
     availability_target = availability_path or pokedex_category_availability_path()
+    base_megas = pogoapi["mega_forms"] if isinstance(pogoapi["mega_forms"], list) else None
+    mega_forms = _union_mega_forms(base_megas, pvpoke_megas)
+    gmax_dex = pogoapi["gmax"]
     seeded_availability = build_category_availability_rows(
         shiny_dex=pogoapi["shiny"],
         shadow_dex=pogoapi["shadow"],
-        mega_dex=pogoapi["mega"],
+        mega_forms=mega_forms if isinstance(mega_forms, list) else None,
+        gmax_dex=gmax_dex if gmax_dex else None,
     )
     existing_availability = load_pokedex_category_availability(availability_target)
+    seeded_availability = preserve_unavailable_category_rows(
+        seeded_availability,
+        existing_availability,
+        mega_forms=mega_forms if isinstance(mega_forms, list) else None,
+        gmax_dex=gmax_dex if isinstance(gmax_dex, set) else None,
+    )
     merged_availability = merge_pokedex_category_availability(
         seeded_availability,
         existing_availability,

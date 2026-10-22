@@ -28,6 +28,7 @@ from shared.paths import (
     google_drive_exports_config_path,
     level_requirement_progress_path,
     level_requirements_path,
+    manual_pokemon_availability_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
@@ -62,7 +63,7 @@ from webapp.data_files import (
     load_pokedex_entry_config,
     load_pokedex_entry_snapshots,
     load_pokedex_species_entries,
-    load_pokemon_catalog,
+    load_pokemon_catalog_with_availability,
     load_xp_history,
     parse_groups,
     save_data_input_account_types,
@@ -140,26 +141,26 @@ XP_TAB_ACTIVITY_MEDAL_IDS = {
 POKEDEX_ENTRY_TYPES = [
     "pokemon",
     "shiny",
+    "hundo",
     "lucky",
     "xxl",
     "xxs",
-    "gmax",
-    "mega",
     "shadow",
     "purified",
-    "hundo",
+    "gmax",
+    "mega",
 ]
 POKEDEX_ENTRY_TYPE_LABELS = {
     "pokemon": "Pokemon",
     "shiny": "Shiny",
+    "hundo": "100%",
     "lucky": "Lucky",
     "xxl": "XXL",
     "xxs": "XXS",
-    "gmax": "G-Max",
-    "mega": "Mega",
     "shadow": "Shadow",
     "purified": "Purified",
-    "hundo": "100%",
+    "gmax": "G-Max",
+    "mega": "Mega",
 }
 POKEDEX_REGIONS = [
     "overall",
@@ -7014,7 +7015,10 @@ pokedex_entry_config_df = load_pokedex_entry_config(
 )
 pokedex_entry_config = pokedex_entry_config_map(pokedex_entry_config_df)
 display_pokedex_df = with_pokedex_entry_display_rows(pokedex_df)
-pokemon_catalog_df = load_pokemon_catalog(pokemon_catalog_path())
+pokemon_catalog_df = load_pokemon_catalog_with_availability(
+    pokemon_catalog_path(),
+    manual_pokemon_availability_path(),
+)
 pokedex_species_df = load_pokedex_species_entries(
     pokedex_species_entries_path(),
     valid_entry_types=set(POKEDEX_ENTRY_TYPES),
@@ -9057,7 +9061,10 @@ if page == "Data Input":
                         notify_google_drive_export_result(kind=EXPORT_KIND_XP)
 
         with st.expander("Pokemon Catalog (1-1025)", expanded=False):
-            st.caption("Reference data comes from `inputs/reference/pokemon_catalog.csv`; edit availability or notes in the CSV.")
+            st.caption(
+                "Release exceptions are edited in the Pokédex Atlas, Entry set to Release. "
+                "In GO marks a species available before the API lists it, and Not in GO keeps it off the checklist."
+            )
             if pokemon_catalog_df.empty:
                 st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
             else:

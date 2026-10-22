@@ -19,13 +19,53 @@ class RunServerTest(unittest.TestCase):
 
         self.assertEqual(run_server.main(), 0)
 
-        mock_run.assert_called_once()
-        connect_cmd = mock_run.call_args.args[0]
+        self.assertEqual(mock_run.call_count, 2)
+        connect_cmd = mock_run.call_args_list[0].args[0]
+        catalog_cmd = mock_run.call_args_list[1].args[0]
         self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
+        self.assertTrue(catalog_cmd[-1].replace("\\", "/").endswith("tools/update_pokemon_catalog.py"))
         mock_popen.assert_called_once()
         streamlit_cmd = mock_popen.call_args.args[0]
         self.assertIn("streamlit", streamlit_cmd)
         self.assertEqual(mock_free.call_args.args[0], 8502)
+
+    @patch("run_server.free_dashboard_port", return_value=0)
+    @patch("run_server.subprocess.Popen")
+    @patch("run_server.subprocess.run")
+    def test_starts_streamlit_when_catalog_refresh_fails(self, mock_run, mock_popen, mock_free):
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0),
+            subprocess.CompletedProcess(args=[], returncode=1),
+        ]
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        self.assertEqual(run_server.main(), 0)
+
+        self.assertEqual(mock_run.call_count, 2)
+        connect_cmd = mock_run.call_args_list[0].args[0]
+        catalog_cmd = mock_run.call_args_list[1].args[0]
+        self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
+        self.assertTrue(catalog_cmd[-1].replace("\\", "/").endswith("tools/update_pokemon_catalog.py"))
+        mock_popen.assert_called_once()
+        self.assertIn("streamlit", mock_popen.call_args.args[0])
+        self.assertEqual(mock_free.call_args.args[0], 8502)
+
+    @patch("run_server.free_dashboard_port", return_value=0)
+    @patch("run_server.subprocess.Popen")
+    @patch("run_server.subprocess.run")
+    def test_skips_streamlit_when_catalog_refresh_is_cancelled(self, mock_run, mock_popen, _mock_free):
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0),
+            KeyboardInterrupt(),
+        ]
+
+        self.assertEqual(run_server.main(), 130)
+        mock_popen.assert_not_called()
+        self.assertEqual(mock_run.call_count, 2)
+        catalog_cmd = mock_run.call_args_list[1].args[0]
+        self.assertTrue(catalog_cmd[-1].replace("\\", "/").endswith("tools/update_pokemon_catalog.py"))
 
     @patch("run_server.free_dashboard_port", return_value=0)
     @patch("run_server.subprocess.Popen")
@@ -36,6 +76,9 @@ class RunServerTest(unittest.TestCase):
         self.assertEqual(run_server.main(), 1)
         mock_popen.assert_not_called()
         mock_free.assert_not_called()
+        mock_run.assert_called_once()
+        connect_cmd = mock_run.call_args.args[0]
+        self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
 
     @patch("run_server.free_dashboard_port", return_value=1)
     @patch("run_server.subprocess.Popen")
@@ -45,6 +88,9 @@ class RunServerTest(unittest.TestCase):
 
         self.assertEqual(run_server.main(), 1)
         mock_popen.assert_not_called()
+        mock_run.assert_called_once()
+        connect_cmd = mock_run.call_args.args[0]
+        self.assertTrue(connect_cmd[-1].replace("\\", "/").endswith("tools/google_drive_connect.py"))
 
     def test_netstat_parser_keeps_listen_rows_only(self):
         output = """

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from datetime import date
 from typing import Any
@@ -8,15 +9,33 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from shared.paths import pokedex_species_entries_path
+from shared.paths import manual_pokemon_availability_path, pokedex_species_entries_path
+from webapp.data_files import (
+    load_manual_pokemon_availability,
+    load_manual_pokemon_availability_frame,
+    save_manual_pokemon_availability,
+)
 from webapp.pokedex import (
     ATLAS_ENTRY_KINDS,
+    build_atlas_snapshot_comparison,
     build_pokedex_atlas_cards,
     build_pokedex_missing_count_rows,
     build_species_missing_summary,
+    filter_atlas_cards_by_release,
     pokedex_atlas_html,
     upsert_pokedex_species_rows,
 )
+from webapp.pokedex_sync import pokedex_sync_status_line, publish_local_species_save, run_configured_sync
+
+
+def _show_pokedex_sync_result(result: dict[str, Any], *, saved_locally: bool = False) -> None:
+    message = pokedex_sync_status_line(result)
+    if saved_locally and (bool(result.get("skipped")) or not result.get("ok")):
+        message = f"Saved locally. {message}"
+    if result.get("ok"):
+        st.success(message)
+        return
+    st.warning(message)
 
 
 def render_pokedex_dashboard_view(
@@ -49,6 +68,9 @@ def render_pokedex_dashboard_view(
         "Count progress still comes from Pokédex Entry Snapshots. "
         "Artwork: PokeAPI. Availability and Community Days: pogoapi.net."
     )
+    if st.button("Sync", key="pokedex_dashboard_sync"):
+        _show_pokedex_sync_result(run_configured_sync())
+        st.rerun()
 
     pokedex_dashboard_rows = normalize_rows_fn(display_pokedex_df)
     snapshot_accounts = (
@@ -76,7 +98,7 @@ def render_pokedex_dashboard_view(
         else set()
     )
     entry_type_options = [entry_type for entry_type in entry_types if entry_type in snapshot_entry_types] or list(entry_types)
-    default_entry_types = [entry_type for entry_type in ["pokemon", "shiny", "lucky", "hundo"] if entry_type in entry_type_options]
+    default_entry_types = [entry_type for entry_type in ["pokemon", "shiny", "hundo", "lucky"] if entry_type in entry_type_options]
     if not default_entry_types:
         default_entry_types = entry_type_options[:4]
     selected_pokedex_entry_types = st.multiselect(
@@ -143,6 +165,8 @@ def render_pokedex_dashboard_view(
             pokemon_catalog_df=pokemon_catalog_df,
             species_df=species_df,
             availability_df=availability_df,
+            snapshots_df=display_pokedex_df,
+            config_df=pokedex_entry_config_df,
             selected_accounts=selected_pokedex_accounts,
             selected_entry_types=selected_pokedex_entry_types,
             entry_type_labels=entry_type_labels,
@@ -284,17 +308,171 @@ def _available_kinds_by_dex(cards: pd.DataFrame) -> dict[int, set[str]]:
     return available
 
 
+def _species_row(
+    *,
+    save_date: date,
+    account: object,
+    entry_type: str,
+    dex_number: int,
+    form: str,
+    registered: bool,
+) -> dict[str, object]:
+    return {
+        "date": save_date.isoformat(),
+        "account": str(account),
+        "entry_type": entry_type,
+        "dex_number": dex_number,
+        "form": form,
+        "registered": registered,
+        "can_evolve_now": False,
+        "notes": "",
+    }
+
+
+def _json_forms(raw: object) -> list[str]:
+    try:
+        loaded = json.loads(str(raw or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item).strip() for item in loaded]
+
+
+def _mega_editor_frame(cards: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for _, card in cards.iterrows():
+        if _registered_is_blank(card.get("registered_mega")):
+            continue
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        registered_forms = {form.casefold() for form in _json_forms(card.get("registered_mega_forms"))}
+        for form in _json_forms(card.get("mega_forms")):
+            records.append(
+                {
+                    "Dex": int(dex_number),
+                    "Name": str(card.get("name") or ""),
+                    "Form": form,
+                    "Registered": form.casefold() in registered_forms,
+                }
+            )
+    if not records:
+        return pd.DataFrame(columns=["Dex", "Name", "Form", "Registered"])
+    return pd.DataFrame(records)
+
+
+def _gmax_editor_frame(cards: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for _, card in cards.iterrows():
+        if _registered_is_blank(card.get("registered_gmax")):
+            continue
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        records.append(
+            {
+                "Dex": int(dex_number),
+                "Name": str(card.get("name") or ""),
+                "Registered": bool(card.get("registered_gmax")),
+            }
+        )
+    if not records:
+        return pd.DataFrame(columns=["Dex", "Name", "Registered"])
+    return pd.DataFrame(records)
+
+
+def _release_notes_by_dex(frame: pd.DataFrame) -> dict[int, str]:
+    notes: dict[int, str] = {}
+    if frame.empty or "dex_number" not in frame.columns:
+        return notes
+    note_column = frame["notes"] if "notes" in frame.columns else pd.Series("", index=frame.index)
+    for dex_raw, note in zip(frame["dex_number"].tolist(), note_column.tolist()):
+        dex_number = pd.to_numeric(dex_raw, errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        text = "" if pd.isna(note) else str(note).strip()
+        notes[int(dex_number)] = text
+    return notes
+
+
+def _release_editor_label(value: object) -> str:
+    flag = str(value or "").strip().casefold()
+    if flag == "yes":
+        return "In GO"
+    if flag == "no":
+        return "Not in GO"
+    return "Catalog"
+
+
+def _release_editor_frame(cards: pd.DataFrame, notes_by_dex: dict[int, str]) -> pd.DataFrame:
+    columns = ["Dex", "Name", "Release", "Notes"]
+    records: list[dict[str, object]] = []
+    for _, card in cards.iterrows():
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        dex = int(dex_number)
+        records.append(
+            {
+                "Dex": dex,
+                "Name": str(card.get("name") or ""),
+                "Release": _release_editor_label(card.get("release_override", "")),
+                "Notes": str(notes_by_dex.get(dex, "") or ""),
+            }
+        )
+    if not records:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(records, columns=columns)
+
+
 def _species_rows_from_editor(
     cards: pd.DataFrame,
     edited: pd.DataFrame,
     *,
     account: object,
     save_date: date,
+    entry_mode: str = "standard",
 ) -> list[dict[str, object]]:
+    mode = str(entry_mode or "standard").strip().lower()
+    if mode == "mega":
+        rows: list[dict[str, object]] = []
+        for _, row in edited.iterrows():
+            dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+            if pd.isna(dex_number):
+                continue
+            edited_value = row["Registered"] if "Registered" in row.index else False
+            rows.append(
+                _species_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type="mega",
+                    dex_number=int(dex_number),
+                    form=str(row.get("Form") or "").strip(),
+                    registered=False if _registered_is_blank(edited_value) else bool(edited_value),
+                )
+            )
+        return rows
+    if mode == "gmax":
+        rows = []
+        for _, row in edited.iterrows():
+            dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+            if pd.isna(dex_number):
+                continue
+            edited_value = row["Registered"] if "Registered" in row.index else False
+            rows.append(
+                _species_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type="gmax",
+                    dex_number=int(dex_number),
+                    form="",
+                    registered=False if _registered_is_blank(edited_value) else bool(edited_value),
+                )
+            )
+        return rows
     available_by_dex = _available_kinds_by_dex(cards)
-    rows: list[dict[str, object]] = []
-    date_text = save_date.isoformat()
-    account_name = str(account)
+    rows = []
     for _, row in edited.iterrows():
         dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
         if pd.isna(dex_number):
@@ -305,19 +483,68 @@ def _species_rows_from_editor(
             if kind_id not in available:
                 continue
             edited_value = row[label] if label in row.index else False
-            registered = False if _registered_is_blank(edited_value) else bool(edited_value)
             rows.append(
-                {
-                    "date": date_text,
-                    "account": account_name,
-                    "entry_type": kind_id,
-                    "dex_number": dex,
-                    "registered": registered,
-                    "can_evolve_now": False,
-                    "notes": "",
-                }
+                _species_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type=kind_id,
+                    dex_number=dex,
+                    form="",
+                    registered=False if _registered_is_blank(edited_value) else bool(edited_value),
+                )
             )
     return rows
+
+
+def _release_available_value(value: object) -> str:
+    label = str(value or "").strip().casefold()
+    if label == "in go":
+        return "yes"
+    if label == "not in go":
+        return "no"
+    return "catalog"
+
+
+def _release_edits_from_editor(edited: pd.DataFrame) -> list[dict[str, object]]:
+    edits: list[dict[str, object]] = []
+    for _, row in edited.iterrows():
+        dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        raw_notes = row["Notes"] if "Notes" in row.index else ""
+        notes = "" if pd.isna(raw_notes) else str(raw_notes).strip()
+        edits.append(
+            {
+                "dex_number": int(dex_number),
+                "available": _release_available_value(row.get("Release")),
+                "notes": notes,
+            }
+        )
+    return edits
+
+
+def _atlas_kind_labels() -> dict[str, str]:
+    return {
+        "any": "Any",
+        **{kind_id: label for kind_id, label in ATLAS_ENTRY_KINDS},
+        "mega": "Mega",
+        "gmax": "G-Max",
+    }
+
+
+def _comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
+    if comparison.empty:
+        return pd.DataFrame(columns=["Kind", "Snapshot", "Atlas", "Max", "Gap"])
+    view = comparison.loc[:, ["entry_type_label", "snapshot_value", "atlas_count", "max_value", "gap"]].copy()
+    return view.rename(
+        columns={
+            "entry_type_label": "Kind",
+            "snapshot_value": "Snapshot",
+            "atlas_count": "Atlas",
+            "max_value": "Max",
+            "gap": "Gap",
+        }
+    )
 
 
 def _render_atlas_view(
@@ -325,6 +552,8 @@ def _render_atlas_view(
     pokemon_catalog_df: pd.DataFrame,
     species_df: pd.DataFrame,
     availability_df: pd.DataFrame,
+    snapshots_df: pd.DataFrame,
+    config_df: pd.DataFrame,
     selected_accounts: Sequence[str],
     selected_entry_types: Sequence[str],
     entry_type_labels: dict[str, str],
@@ -332,8 +561,8 @@ def _render_atlas_view(
     region_labels: dict[str, str],
     as_of_date: object,
 ) -> None:
-    # Page-level entry types filter Progress and Detail only. Atlas always shows all eight kinds.
-    del selected_entry_types, entry_type_labels
+    # Page-level entry types filter Progress and Detail only.
+    del selected_entry_types
 
     if pokemon_catalog_df.empty:
         st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
@@ -346,8 +575,31 @@ def _render_atlas_view(
         else set()
     )
     region_options = [region for region in region_options if not catalog_regions or region in catalog_regions] or region_options
-    default_region = "kanto" if "kanto" in region_options else region_options[0]
-    atlas_col_account, atlas_col_region, atlas_col_status = st.columns([1.1, 1.4, 1.5])
+    default_region = "kanto" if "kanto" in region_options else (region_options[0] if region_options else "overall")
+    region_options = ["overall", *region_options]
+
+    def atlas_region_label(value: object) -> str:
+        text = str(value)
+        if text == "overall":
+            return "All regions"
+        return region_labels.get(text, text)
+
+    kind_labels = _atlas_kind_labels()
+    kind_options = ["any", *[kind_id for kind_id, _label in ATLAS_ENTRY_KINDS], "mega", "gmax"]
+    state_labels = {
+        "any": "Any",
+        "missing": "Missing",
+        "registered": "Registered",
+        "unavailable": "Not available",
+        "restricted": "Location restricted",
+    }
+    release_labels = {
+        "any": "Any",
+        "in_go": "In GO",
+        "not_in_go": "Not in GO",
+        "override": "Manual override",
+    }
+    atlas_col_account, atlas_col_region = st.columns([1.1, 1.4])
     atlas_account = atlas_col_account.selectbox(
         "Atlas account",
         options=list(selected_accounts),
@@ -357,75 +609,154 @@ def _render_atlas_view(
         "Region",
         options=region_options,
         index=region_options.index(default_region) if default_region in region_options else 0,
-        format_func=lambda value: region_labels.get(str(value), str(value)),
+        format_func=atlas_region_label,
         key="pokedex_dashboard_atlas_region",
     )
-    status_filter = atlas_col_status.selectbox(
-        "Status",
-        options=["all", "missing", "registered", "unavailable", "restricted"],
-        format_func=lambda value: {
-            "all": "All",
-            "missing": "Missing any kind",
-            "registered": "Registered",
-            "unavailable": "Not in GO",
-            "restricted": "Location restricted",
-        }.get(str(value), str(value)),
-        key="pokedex_dashboard_atlas_status",
+    filter_col_kind, filter_col_state, filter_col_release = st.columns([1.2, 1.3, 1.4])
+    kind_filter = filter_col_kind.selectbox(
+        "Kind",
+        options=kind_options,
+        format_func=lambda value: kind_labels.get(str(value), str(value)),
+        key="pokedex_dashboard_atlas_kind",
     )
-    search = st.text_input("Search name or dex number", key="pokedex_dashboard_atlas_search")
+    state_filter = filter_col_state.selectbox(
+        "State",
+        options=list(state_labels),
+        format_func=lambda value: state_labels.get(str(value), str(value)),
+        key="pokedex_dashboard_atlas_state",
+    )
+    release_filter = filter_col_release.selectbox(
+        "Release",
+        options=list(release_labels),
+        format_func=lambda value: release_labels.get(str(value), str(value)),
+        key="pokedex_dashboard_atlas_release",
+    )
+    search = st.text_input("Search name, dex number, or form", key="pokedex_dashboard_atlas_search")
 
-    cards = build_pokedex_atlas_cards(
+    comparison = build_atlas_snapshot_comparison(
         pokemon_catalog_df,
         species_df,
+        snapshots_df,
+        config_df,
         account=atlas_account,
         region=atlas_region,
         availability_df=availability_df,
-        search=search,
-        status_filter=status_filter,
         as_of_date=as_of_date,
+        entry_type_labels=entry_type_labels,
     )
-    region_missing = build_species_missing_summary(
-        pokemon_catalog_df,
-        species_df,
-        accounts=[atlas_account],
-        regions=[atlas_region],
-        availability_df=availability_df,
-        as_of_date=as_of_date,
+    st.dataframe(
+        _comparison_table(comparison),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Snapshot": st.column_config.NumberColumn(format="%d"),
+            "Atlas": st.column_config.NumberColumn(format="%d"),
+            "Max": st.column_config.NumberColumn(format="%d"),
+            "Gap": st.column_config.NumberColumn(format="%+d"),
+        },
     )
-    kind_missing = _missing_counts_by_kind(region_missing)
-    account_key = str(atlas_account).strip()
-    metric_items = [("Shown", f"{len(cards):,}")]
-    for kind_id, label in ATLAS_ENTRY_KINDS:
-        missing = kind_missing.get((account_key, kind_id), 0)
-        metric_items.append((f"Missing {label}", f"{missing:,}"))
-    # Two rows keep labels like "Missing Pokemon" readable. One row of nine clips them.
-    for start in (0, 5):
-        row_items = metric_items[start : start + 5]
-        row_cols = st.columns(len(row_items))
-        for column, (metric_label, metric_value) in zip(row_cols, row_items):
-            column.metric(metric_label, metric_value)
+    st.caption(
+        "Gap is the saved Pokédex count minus checked Atlas entries. "
+        "A positive gap means the saved count is ahead of the checklist. "
+        "A negative gap means the checklist is ahead of the saved count."
+    )
 
+    override_path = manual_pokemon_availability_path()
+    release_overrides = load_manual_pokemon_availability(override_path)
+    release_notes = _release_notes_by_dex(load_manual_pokemon_availability_frame(override_path))
+    if release_filter == "override":
+        cards = build_pokedex_atlas_cards(
+            pokemon_catalog_df,
+            species_df,
+            account=atlas_account,
+            region="overall",
+            availability_df=availability_df,
+            search=search,
+            kind_filter="any",
+            state_filter="any",
+            as_of_date=as_of_date,
+            release_overrides=release_overrides,
+        )
+        cards = filter_atlas_cards_by_release(cards, "manual override")
+    else:
+        cards = build_pokedex_atlas_cards(
+            pokemon_catalog_df,
+            species_df,
+            account=atlas_account,
+            region=atlas_region,
+            availability_df=availability_df,
+            search=search,
+            kind_filter=kind_filter,
+            state_filter=state_filter,
+            as_of_date=as_of_date,
+            release_overrides=release_overrides,
+        )
+        cards = filter_atlas_cards_by_release(cards, release_filter)
+    if release_filter == "override":
+        st.caption("Manual override lists every saved release exception, in all regions.")
+    st.caption(f"Showing {len(cards):,}")
     st.markdown(pokedex_atlas_html(cards), unsafe_allow_html=True)
 
-    region_name = region_labels.get(str(atlas_region), str(atlas_region))
-    with st.expander(f"Mark registered for {atlas_account} in {region_name}", expanded=False):
-        if cards.empty:
+    region_name = atlas_region_label(atlas_region)
+    if release_filter == "override":
+        expander_title = f"Edit {atlas_account} · manual overrides, all regions"
+    else:
+        expander_title = f"Mark registered for {atlas_account} in {region_name}"
+    with st.expander(expander_title, expanded=False):
+        entry_mode = st.selectbox(
+            "Entry",
+            options=["standard", "mega", "gmax", "release"],
+            format_func=lambda value: {
+                "standard": "Standard",
+                "mega": "Mega",
+                "gmax": "G-Max",
+                "release": "Release",
+            }.get(str(value), str(value)),
+            key="pokedex_dashboard_atlas_entry_mode",
+        )
+        if entry_mode == "release":
+            editor_source = _release_editor_frame(cards, release_notes)
+            disabled = ["Dex", "Name"]
+            column_config = {
+                "Release": st.column_config.SelectboxColumn(
+                    options=["Catalog", "In GO", "Not in GO"],
+                    required=True,
+                ),
+                "Notes": st.column_config.TextColumn(),
+            }
+        elif entry_mode == "mega":
+            editor_source = _mega_editor_frame(cards)
+            disabled = ["Dex", "Name", "Form"]
+            column_config = {"Registered": st.column_config.CheckboxColumn(width="small")}
+        elif entry_mode == "gmax":
+            editor_source = _gmax_editor_frame(cards)
+            disabled = ["Dex", "Name"]
+            column_config = {"Registered": st.column_config.CheckboxColumn(width="small")}
+        else:
+            editor_source = _atlas_editor_frame(cards)
+            disabled = ["Dex", "Name", "German", "Location", "Last event"]
+            column_config = {
+                label: st.column_config.CheckboxColumn(width="small")
+                for _kind_id, label in ATLAS_ENTRY_KINDS
+            }
+        if editor_source.empty:
             st.info("Nothing to edit for the current Atlas filters.")
             return
-        editor_source = _atlas_editor_frame(cards)
-        kind_labels = [label for _kind_id, label in ATLAS_ENTRY_KINDS]
         edited = st.data_editor(
             editor_source,
             use_container_width=True,
             hide_index=True,
-            disabled=["Dex", "Name", "German", "Location", "Last event"],
-            column_config={
-                label: st.column_config.CheckboxColumn(width="small")
-                for label in kind_labels
-            },
-            key=f"pokedex_dashboard_atlas_editor_{atlas_account}_{atlas_region}",
+            disabled=disabled,
+            column_config=column_config,
+            key=f"pokedex_dashboard_atlas_editor_{atlas_account}_{atlas_region}_{release_filter}_{entry_mode}",
         )
-        if st.button("Save species progress", type="primary", key="pokedex_dashboard_atlas_save"):
+        if entry_mode == "release":
+            if st.button("Save release overrides", type="primary", key="pokedex_dashboard_atlas_save_release"):
+                edits = _release_edits_from_editor(edited)
+                written = save_manual_pokemon_availability(override_path, edits)
+                st.success(f"Release override list now has {written} species.")
+                st.rerun()
+        elif st.button("Save species progress", type="primary", key="pokedex_dashboard_atlas_save"):
             save_date = pd.to_datetime(as_of_date, errors="coerce")
             if pd.isna(save_date):
                 save_date = pd.Timestamp.today()
@@ -434,9 +765,11 @@ def _render_atlas_view(
                 edited,
                 account=atlas_account,
                 save_date=pd.Timestamp(save_date).date(),
+                entry_mode=str(entry_mode),
             )
             written = upsert_pokedex_species_rows(pokedex_species_entries_path(), rows)
             st.success(f"Saved {written} species rows for {atlas_account}.")
+            _show_pokedex_sync_result(publish_local_species_save(), saved_locally=True)
             st.rerun()
 
 

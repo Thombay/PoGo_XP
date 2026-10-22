@@ -22,6 +22,10 @@ def _google_drive_connect_cmd(root: Path) -> list[str]:
     return [sys.executable, str(root / "tools" / "google_drive_connect.py")]
 
 
+def _update_pokemon_catalog_cmd(root: Path) -> list[str]:
+    return [sys.executable, str(root / "tools" / "update_pokemon_catalog.py")]
+
+
 def _streamlit_cmd(root: Path, host: str, port: int) -> list[str]:
     return [
         sys.executable,
@@ -37,6 +41,12 @@ def _streamlit_cmd(root: Path, host: str, port: int) -> list[str]:
 def connect_google_drive(root: Path) -> int:
     print("Connecting Google Drive...", flush=True)
     completed = subprocess.run(_google_drive_connect_cmd(root), cwd=root, check=False)
+    return int(completed.returncode)
+
+
+def refresh_pokemon_catalog(root: Path) -> int:
+    print("Refreshing Pokemon catalog...", flush=True)
+    completed = subprocess.run(_update_pokemon_catalog_cmd(root), cwd=root, check=False)
     return int(completed.returncode)
 
 
@@ -170,6 +180,17 @@ def main() -> int:
     if free_dashboard_port(port, root) != 0:
         print("Not starting the server.", flush=True)
         return 1
+
+    try:
+        catalog_rc = refresh_pokemon_catalog(root)
+    except KeyboardInterrupt:
+        print("\nPokemon catalog refresh cancelled; not starting the server.", flush=True)
+        return 130
+    if catalog_rc != 0:
+        print(
+            "Pokemon catalog refresh failed; starting the server with the catalog already on disk.",
+            flush=True,
+        )
 
     _print_local_url(host, port)
     proc = subprocess.Popen(_streamlit_cmd(root, host, port), cwd=root)
