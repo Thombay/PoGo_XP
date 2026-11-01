@@ -26,6 +26,10 @@ android {
     }
 }
 
+base {
+    archivesName = "PoGo-Pokedex"
+}
+
 repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
