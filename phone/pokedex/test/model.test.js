@@ -8,6 +8,7 @@ import {
   syncResultLine,
 } from "../www/drive-sync.js";
 import {
+  ALL_REGIONS,
   accountNames,
   defaultKindId,
   filterSpecies,
@@ -15,6 +16,7 @@ import {
   latestSpeciesRow,
   parseSpeciesCsv,
   regionChoices,
+  unavailableKindRows,
   upsertSpeciesRow,
 } from "../www/pokedex-model.js";
 
@@ -183,6 +185,51 @@ describe("hunting list", () => {
     });
     assert.deepEqual(all.map((row) => row.dexNumber), ["2", "10"]);
     assert.equal(all.some((row) => row.name === "Mew"), false);
+  });
+
+  it("lists only not-available rows in the unavailable filter", () => {
+    const unavailable = filterSpecies({
+      referenceRows,
+      speciesRows,
+      today,
+      account: "Main",
+      region: "kanto",
+      entryType: "pokemon",
+      filter: "unavailable",
+      query: "",
+    });
+    assert.deepEqual(unavailable.map((row) => row.dexNumber), ["151"]);
+    assert.equal(unavailable[0].available, false);
+    assert.equal(unavailable[0].registered, false);
+  });
+
+  it("spans every region when all regions is selected", () => {
+    const rows = [
+      ...referenceRows,
+      referenceRow({ dex_number: "152", name: "Chikorita", german_name: "Endivie", region: "johto", region_label: "Johto" }),
+    ];
+    const scoped = (region) => filterSpecies({
+      referenceRows: rows,
+      speciesRows,
+      today,
+      account: "Main",
+      region,
+      entryType: "pokemon",
+      filter: "all",
+      query: "",
+    }).map((row) => row.dexNumber);
+    assert.deepEqual(scoped("kanto"), ["2", "10"]);
+    assert.deepEqual(scoped(ALL_REGIONS), ["2", "10", "152"]);
+  });
+
+  it("names the kinds a species does not have in GO", () => {
+    const rows = [
+      referenceRow({ dex_number: "7", entry_type: "pokemon" }),
+      referenceRow({ dex_number: "7", entry_type: "shiny", entry_type_label: "Shiny", form: "Party" }),
+      referenceRow({ dex_number: "7", entry_type: "shadow", entry_type_label: "Shadow", available: "false" }),
+      referenceRow({ dex_number: "8", entry_type: "lucky", entry_type_label: "Lucky", available: "false" }),
+    ];
+    assert.deepEqual(unavailableKindRows(rows, "7").map((kind) => kind.entryType), ["shadow"]);
   });
 
   it("builds kinds and regions from the file without adding overall", () => {

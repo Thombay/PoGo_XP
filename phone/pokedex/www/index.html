@@ -36,6 +36,7 @@
               <button type="button" data-filter="missing">Missing</button>
               <button type="button" data-filter="all">All</button>
               <button type="button" data-filter="registered">Registered</button>
+              <button type="button" data-filter="unavailable" aria-label="Not available">N/A</button>
             </div>
           </div>
         </div>
@@ -45,6 +46,7 @@
     <div id="list" class="list" hidden></div>
     <section id="detail" class="detail" hidden>
       <button type="button" id="back">Back</button>
+      <img id="detail-sprite" class="detail-sprite" alt="" width="240" height="240" decoding="async">
       <h2 id="detail-german"></h2>
       <p id="detail-english" class="detail-english"></p>
       <div id="detail-kinds"></div>

@@ -25,6 +25,8 @@ export const REFERENCE_COLUMNS = [
 
 export const ACCOUNTS_COLUMNS = ["account"];
 
+export const ALL_REGIONS = "all";
+
 export function todayLocalIso(now = new Date()) {
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -280,12 +282,14 @@ export function filterSpecies({
   const selectedRegion = String(region ?? "").trim();
   const selectedKind = String(entryType ?? "").trim();
   const needle = String(query ?? "").trim().toLowerCase();
+  const unavailableView = filter === "unavailable";
   const seen = new Set();
   const items = [];
   referenceRows.forEach((row) => {
-    if (!isTrue(row.available)) return;
+    if (isTrue(row.available) === unavailableView) return;
     const item = referenceItem(row);
-    if (item.region !== selectedRegion || item.entryType !== selectedKind) return;
+    if (selectedRegion !== ALL_REGIONS && item.region !== selectedRegion) return;
+    if (item.entryType !== selectedKind) return;
     const id = `${item.dexNumber}\0${item.form.toLowerCase()}`;
     if (seen.has(id)) return;
     seen.add(id);
@@ -294,6 +298,10 @@ export function filterSpecies({
         || item.name.toLowerCase().includes(needle)
         || item.dexNumber.toLowerCase().includes(needle);
       if (!matches) return;
+    }
+    if (unavailableView) {
+      items.push({ ...item, registered: false, available: false });
+      return;
     }
     const latest = latestSpeciesRow(speciesRows, {
       account,
@@ -304,7 +312,7 @@ export function filterSpecies({
     const registered = Boolean(latest && isTrue(latest.registered));
     if (filter === "registered" && !registered) return;
     if (filter !== "all" && filter !== "registered" && registered) return;
-    items.push({ ...item, registered });
+    items.push({ ...item, registered, available: true });
   });
   items.sort((left, right) => {
     const leftDex = Number(left.dexNumber);
@@ -334,6 +342,25 @@ export function speciesKindRows(referenceRows, dexNumber, form) {
     kinds.push(item);
   });
   return kinds;
+}
+
+export function unavailableKindRows(referenceRows, dexNumber) {
+  const dex = String(dexNumber ?? "").trim();
+  const available = new Set();
+  const seen = new Set();
+  const kinds = [];
+  referenceRows.forEach((row) => {
+    const item = referenceItem(row);
+    if (item.dexNumber !== dex) return;
+    if (isTrue(row.available)) {
+      available.add(item.entryType);
+      return;
+    }
+    if (seen.has(item.entryType)) return;
+    seen.add(item.entryType);
+    kinds.push(item);
+  });
+  return kinds.filter((kind) => !available.has(kind.entryType));
 }
 
 export function factText(kinds, field) {

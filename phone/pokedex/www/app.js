@@ -19,6 +19,7 @@ import {
   syncResultLine,
 } from "./drive-sync.js";
 import {
+  ALL_REGIONS,
   accountNames,
   defaultKindId,
   factText,
@@ -32,8 +33,11 @@ import {
   speciesKindRows,
   spriteUrl,
   todayLocalIso,
+  unavailableKindRows,
   upsertSpeciesRow,
 } from "./pokedex-model.js";
+
+const FILTERS = ["missing", "all", "registered", "unavailable"];
 
 const AUTH_KEY = "pogo.auth";
 const PENDING_KEY = "pogo.pending";
@@ -77,6 +81,7 @@ const dom = {
   list: document.querySelector("#list"),
   detail: document.querySelector("#detail"),
   back: document.querySelector("#back"),
+  detailSprite: document.querySelector("#detail-sprite"),
   detailGerman: document.querySelector("#detail-german"),
   detailEnglish: document.querySelector("#detail-english"),
   detailKinds: document.querySelector("#detail-kinds"),
@@ -521,13 +526,12 @@ function applySelections() {
   const regions = regionChoices(state.referenceRows);
   const kinds = kindChoices(state.referenceRows);
   state.ui.account = saved.account && accounts.includes(saved.account) ? saved.account : (accounts[0] || "");
-  state.ui.region = saved.region && regions.some((region) => region.id === saved.region)
-    ? saved.region
-    : (regions[0]?.id || "");
+  const regionKnown = saved.region === ALL_REGIONS || regions.some((region) => region.id === saved.region);
+  state.ui.region = saved.region && regionKnown ? saved.region : (regions[0]?.id || "");
   state.ui.kind = saved.kind && kinds.some((kind) => kind.id === saved.kind)
     ? saved.kind
     : defaultKindId(kinds);
-  state.ui.filter = ["missing", "all", "registered"].includes(saved.filter) ? saved.filter : "missing";
+  state.ui.filter = FILTERS.includes(saved.filter) ? saved.filter : "missing";
 }
 
 function rememberSelections() {
@@ -624,8 +628,12 @@ function missingTotal() {
   return listItems("missing", "").length;
 }
 
+function regionOptions() {
+  return [{ id: ALL_REGIONS, label: "All regions" }, ...regionChoices(state.referenceRows)];
+}
+
 function regionLabel(id) {
-  return regionChoices(state.referenceRows).find((region) => region.id === id)?.label || id || "Region";
+  return regionOptions().find((region) => region.id === id)?.label || id || "Region";
 }
 
 function kindLabel(id) {
@@ -674,7 +682,7 @@ function ensureChipVisible() {
 function renderControls() {
   const accounts = accountNames(state.accountRows).map((account) => ({ id: account, label: account }));
   fillSelect(dom.account, accounts, state.ui.account);
-  fillSelect(dom.region, regionChoices(state.referenceRows), state.ui.region);
+  fillSelect(dom.region, regionOptions(), state.ui.region);
   dom.kinds.replaceChildren();
   kindChoices(state.referenceRows).forEach((kind) => {
     const button = document.createElement("button");
@@ -719,6 +727,14 @@ function makeSwitch(item, entryType) {
   return input;
 }
 
+function unavailableTag() {
+  const tag = document.createElement("span");
+  tag.className = "na-tag";
+  tag.textContent = "N/A";
+  tag.title = "Not available in GO";
+  return tag;
+}
+
 function renderList() {
   const items = listItems();
   dom.missing.textContent = `${missingTotal()} missing`;
@@ -756,7 +772,7 @@ function renderList() {
     english.textContent = secondLine(item);
     name.append(german, english);
     name.addEventListener("click", () => openDetail(item));
-    row.append(image, name, makeSwitch(item, state.ui.kind));
+    row.append(image, name, item.available ? makeSwitch(item, state.ui.kind) : unavailableTag());
     dom.list.append(row);
   });
 }
@@ -775,6 +791,9 @@ function renderDetail() {
   const detail = state.ui.detail;
   if (!detail) return;
   const kinds = speciesKindRows(state.referenceRows, detail.dexNumber, detail.form);
+  const missingKinds = unavailableKindRows(state.referenceRows, detail.dexNumber);
+  dom.detailSprite.classList.remove("failed");
+  dom.detailSprite.src = spriteUrl(detail.dexNumber);
   dom.detailGerman.textContent = detail.germanName || detail.name || `#${detail.dexNumber}`;
   const parts = [detail.name, `#${detail.dexNumber}`];
   if (detail.form) parts.push(detail.form);
@@ -794,8 +813,17 @@ function renderDetail() {
     }, kind.entryType));
     dom.detailKinds.append(line);
   });
-  dom.detailLocation.textContent = factText(kinds, "locationRestriction");
-  dom.detailEvent.textContent = factText(kinds, "lastEvent");
+  missingKinds.forEach((kind) => {
+    const line = document.createElement("div");
+    line.className = "kind-line kind-line-na";
+    const label = document.createElement("span");
+    label.textContent = kind.entryTypeLabel;
+    line.append(label, unavailableTag());
+    dom.detailKinds.append(line);
+  });
+  const factKinds = kinds.length ? kinds : missingKinds;
+  dom.detailLocation.textContent = factText(factKinds, "locationRestriction");
+  dom.detailEvent.textContent = factText(factKinds, "lastEvent");
 }
 
 function render() {
@@ -903,6 +931,26 @@ function bindLifecycle() {
   document.addEventListener("visibilitychange", syncIfPending);
 }
 
+function bindBackButton() {
+  const native = nativePlugins();
+  if (!native) return;
+  // Registering this listener replaces Capacitor's default back handling, so every screen is handled here.
+  Promise.resolve(native.app.addListener("backButton", () => {
+    if (!dom.shell.hidden && state.ui.screen === "detail") {
+      closeDetail();
+      return;
+    }
+    if (!dom.shell.hidden && state.ui.query) {
+      state.ui.query = "";
+      dom.search.value = "";
+      dom.search.blur();
+      renderList();
+      return;
+    }
+    Promise.resolve(native.app.minimizeApp()).catch(() => native.app.exitApp());
+  })).catch(() => {});
+}
+
 function syncKeyboardInset() {
   const viewport = window.visualViewport;
   let inset = 0;
@@ -953,6 +1001,9 @@ function bindUi() {
     setControlsOpen(true);
   });
   dom.back.addEventListener("click", closeDetail);
+  dom.detailSprite.addEventListener("error", () => {
+    dom.detailSprite.classList.add("failed");
+  });
   window.addEventListener("scroll", () => {
     if (ignoreScroll > 0) {
       ignoreScroll -= 1;
@@ -968,6 +1019,7 @@ function bindUi() {
 
 async function boot() {
   bindUi();
+  bindBackButton();
   state.savedUi = await loadSavedUi();
   const auth = await loadAuth();
   if (!auth) {

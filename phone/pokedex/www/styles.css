@@ -266,6 +266,26 @@ select, input[type="search"] {
 
 .detail-english { overflow-wrap: anywhere; }
 
+.detail-sprite {
+  justify-self: center;
+  width: min(240px, 70vw);
+  height: auto;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+
+.detail-sprite.failed { display: none; }
+
+.na-tag {
+  min-width: 64px;
+  padding: 10px 8px;
+  border: 3px dashed var(--text);
+  border-radius: 999px;
+  font-weight: 800;
+  text-align: center;
+  opacity: 0.7;
+}
+
 .kind-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
