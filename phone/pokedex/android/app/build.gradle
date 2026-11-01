@@ -10,7 +10,7 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        // AppAuth (used by generic-oauth2) needs this. Keep it equal to custom_url_scheme in strings.xml. See README.
+        // Reversed Android OAuth client id. AppAuth (used by generic-oauth2) receives the sign-in redirect on it. See README.
         manifestPlaceholders = [appAuthRedirectScheme: "com.googleusercontent.apps.346064849565-bo40huous9bv4dun125mm8j97p8arrq5"]
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

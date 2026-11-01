@@ -873,7 +873,10 @@ async function onSignIn() {
     bindLifecycle();
     await requestSync();
   } catch (error) {
-    if (cancelled(error)) return;
+    if (cancelled(error)) {
+      showGate("Sign in was cancelled. Tap the button to try again.");
+      return;
+    }
     showGate(oneLine(error.message || "Sign in failed."));
   }
 }
