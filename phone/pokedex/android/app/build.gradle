@@ -11,7 +11,7 @@ android {
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // AppAuth (used by generic-oauth2) needs this. Keep it equal to custom_url_scheme in strings.xml. See README.
-        manifestPlaceholders = [appAuthRedirectScheme: "com.pogo.pokedex"]
+        manifestPlaceholders = [appAuthRedirectScheme: "com.googleusercontent.apps.346064849565-bo40huous9bv4dun125mm8j97p8arrq5"]
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61

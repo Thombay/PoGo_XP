@@ -3,6 +3,6 @@
     <string name="app_name">PoGo Pokedex</string>
     <string name="title_activity_main">PoGo Pokedex</string>
     <string name="package_name">com.pogo.pokedex</string>
-    <!-- Replace with com.googleusercontent.apps.CLIENT_PREFIX before building the APK. See README. -->
-    <string name="custom_url_scheme">com.pogo.pokedex</string>
+    <!-- Reversed Android OAuth client id. Keep equal to appAuthRedirectScheme in app/build.gradle. See README. -->
+    <string name="custom_url_scheme">com.googleusercontent.apps.346064849565-bo40huous9bv4dun125mm8j97p8arrq5</string>
 </resources>
