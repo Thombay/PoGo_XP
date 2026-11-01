@@ -122,6 +122,11 @@ def render_pokedex_dashboard_view(
             max_date=max_pokedex_date,
             key="pokedex_dashboard_date_range",
         )
+    # Snapshots lag behind species marks from the phone, so a range that ends at
+    # the newest snapshot shows (and saves) the Atlas as of today.
+    atlas_as_of_date = pokedex_end_date
+    if pokedex_dashboard_rows.empty or pokedex_end_date >= max_pokedex_date:
+        atlas_as_of_date = max(pokedex_end_date, date.today())
 
     view_mode = st.radio(
         "View mode",
@@ -145,7 +150,7 @@ def render_pokedex_dashboard_view(
         species_df,
         accounts=selected_pokedex_accounts,
         availability_df=availability_df,
-        as_of_date=pokedex_end_date,
+        as_of_date=atlas_as_of_date,
     )
     species_missing_table = _species_missing_table(selected_pokedex_accounts, species_missing)
     st.dataframe(
@@ -172,7 +177,7 @@ def render_pokedex_dashboard_view(
             entry_type_labels=entry_type_labels,
             regions=regions,
             region_labels=region_labels,
-            as_of_date=pokedex_end_date,
+            as_of_date=atlas_as_of_date,
         )
         return
 
