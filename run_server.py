@@ -45,6 +45,7 @@ def _streamlit_cmd(root: Path, host: str, port: int) -> list[str]:
         str(root / "webapp" / "app.py"),
         f"--server.address={host}",
         f"--server.port={port}",
+        "--server.maxUploadSize=1024",
     ]
 
 

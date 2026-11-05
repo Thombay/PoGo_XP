@@ -38,6 +38,7 @@ class XpScreenshotFillReport:
     activated: list[str] = field(default_factory=list)
     deactivated: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    multi_frame: list[str] = field(default_factory=list)
 
 
 def xp_screenshot_widget_keys(xp_date: date, account: str) -> dict[str, str]:
