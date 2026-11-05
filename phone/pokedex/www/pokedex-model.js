@@ -143,6 +143,28 @@ function sameSpeciesKey(row, { date, account, entryType, dexNumber, form }) {
     && String(row.form ?? "").trim().toLowerCase() === form;
 }
 
+function priorSpeciesRow(rows, key, today) {
+  const account = String(key.account ?? "").trim();
+  const entryType = String(key.entryType ?? "").trim();
+  const dexNumber = String(key.dexNumber ?? "").trim();
+  const formKey = String(key.form ?? "").trim().toLowerCase();
+  let best = null;
+  let bestDate = "";
+  rows.forEach((row) => {
+    if (String(row.account ?? "").trim() !== account) return;
+    if (String(row.entry_type ?? "").trim() !== entryType) return;
+    if (String(row.dex_number ?? "").trim() !== dexNumber) return;
+    if (String(row.form ?? "").trim().toLowerCase() !== formKey) return;
+    const date = String(row.date ?? "").trim();
+    if (!date || date >= today) return;
+    if (!best || date >= bestDate) {
+      best = row;
+      bestDate = date;
+    }
+  });
+  return best;
+}
+
 export function upsertSpeciesRow(rows, input) {
   const today = String(input.today ?? "").trim();
   const account = String(input.account ?? "").trim();
@@ -151,6 +173,29 @@ export function upsertSpeciesRow(rows, input) {
   const form = String(input.form ?? "").trim();
   const formKey = form.toLowerCase();
   const registered = isTrue(input.registered) ? "true" : "false";
+  const registeredBool = isTrue(registered);
+  const prior = priorSpeciesRow(rows, {
+    account,
+    entryType,
+    dexNumber,
+    form: formKey,
+  }, today);
+  const matchesPrior = prior && isTrue(prior.registered) === registeredBool;
+  const omitTodayRow = matchesPrior || (!prior && !registeredBool);
+  if (omitTodayRow) {
+    const kept = [];
+    rows.forEach((row) => {
+      const matches = sameSpeciesKey(row, {
+        date: today,
+        account,
+        entryType,
+        dexNumber,
+        form: formKey,
+      });
+      if (!matches) kept.push(row);
+    });
+    return kept;
+  }
   const kept = [];
   let found = false;
   let insertAt = 0;

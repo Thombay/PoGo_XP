@@ -91,6 +91,137 @@ describe("species csv", () => {
     assert.equal(next[1].can_evolve_now, "false");
   });
 
+  it("omits a today row when registered matches the prior day", () => {
+    const rows = [
+      speciesRow({ date: "2026-10-21", dex_number: "4", registered: "false" }),
+      speciesRow({ dex_number: "4", registered: "false", notes: "stale today" }),
+    ];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "4",
+      form: "",
+      registered: false,
+    });
+    assert.equal(next.length, 1);
+    assert.equal(next[0].date, "2026-10-21");
+    assert.equal(next[0].registered, "false");
+  });
+
+  it("omits a today row when prior day was registered and value stays true", () => {
+    const rows = [
+      speciesRow({ date: "2026-10-21", dex_number: "5", registered: "true", notes: "yesterday" }),
+      speciesRow({ dex_number: "5", registered: "true", notes: "today duplicate" }),
+    ];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "5",
+      form: "",
+      registered: true,
+    });
+    assert.equal(next.length, 1);
+    assert.equal(next[0].date, "2026-10-21");
+    assert.equal(next[0].notes, "yesterday");
+  });
+
+  it("adds a today row when flipping registered from the prior day", () => {
+    const rows = [
+      speciesRow({ date: "2026-10-21", dex_number: "6", registered: "false" }),
+    ];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "6",
+      form: "",
+      registered: true,
+    });
+    assert.equal(next.length, 2);
+    assert.equal(next[1].date, today);
+    assert.equal(next[1].dex_number, "6");
+    assert.equal(next[1].registered, "true");
+  });
+
+  it("keeps a today row when unregistering after the prior day was registered", () => {
+    const rows = [
+      speciesRow({ date: "2026-10-21", dex_number: "7", registered: "true" }),
+    ];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "7",
+      form: "",
+      registered: false,
+    });
+    assert.equal(next.length, 2);
+    assert.equal(next[1].date, today);
+    assert.equal(next[1].registered, "false");
+  });
+
+  it("does not add a row when unset with no prior history", () => {
+    const rows = [];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "8",
+      form: "",
+      registered: false,
+    });
+    assert.equal(next.length, 0);
+  });
+
+  it("keeps notes on a same-day flip that differs from no prior history", () => {
+    const rows = [speciesRow({
+      dex_number: "9",
+      registered: "false",
+      can_evolve_now: "true",
+      notes: "keep me",
+    })];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "9",
+      form: "",
+      registered: true,
+    });
+    assert.equal(next.length, 1);
+    assert.equal(next[0].registered, "true");
+    assert.equal(next[0].notes, "keep me");
+    assert.equal(next[0].can_evolve_now, "true");
+  });
+
+  it("does not rewrite another species when omitting a redundant today row", () => {
+    const other = speciesRow({
+      dex_number: "1",
+      registered: "true",
+      notes: "untouched",
+    });
+    const rows = [
+      other,
+      speciesRow({ date: "2026-10-21", dex_number: "10", registered: "true" }),
+      speciesRow({ dex_number: "10", registered: "true", notes: "remove me" }),
+    ];
+    const next = upsertSpeciesRow(rows, {
+      today,
+      account: "Main",
+      entryType: "pokemon",
+      dexNumber: "10",
+      form: "",
+      registered: true,
+    });
+    assert.equal(next.length, 2);
+    assert.equal(next[0], other);
+    assert.equal(next[0].notes, "untouched");
+    assert.equal(next[1].date, "2026-10-21");
+    assert.equal(next[1].dex_number, "10");
+  });
+
   it("replaces registered on a same-day same-key upsert and keeps notes", () => {
     const rows = [speciesRow({
       dex_number: "4",
