@@ -82,11 +82,6 @@ def screenshot_account_aliases_path() -> Path:
     return config_dir() / "screenshot_account_aliases.csv"
 
 
-def xp_snapshots_path() -> Path:
-    # Reserved for canonical per-account XP snapshots used by medal-tracker.
-    return data_dir() / "xp_snapshots.csv"
-
-
 def medals_config_path() -> Path:
     return config_dir() / "medal_goals.csv"
 
@@ -129,10 +124,6 @@ def pokedex_sync_token_path() -> Path:
 
 def pokedex_sync_state_path() -> Path:
     return output_dir() / "pokedex_sync_state.json"
-
-
-def medal_report_path() -> Path:
-    return output_dir() / "medal-tracker" / "medal_report.csv"
 
 
 def additional_activity_path() -> Path:

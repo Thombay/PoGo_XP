@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import subprocess
 import sys
 from datetime import date
 from html import escape
@@ -32,7 +31,6 @@ from shared.paths import (
     manual_pokemon_availability_path,
     medal_snapshots_path,
     medals_config_path,
-    output_dir,
     player_groups_path,
     pokedex_category_availability_path,
     pokedex_species_entries_path,
@@ -3644,15 +3642,6 @@ def save_xp_input_order(ordered_accounts: list[str]) -> None:
     out.to_csv(path, index=False, encoding="utf-8-sig")
 
 
-def run_repo_command(args: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
-    output = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    if err:
-        output = f"{output}\n{err}".strip()
-    return proc.returncode, output
-
-
 def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame, species_df: pd.DataFrame | None = None) -> list[str]:
     players = set(xp_df["Spieler"].dropna().astype(str).tolist())
     accounts = set(medal_df["account"].dropna().astype(str).tolist())
@@ -6449,7 +6438,6 @@ pokedex_dashboard_accounts = pokedex_dashboard_account_options(
     pokedex_species_df,
     data_input_accounts_df,
 )
-latest_xp_df = latest_xp_snapshot(xp_input_df)
 
 pages = [
     "Dashboard Global",
@@ -6458,9 +6446,6 @@ pages = [
     "Medal Explorer",
     "Pokédex Dashboard",
     "Data Input",
-    "Last Inputs",
-    "Pipelines",
-    "Generated Files",
 ]
 all_dashboard_accounts = sorted(
     set(xp_df["Spieler"].dropna().astype(str).tolist()) | set(display_medal_df["account"].dropna().astype(str).tolist())
@@ -7138,71 +7123,6 @@ if page == "Medal Explorer":
                                     ),
                                     unsafe_allow_html=True,
                                 )
-
-if page == "Last Inputs":
-    st.subheader("Last Inputs")
-
-    st.markdown("Latest XP Input Values")
-    if latest_xp_df.empty:
-        st.warning("No XP input history found.")
-    else:
-        st.dataframe(
-            latest_xp_df[["Date", "Spieler", "Lvl", "XP Bar", "Total XP"]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "XP Bar": st.column_config.NumberColumn(format="%d"),
-                "Total XP": st.column_config.NumberColumn(format="%d"),
-            },
-        )
-
-    st.markdown("Latest Medal Input Snapshot per Account")
-    if medal_df.empty:
-        st.warning("No medal input history found.")
-    else:
-        latest_medal_dates = medal_df.groupby("account", as_index=False)["date"].max()
-        latest_medal_dates = latest_medal_dates.rename(columns={"date": "latest_medal_date"})
-        counts = medal_df.groupby(["account", "date"], as_index=False).size().rename(columns={"size": "rows"})
-        latest_medal_dates = latest_medal_dates.merge(
-            counts, left_on=["account", "latest_medal_date"], right_on=["account", "date"], how="left"
-        ).drop(columns=["date"])
-
-        latest_platinum = (
-            display_medal_df[display_medal_df["medal_id"] == DERIVED_MEDAL_ID]
-            .sort_values("date")
-            .groupby("account", as_index=False)
-            .tail(1)[["account", "value"]]
-            .rename(columns={"value": "platinum_count"})
-        )
-        latest_medal_dates = latest_medal_dates.merge(latest_platinum, on="account", how="left")
-        latest_medal_dates = latest_medal_dates.sort_values(["latest_medal_date", "account"], ascending=[False, True])
-        st.dataframe(latest_medal_dates, use_container_width=True, hide_index=True)
-
-    st.markdown("Latest Species Entry per Account")
-    species_entry_dates = pokedex_species_df.copy() if not pokedex_species_df.empty else pokedex_species_df
-    if (
-        species_entry_dates.empty
-        or "date" not in species_entry_dates.columns
-        or "account" not in species_entry_dates.columns
-    ):
-        st.info("There are no species entries yet.")
-    else:
-        species_entry_dates = species_entry_dates.loc[:, ["account", "date"]].copy()
-        species_entry_dates["date"] = pd.to_datetime(species_entry_dates["date"], errors="coerce")
-        species_entry_dates["account"] = species_entry_dates["account"].astype(str).str.strip()
-        species_entry_dates = species_entry_dates.dropna(subset=["date"])
-        species_entry_dates = species_entry_dates[species_entry_dates["account"] != ""].copy()
-        if species_entry_dates.empty:
-            st.info("There are no species entries yet.")
-        else:
-            latest_species_dates = species_entry_dates.groupby("account", as_index=False)["date"].max()
-            latest_species_dates = latest_species_dates.rename(columns={"date": "latest_species_date"})
-            latest_species_dates = latest_species_dates.sort_values(
-                ["latest_species_date", "account"],
-                ascending=[False, True],
-            )
-            latest_species_dates["latest_species_date"] = latest_species_dates["latest_species_date"].dt.date.astype(str)
-            st.dataframe(latest_species_dates, use_container_width=True, hide_index=True)
 
 if page == "Data Input":
     st.subheader("Data Input")
@@ -8233,48 +8153,4 @@ if page == "Data Input":
             st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
         else:
             st.dataframe(pokemon_catalog_df, use_container_width=True, hide_index=True)
-
-if page == "Pipelines":
-    st.subheader("Pipelines")
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Run XP Plots"):
-        rc, out = run_repo_command([sys.executable, "run_xp.py", "--no-show"])
-        st.code(out or "(no output)", language="text")
-        if rc == 0:
-            st.success("XP pipeline finished.")
-        else:
-            st.error(f"XP pipeline failed with exit code {rc}.")
-
-    if c2.button("Run Medal Report"):
-        rc, out = run_repo_command([sys.executable, "run_medals.py"])
-        st.code(out or "(no output)", language="text")
-        if rc == 0:
-            st.success("Medal report pipeline finished.")
-        else:
-            st.error(f"Medal pipeline failed with exit code {rc}.")
-
-    if c3.button("Run Update All"):
-        rc, out = run_repo_command([sys.executable, "update_all.py"])
-        st.code(out or "(no output)", language="text")
-        if rc == 0:
-            st.success("update_all.py finished.")
-        else:
-            st.error(f"update_all.py failed with exit code {rc}.")
-
-if page == "Generated Files":
-    st.subheader("Generated PNGs")
-    out_root = output_dir()
-    folders = sorted([p for p in out_root.iterdir() if p.is_dir()]) if out_root.exists() else []
-    if not folders:
-        st.warning("No output folders found.")
-    else:
-        folder_names = [f.name for f in folders]
-        selected_folder_name = st.selectbox("Folder", folder_names)
-        folder = out_root / selected_folder_name
-        pngs = sorted(folder.glob("*.png"), key=lambda p: p.name, reverse=True)
-        if not pngs:
-            st.warning("No PNG files in selected folder.")
-        else:
-            selected_png = st.selectbox("Image", [p.name for p in pngs])
-            st.image(str(folder / selected_png), caption=selected_png, use_container_width=True)
 

@@ -1,6 +1,6 @@
 # PoGo XP
 
-Local Streamlit dashboard and pipelines for Pokemon GO XP, medals, and Pokédex. Shared inputs in `inputs/` via `shared/paths.py` (`POGO_INPUT_DIR` optional).
+Local Streamlit dashboard for Pokemon GO XP, medals, and Pokédex. Shared inputs in `inputs/` via `shared/paths.py` (`POGO_INPUT_DIR` optional).
 
 ## Quick start
 
@@ -13,20 +13,15 @@ python run_server.py
 
 | Command | Purpose |
 | --- | --- |
-| `python run_xp.py --no-show` | XP plots |
-| `python run_medals.py` | Medal report |
-| `python update_all.py` | Both |
 | `python tools/update_pokemon_catalog.py` | Refresh catalog |
 
 ## Layout
 
 ```text
 inputs/         config, data, reference, templates, private credentials
-pogo-xp/        XP plotting
-medal-tracker/  medal reporting
 webapp/         Streamlit dashboard
 tools/          catalog, Drive, GitHub Pages helpers
-output/         generated PNG/CSV/HTML
+output/         GitHub Pages site and sync state
 ```
 
 ## Auto export
