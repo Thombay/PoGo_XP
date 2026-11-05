@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -98,6 +99,57 @@ class _Drive:
 def _set_mtime(path: Path, when: datetime) -> None:
     stamp = when.timestamp()
     os.utime(path, (stamp, stamp))
+
+
+def _assert_species_pending_state(
+    testcase: unittest.TestCase,
+    state_path: Path,
+    pending: bool,
+    *,
+    expect_upload_hashes: bool = False,
+) -> dict[str, object]:
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    testcase.assertEqual(raw.get("species_pending"), pending)
+    if expect_upload_hashes:
+        content_sha256 = raw.get("content_sha256")
+        testcase.assertIsInstance(content_sha256, dict)
+        assert isinstance(content_sha256, dict)
+        testcase.assertIn(REFERENCE_SYNC_NAME, content_sha256)
+        testcase.assertIn(ACCOUNTS_SYNC_NAME, content_sha256)
+        testcase.assertTrue(str(content_sha256[REFERENCE_SYNC_NAME]))
+        testcase.assertTrue(str(content_sha256[ACCOUNTS_SYNC_NAME]))
+    return raw
+
+
+def _write_min_sync_inputs(root: Path) -> None:
+    pd.DataFrame(
+        [
+            {
+                "dex_number": 1,
+                "name": "Bulbasaur",
+                "german_name": "Bisasam",
+                "region": "kanto",
+                "type_1": "grass",
+                "type_2": "poison",
+                "available_in_pogo": "yes",
+                "location_restriction": "",
+                "last_event": "",
+                "last_event_date": "",
+                "extra_info": "",
+            }
+        ]
+    ).to_csv(root / "catalog.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(columns=["entry_type", "dex_number", "form", "available"]).to_csv(
+        root / "availability.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        [
+            {"account": "Cerius", "input_types": "pokedex", "notes": ""},
+            {"account": "Thomzay", "input_types": "pokedex", "notes": ""},
+        ]
+    ).to_csv(root / "data_input_accounts.csv", index=False, encoding="utf-8-sig")
 
 
 def _write_config(path: Path, folder_id: str, species_id: str = "") -> None:
@@ -213,7 +265,7 @@ class PokedexSyncTest(unittest.TestCase):
             self.assertEqual(result["species_action"], "upload_failed")
             self.assertTrue(result["species_pending"])
             self.assertTrue(read_species_pending(state))
-            self.assertEqual(json.loads(state.read_text(encoding="utf-8")), {"species_pending": True})
+            _assert_species_pending_state(self, state, True, expect_upload_hashes=True)
             self.assertEqual((root / "pokedex_species_entries.csv").read_bytes(), local)
             self.assertNotIn(SPECIES_SYNC_NAME, drive.uploaded)
 
@@ -240,9 +292,11 @@ class PokedexSyncTest(unittest.TestCase):
             self.assertEqual(result["status"], "synced")
             self.assertEqual(result["species_action"], "uploaded")
             self.assertFalse(result["species_pending"])
-            self.assertEqual(
-                json.loads((root / "pokedex_sync_state.json").read_text(encoding="utf-8")),
-                {"species_pending": False},
+            _assert_species_pending_state(
+                self,
+                root / "pokedex_sync_state.json",
+                False,
+                expect_upload_hashes=True,
             )
             self.assertEqual((root / "pokedex_species_entries.csv").read_bytes(), local)
             self.assertEqual(drive.uploaded[SPECIES_SYNC_NAME], local)
@@ -429,6 +483,60 @@ class PokedexSyncTest(unittest.TestCase):
             ).to_csv(account_centric, index=False, encoding="utf-8-sig")
             self.assertEqual(pokedex_sync_account_names(account_centric), ["Thombay", "Thomzay"])
 
+    def test_set_species_pending_preserves_content_sha256(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "pokedex_sync_state.json"
+            preserved = {
+                REFERENCE_SYNC_NAME: "a" * 64,
+                ACCOUNTS_SYNC_NAME: "b" * 64,
+            }
+            state.write_text(
+                json.dumps({"species_pending": False, "content_sha256": preserved}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            set_species_pending(True, state)
+            after_true = json.loads(state.read_text(encoding="utf-8"))
+            self.assertTrue(after_true["species_pending"])
+            self.assertEqual(after_true["content_sha256"], preserved)
+
+            set_species_pending(False, state)
+            after_false = json.loads(state.read_text(encoding="utf-8"))
+            self.assertFalse(after_false["species_pending"])
+            self.assertEqual(after_false["content_sha256"], preserved)
+
+    def test_second_sync_skips_unchanged_reference_and_accounts(self) -> None:
+        local = b"local-species"
+        drive = _Drive(modified_time="2020-01-01T00:00:00.000Z", remote_bytes=b"REMOTE-SHOULD-NOT-WIN")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_min_sync_inputs(root)
+            first = self._sync(drive, root, species_bytes=local, folder_id="folder-1", pending=False)
+            self.assertIn(REFERENCE_SYNC_NAME, drive.uploaded)
+            self.assertIn(ACCOUNTS_SYNC_NAME, drive.uploaded)
+            state = json.loads((root / "pokedex_sync_state.json").read_text(encoding="utf-8"))
+            reference_hash = state["content_sha256"][REFERENCE_SYNC_NAME]
+            accounts_hash = state["content_sha256"][ACCOUNTS_SYNC_NAME]
+            self.assertEqual(
+                reference_hash,
+                hashlib.sha256(drive.uploaded[REFERENCE_SYNC_NAME]).hexdigest(),
+            )
+            self.assertEqual(
+                accounts_hash,
+                hashlib.sha256(drive.uploaded[ACCOUNTS_SYNC_NAME]).hexdigest(),
+            )
+
+            drive.uploaded.clear()
+            second = self._sync(drive, root, species_bytes=local, folder_id="folder-1", pending=None)
+            self.assertEqual(first["status"], "synced")
+            self.assertEqual(second["status"], "synced")
+            self.assertNotIn(REFERENCE_SYNC_NAME, drive.uploaded)
+            self.assertNotIn(ACCOUNTS_SYNC_NAME, drive.uploaded)
+            self.assertNotIn(SPECIES_SYNC_NAME, drive.uploaded)
+
+            after_second = json.loads((root / "pokedex_sync_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(after_second["content_sha256"][REFERENCE_SYNC_NAME], reference_hash)
+            self.assertEqual(after_second["content_sha256"][ACCOUNTS_SYNC_NAME], accounts_hash)
+
     def test_sync_does_not_share_files_publicly(self) -> None:
         local = b"local-species"
         drive = _Drive(modified_time="2020-01-01T00:00:00.000Z", remote_bytes=b"REMOTE-SHOULD-NOT-WIN")
@@ -588,7 +696,7 @@ class PokedexSyncTest(unittest.TestCase):
             self.assertEqual(result["species_action"], "upload_failed")
             self.assertTrue(result["species_pending"])
             self.assertTrue(read_species_pending(state))
-            self.assertEqual(json.loads(state.read_text(encoding="utf-8")), {"species_pending": True})
+            _assert_species_pending_state(self, state, True, expect_upload_hashes=True)
             self.assertEqual(species.read_bytes(), local)
             self.assertNotIn(SPECIES_SYNC_NAME, drive.uploaded)
 

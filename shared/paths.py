@@ -95,20 +95,20 @@ def medal_snapshots_path() -> Path:
     return data_dir() / "medal_snapshots.csv"
 
 
-def pokedex_entry_config_path() -> Path:
-    return config_dir() / "pokedex_entry_config.csv"
-
-
-def pokedex_entry_snapshots_path() -> Path:
-    return data_dir() / "pokedex_entry_snapshots.csv"
-
-
 def pokemon_catalog_path() -> Path:
     return reference_dir() / "pokemon_catalog.csv"
 
 
+def pokemon_evolutions_path() -> Path:
+    return reference_dir() / "pokemon_evolutions.csv"
+
+
 def manual_pokemon_availability_path() -> Path:
     return reference_dir() / "manual_pokemon_availability.csv"
+
+
+def manual_category_availability_path() -> Path:
+    return reference_dir() / "manual_category_availability.csv"
 
 
 def pokedex_species_entries_path() -> Path:

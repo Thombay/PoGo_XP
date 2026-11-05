@@ -4,6 +4,7 @@ import argparse
 import csv
 import io
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -17,16 +18,20 @@ if str(REPO_ROOT) not in sys.path:
 from shared.paths import (
     pokedex_category_availability_path,
     pokemon_catalog_path,
+    pokemon_evolutions_path,
 )
 from webapp.data_files import (
     POKEMON_CATALOG_COLUMNS,
+    POKEMON_EVOLUTION_COLUMNS,
     drop_superseded_blank_mega_forms,
     load_pokedex_category_availability,
     load_pokemon_catalog,
+    load_pokemon_evolutions,
     merge_pokedex_category_availability,
     merge_pokemon_catalog,
 )
 from webapp.pokedex import (
+    _game_master_templates,
     apply_catalog_community_fields,
     build_category_availability_rows,
     extract_gigantamax_dex_numbers,
@@ -61,6 +66,7 @@ REGION_BY_GENERATION_ID = {
     9: "paldea",
 }
 UNIDENTIFIED_REGION_DEX_NUMBERS = {808, 809}
+_POKEMON_TEMPLATE_DEX_RE = re.compile(r"V(\d+)_POKEMON_")
 
 
 def _region_for_species(dex_number: int, generation_id: int) -> str:
@@ -270,6 +276,221 @@ def build_seed_catalog(
     )
 
 
+def _evolution_templates(payload: object) -> list[dict[str, object]]:
+    if isinstance(payload, dict):
+        templates = payload.get("template")
+        if isinstance(templates, list):
+            return _game_master_templates(payload)
+        item_templates = payload.get("itemTemplates")
+        if isinstance(item_templates, list):
+            return _game_master_templates(item_templates)
+    return _game_master_templates(payload)
+
+
+def _template_species(template: dict[str, object]) -> tuple[int, dict[str, object]] | None:
+    match = _POKEMON_TEMPLATE_DEX_RE.search(str(template.get("templateId") or ""))
+    if match is None:
+        return None
+    dex = int(match.group(1))
+    if dex <= 0:
+        return None
+    data = template.get("data")
+    if not isinstance(data, dict):
+        return None
+    settings = data.get("pokemonSettings")
+    if not isinstance(settings, dict):
+        return None
+    return dex, settings
+
+
+def _readable_form_label(raw_form: object, pokemon_id: str) -> str:
+    if raw_form is None:
+        return ""
+    token = str(raw_form).strip().upper()
+    if not token:
+        return ""
+    prefix = f"{pokemon_id.strip().upper()}_" if pokemon_id.strip() else ""
+    if prefix and token.startswith(prefix):
+        token = token[len(prefix) :]
+    token = token.strip()
+    if not token or token == "NORMAL":
+        return ""
+    return token.replace("_", " ").title()
+
+
+def _is_base_species_form(raw_form: object, pokemon_id: str) -> bool:
+    if raw_form is None:
+        return True
+    if not str(raw_form).strip():
+        return True
+    return _readable_form_label(raw_form, pokemon_id) == ""
+
+
+def _choose_species_dex(current: tuple[int, bool] | None, dex: int, base_form: bool) -> tuple[int, bool]:
+    if current is None:
+        return dex, base_form
+    current_dex, current_base = current
+    if base_form and not current_base:
+        return dex, True
+    if current_base and not base_form:
+        return current
+    if dex < current_dex:
+        return dex, base_form
+    return current
+
+
+def _readable_item_name(raw_item: str) -> str:
+    token = raw_item.strip().upper()
+    if token.startswith("ITEM_"):
+        token = token[len("ITEM_") :]
+    token = token.strip("_").strip()
+    if not token:
+        return ""
+    return token.replace("_", " ").title()
+
+
+def _buddy_distance_method(raw_distance: object) -> str | None:
+    if isinstance(raw_distance, bool) or raw_distance is None:
+        return None
+    number = pd.to_numeric(raw_distance, errors="coerce")
+    if pd.isna(number):
+        return None
+    value = float(number)
+    if value.is_integer():
+        shown = str(int(value))
+    else:
+        shown = f"{value:.6f}".rstrip("0").rstrip(".")
+    return f"buddy {shown} km"
+
+
+def _evolution_method(branch: dict[str, object]) -> str:
+    item = branch.get("evolutionItemRequirement")
+    if isinstance(item, str) and item.strip():
+        readable = _readable_item_name(item)
+        if readable:
+            return readable
+    if "kmBuddyDistanceRequirement" in branch:
+        buddy = _buddy_distance_method(branch.get("kmBuddyDistanceRequirement"))
+        if buddy is not None:
+            return buddy
+    return "candy"
+
+
+def _prefer_evolution_method(current: str, new: str) -> str:
+    if current == "candy" and new != "candy":
+        return new
+    if new == "candy" and current != "candy":
+        return current
+    return new
+
+
+def _form_names_species(raw_form: object, pokemon_id: str) -> bool:
+    token = str(raw_form or "").strip().upper()
+    species = pokemon_id.strip().upper()
+    if not token or not species:
+        return False
+    return token == species or token.startswith(f"{species}_")
+
+
+def _edge_source_form(
+    branch: dict[str, object],
+    settings: dict[str, object],
+    source_pokemon_id: str,
+    target_pokemon_id: str,
+) -> str:
+    branch_label = ""
+    if "form" in branch:
+        raw_form = branch.get("form")
+        # Current game master stores the evolved form here (PERRSERKER_NORMAL).
+        # That does not lock the source; MEOWTH_GALARIAN still comes from settings.
+        if not _form_names_species(raw_form, target_pokemon_id):
+            branch_label = _readable_form_label(raw_form, source_pokemon_id)
+    settings_label = _readable_form_label(settings.get("form"), source_pokemon_id)
+    return branch_label or settings_label
+
+
+def _empty_evolution_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(POKEMON_EVOLUTION_COLUMNS))
+
+
+def extract_evolution_edges(payload: object) -> pd.DataFrame:
+    species: list[tuple[int, dict[str, object]]] = []
+    for template in _evolution_templates(payload):
+        parsed = _template_species(template)
+        if parsed is not None:
+            species.append(parsed)
+
+    dex_by_pokemon_id: dict[str, tuple[int, bool]] = {}
+    for dex, settings in species:
+        pokemon_id = str(settings.get("pokemonId") or "").strip().upper()
+        if not pokemon_id:
+            continue
+        dex_by_pokemon_id[pokemon_id] = _choose_species_dex(
+            dex_by_pokemon_id.get(pokemon_id),
+            dex,
+            _is_base_species_form(settings.get("form"), pokemon_id),
+        )
+    resolved_dex = {pokemon_id: chosen[0] for pokemon_id, chosen in dex_by_pokemon_id.items()}
+
+    methods: dict[tuple[int, int, str], str] = {}
+    for dex, settings in species:
+        pokemon_id = str(settings.get("pokemonId") or "").strip().upper()
+        branches = settings.get("evolutionBranch")
+        if not pokemon_id or not isinstance(branches, list):
+            continue
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            evolution = branch.get("evolution")
+            if not isinstance(evolution, str) or not evolution.strip():
+                continue
+            target_pokemon_id = evolution.strip().upper()
+            target_dex = resolved_dex.get(target_pokemon_id)
+            if target_dex is None or target_dex == dex:
+                continue
+            source_form = _edge_source_form(branch, settings, pokemon_id, target_pokemon_id)
+            method = _evolution_method(branch)
+            key = (dex, target_dex, source_form)
+            current = methods.get(key)
+            methods[key] = method if current is None else _prefer_evolution_method(current, method)
+
+    rows = [
+        {
+            "source_dex_number": source_dex,
+            "target_dex_number": target_dex,
+            "method": method,
+            "source_form": source_form,
+            "notes": "",
+        }
+        for (source_dex, target_dex, source_form), method in methods.items()
+    ]
+    frame = pd.DataFrame(rows, columns=list(POKEMON_EVOLUTION_COLUMNS))
+    if frame.empty:
+        return _empty_evolution_frame()
+    frame["source_dex_number"] = frame["source_dex_number"].astype(int)
+    frame["target_dex_number"] = frame["target_dex_number"].astype(int)
+    return frame.sort_values(
+        ["source_dex_number", "target_dex_number", "source_form"]
+    ).reset_index(drop=True)
+
+
+def update_pokemon_evolutions(
+    path: Path | None = None,
+    payload: object | None = None,
+) -> pd.DataFrame:
+    target = path or pokemon_evolutions_path()
+    if payload is None:
+        payload = _load_game_master_payload()
+    if payload is None:
+        return load_pokemon_evolutions(target)
+    extracted = extract_evolution_edges(payload)
+    if extracted.empty:
+        return load_pokemon_evolutions(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    extracted.to_csv(target, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    return extracted
+
+
 def update_catalog(
     path: Path | None = None,
     overwrite_editable: bool = False,
@@ -322,6 +543,11 @@ def update_catalog(
     )
     availability_target.parent.mkdir(parents=True, exist_ok=True)
     merged_availability.to_csv(availability_target, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    try:
+        update_pokemon_evolutions()
+    except Exception:
+        # Keep the catalog and availability writes if the evolution refresh fails.
+        pass
     return merged
 
 

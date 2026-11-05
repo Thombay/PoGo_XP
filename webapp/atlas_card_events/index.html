@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <script>
+      const parentWindow = window.parent;
+
+      function sendToStreamlit(type, data) {
+        parentWindow.postMessage(
+          Object.assign({ isStreamlitMessage: true, type: type }, data),
+          "*"
+        );
+      }
+
+      function sendValue(payload) {
+        sendToStreamlit("streamlit:setComponentValue", {
+          value: payload,
+          dataType: "json",
+        });
+      }
+
+      function registrationDialog(parentDoc) {
+        return parentDoc.querySelector('[data-testid="stDialog"]');
+      }
+
+      function isCloseControl(target, dialog) {
+        if (!target || !target.closest || !dialog.contains(target)) return false;
+        const control = target.closest("[aria-label]");
+        if (!control || !dialog.contains(control)) return false;
+        const label = String(control.getAttribute("aria-label") || "")
+          .trim()
+          .toLowerCase();
+        return label === "close";
+      }
+
+      function bindParentEvents() {
+        const parentDoc = parentWindow.document;
+        if (!parentDoc || parentWindow === window) return;
+
+        const onClick = (event) => {
+          const target = event.target;
+          if (!target || !target.closest) return;
+          const link = target.closest("a.pogo-dex-card-link");
+          if (link) {
+            event.preventDefault();
+            event.stopPropagation();
+            const dex = Number(link.getAttribute("data-atlas-dex"));
+            if (Number.isInteger(dex) && dex > 0) {
+              sendValue({ dex: dex, nonce: Date.now() });
+            }
+            return;
+          }
+          const dialog = registrationDialog(parentDoc);
+          if (!dialog) return;
+          if (isCloseControl(target, dialog)) {
+            sendValue({ dex: null, nonce: Date.now() });
+            return;
+          }
+          const panel = dialog.querySelector('[role="dialog"]');
+          if (panel && dialog.contains(target) && !panel.contains(target)) {
+            sendValue({ dex: null, nonce: Date.now() });
+          }
+        };
+
+        const onKeyDown = (event) => {
+          if (event.key !== "Escape") return;
+          if (!registrationDialog(parentDoc)) return;
+          sendValue({ dex: null, nonce: Date.now() });
+        };
+
+        if (parentWindow.__pogoAtlasCardClick) {
+          parentDoc.removeEventListener("click", parentWindow.__pogoAtlasCardClick, true);
+        }
+        if (parentWindow.__pogoAtlasCardKey) {
+          parentDoc.removeEventListener("keydown", parentWindow.__pogoAtlasCardKey, true);
+        }
+        parentWindow.__pogoAtlasCardClick = onClick;
+        parentWindow.__pogoAtlasCardKey = onKeyDown;
+        parentDoc.addEventListener("click", onClick, true);
+        parentDoc.addEventListener("keydown", onKeyDown, true);
+      }
+
+      window.addEventListener("message", (event) => {
+        if (!event.data || event.data.type !== "streamlit:render") return;
+        bindParentEvents();
+        sendToStreamlit("streamlit:setFrameHeight", { height: 0 });
+      });
+
+      sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+      sendToStreamlit("streamlit:setFrameHeight", { height: 0 });
+    </script>
+  </body>
+</html>

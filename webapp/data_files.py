@@ -7,8 +7,6 @@ import pandas as pd
 
 from shared.xp_utils import total_xp_from_level_input
 
-POKEDEX_ENTRY_SNAPSHOT_COLUMNS = ["date", "account", "entry_type", "region", "value"]
-POKEDEX_ENTRY_CONFIG_COLUMNS = ["entry_type", "region", "max_value", "locked", "notes"]
 DATA_INPUT_ACCOUNT_COLUMNS = ["input_type", "account", "enabled", "notes"]
 DATA_INPUT_ACCOUNT_FILE_COLUMNS = ["account", "input_types", "notes"]
 POKEMON_CATALOG_COLUMNS = [
@@ -30,6 +28,13 @@ POKEMON_CATALOG_EDITABLE_COLUMNS = [
     "last_event",
     "last_event_date",
     "extra_info",
+]
+POKEMON_EVOLUTION_COLUMNS = [
+    "source_dex_number",
+    "target_dex_number",
+    "method",
+    "source_form",
+    "notes",
 ]
 MANUAL_POKEMON_AVAILABILITY_COLUMNS = ["dex_number", "available", "notes"]
 POKEDEX_SPECIES_ENTRY_COLUMNS = [
@@ -397,80 +402,6 @@ def load_medal_goals(path: Path) -> pd.DataFrame:
     )
 
 
-def load_pokedex_entry_snapshots(
-    path: Path,
-    account_order: list[str] | None = None,
-    valid_entry_types: set[str] | None = None,
-    valid_regions: set[str] | None = None,
-) -> pd.DataFrame:
-    cols = POKEDEX_ENTRY_SNAPSHOT_COLUMNS
-    if not path.exists():
-        return pd.DataFrame(columns=cols)
-
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if not set(cols).issubset(df.columns):
-        return pd.DataFrame(columns=cols)
-
-    ordered_accounts = [str(a).strip() for a in (account_order or []) if str(a).strip()]
-    allowed_types = {str(t).strip().lower() for t in (valid_entry_types or set()) if str(t).strip()}
-    allowed_regions = {str(r).strip().lower() for r in (valid_regions or set()) if str(r).strip()}
-
-    df = df[cols].copy()
-    df["date"] = df["date"].replace("", pd.NA).ffill()
-    df["account"] = df["account"].replace("", pd.NA).ffill()
-    df = df[df["date"].astype(str).str.upper() != "YYYY-MM-DD"].copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["account"] = df["account"].astype(str).str.strip()
-    df["entry_type"] = df["entry_type"].astype(str).str.strip().str.lower()
-    df["region"] = df["region"].astype(str).str.strip().str.lower()
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    df = df[(df["account"] != "") & (df["entry_type"] != "") & (df["region"] != "")].copy()
-    if allowed_types:
-        df = df[df["entry_type"].isin(allowed_types)].copy()
-    if allowed_regions:
-        df = df[df["region"].isin(allowed_regions)].copy()
-    order_map = {name: i for i, name in enumerate(ordered_accounts)}
-    df["_acc_order"] = df["account"].map(order_map).fillna(999)
-    df = df.sort_values(["date", "_acc_order", "account", "entry_type", "region"]).drop(columns=["_acc_order"])
-    return df.reset_index(drop=True)
-
-
-def load_pokedex_entry_config(
-    path: Path,
-    valid_entry_types: set[str] | None = None,
-    valid_regions: set[str] | None = None,
-) -> pd.DataFrame:
-    cols = POKEDEX_ENTRY_CONFIG_COLUMNS
-    if not path.exists():
-        return pd.DataFrame(columns=cols)
-
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if not {"entry_type", "region"}.issubset(df.columns):
-        return pd.DataFrame(columns=cols)
-
-    allowed_types = {str(t).strip().lower() for t in (valid_entry_types or set()) if str(t).strip()}
-    allowed_regions = {str(r).strip().lower() for r in (valid_regions or set()) if str(r).strip()}
-
-    df = df.copy()
-    for col in cols:
-        if col not in df.columns:
-            df[col] = "" if col != "locked" else False
-    df = df[cols].copy()
-    df["entry_type"] = df["entry_type"].astype(str).str.strip().str.lower()
-    df["region"] = df["region"].astype(str).str.strip().str.lower()
-    df["max_value"] = pd.to_numeric(df["max_value"], errors="coerce")
-    locked_text = df["locked"].fillna("").astype(str).str.strip().str.lower()
-    df["locked"] = locked_text.isin({"1", "true", "yes", "y", "locked"})
-    df["notes"] = df["notes"].fillna("").astype(str).str.strip()
-    df = df[(df["entry_type"] != "") & (df["region"] != "")].copy()
-    if allowed_types:
-        df = df[df["entry_type"].isin(allowed_types)].copy()
-    if allowed_regions:
-        df = df[df["region"].isin(allowed_regions)].copy()
-    return df.drop_duplicates(subset=["entry_type", "region"], keep="last").reset_index(drop=True)
-
-
 def load_pokemon_catalog(path: Path) -> pd.DataFrame:
     cols = POKEMON_CATALOG_COLUMNS
     if not path.exists():
@@ -493,6 +424,46 @@ def load_pokemon_catalog(path: Path) -> pd.DataFrame:
     df["dex_number"] = df["dex_number"].astype(int)
     df = df[(df["dex_number"] > 0) & (df["name"] != "")].copy()
     return df.drop_duplicates(subset=["dex_number"], keep="last").sort_values("dex_number").reset_index(drop=True)
+
+
+def load_pokemon_evolutions(path: Path) -> pd.DataFrame:
+    cols = POKEMON_EVOLUTION_COLUMNS
+    if not path.exists():
+        return pd.DataFrame(columns=list(cols))
+
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+    except (OSError, UnicodeError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame(columns=list(cols))
+
+    if not {"source_dex_number", "target_dex_number"}.issubset(df.columns):
+        return pd.DataFrame(columns=list(cols))
+
+    df = df.copy()
+    for col in ("method", "source_form", "notes"):
+        if col not in df.columns:
+            df[col] = ""
+        else:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+
+    source = pd.to_numeric(df["source_dex_number"], errors="coerce")
+    target = pd.to_numeric(df["target_dex_number"], errors="coerce")
+    source_ok = source.notna() & (source > 0) & ((source % 1) == 0)
+    target_ok = target.notna() & (target > 0) & ((target % 1) == 0)
+    valid = (source_ok & target_ok & source.ne(target)).fillna(False)
+    if not bool(valid.any()):
+        return pd.DataFrame(columns=list(cols))
+
+    cleaned = df.loc[valid, list(cols)].copy()
+    cleaned["source_dex_number"] = source.loc[valid].astype(int)
+    cleaned["target_dex_number"] = target.loc[valid].astype(int)
+    cleaned = cleaned.drop_duplicates(
+        subset=["source_dex_number", "target_dex_number", "source_form"],
+        keep="last",
+    )
+    return cleaned.sort_values(
+        ["source_dex_number", "target_dex_number", "source_form"]
+    ).reset_index(drop=True)
 
 
 def merge_pokemon_catalog(

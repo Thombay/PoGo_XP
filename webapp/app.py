@@ -28,21 +28,23 @@ from shared.paths import (
     google_drive_exports_config_path,
     level_requirement_progress_path,
     level_requirements_path,
+    manual_category_availability_path,
     manual_pokemon_availability_path,
     medal_snapshots_path,
     medals_config_path,
     output_dir,
     player_groups_path,
     pokedex_category_availability_path,
-    pokedex_entry_config_path,
-    pokedex_entry_snapshots_path,
     pokedex_species_entries_path,
     pokemon_catalog_path,
+    pokemon_evolutions_path,
     total_xp_curve_path,
     xp_history_path,
 )
 from shared.data_intervals import carry_forward_value_rows
 from shared.xp_utils import carry_forward_max_level_rows, is_max_level, max_configured_level, total_xp_from_level_input
+from webapp.category_release import load_effective_category_availability
+from webapp.pokedex_sync import catalog_in_go_and_names
 from webapp.metrics import (
     BASELINE_MIN_WINDOWS_DEFAULT,
     WINDOW_DAYS_DEFAULT,
@@ -59,9 +61,6 @@ from webapp.data_files import (
     load_data_input_accounts,
     load_medal_goals,
     load_medal_snapshots,
-    load_pokedex_category_availability,
-    load_pokedex_entry_config,
-    load_pokedex_entry_snapshots,
     load_pokedex_species_entries,
     load_pokemon_catalog_with_availability,
     load_xp_history,
@@ -91,9 +90,10 @@ from webapp.github_pages import (
     publish_html_to_github_pages,
 )
 from webapp.level_requirements import load_level_requirement_progress, load_level_requirements
+from webapp.medal_recording import MedalRecordingReport, fill_medal_inputs_from_recording
+from webapp.profile_recording import fill_xp_inputs_from_screenshots_and_recordings
 from webapp.profile_screenshot import (
     XpScreenshotFillReport,
-    fill_xp_inputs_from_screenshots,
     screenshot_fill_outcome,
 )
 from webapp.ui_styles import inject_responsive_styles
@@ -190,18 +190,7 @@ POKEDEX_REGION_LABELS = {
     "paldea": "Paldea",
     "unidentified": "Unidentified",
 }
-POKEDEX_MEDAL_REGION_IDS = {
-    "kanto",
-    "johto",
-    "hoenn",
-    "sinnoh",
-    "unova",
-    "kalos",
-    "alola",
-    "galar",
-    "hisui",
-    "paldea",
-}
+
 SPECIAL_PLATINUM_MEDALS = [
     {
         "medal_id": "vivillon_collector",
@@ -3404,305 +3393,6 @@ def append_medal_rows(path: Path, rows: list[dict[str, object]]) -> int:
     combined.to_csv(path, index=False, encoding="utf-8-sig")
     return int(len(new_df))
 
-
-def with_medal_derived_pokedex_rows(pokedex_df: pd.DataFrame, source_medal_df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["date", "account", "entry_type", "region", "value"]
-    base = pokedex_df[cols].copy() if not pokedex_df.empty else pd.DataFrame(columns=cols)
-    if source_medal_df.empty:
-        return with_derived_pokedex_overall_rows(base)
-
-    derived = source_medal_df[["date", "account", "medal_id", "value"]].copy()
-    derived["date"] = pd.to_datetime(derived["date"], errors="coerce")
-    derived["account"] = derived["account"].astype(str).str.strip()
-    derived["region"] = derived["medal_id"].astype(str).str.strip().str.lower()
-    derived["value"] = pd.to_numeric(derived["value"], errors="coerce")
-    derived = derived[derived["region"].isin(POKEDEX_MEDAL_REGION_IDS)].copy()
-    derived = derived.dropna(subset=["date", "account", "region", "value"]).copy()
-    if derived.empty:
-        return base
-    derived["entry_type"] = "pokemon"
-    derived = derived[cols].copy()
-
-    combined = derived.copy() if base.empty else pd.concat([base, derived], ignore_index=True)
-    combined["_source_order"] = combined["entry_type"].eq("pokemon") & combined["region"].isin(POKEDEX_MEDAL_REGION_IDS)
-    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
-    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
-    combined = combined.sort_values(
-        ["date", "_acc_order", "account", "entry_type", "region", "_source_order"]
-    ).drop_duplicates(["date", "account", "entry_type", "region"], keep="last")
-    combined = combined.drop(columns=["_source_order", "_acc_order"]).reset_index(drop=True)
-    return with_derived_pokedex_overall_rows(combined)
-
-
-def with_pokedex_entry_display_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
-    return with_derived_pokedex_overall_rows(pokedex_df)
-
-
-def _normalize_pokedex_dashboard_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["date", "account", "entry_type", "region", "value"]
-    if pokedex_df.empty or not set(cols).issubset(pokedex_df.columns):
-        return pd.DataFrame(columns=cols)
-    rows = pokedex_df[cols].copy()
-    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
-    rows["account"] = rows["account"].astype(str).str.strip()
-    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
-    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
-    rows["value"] = pd.to_numeric(rows["value"], errors="coerce")
-    rows = rows.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    rows = rows[rows["account"] != ""].copy()
-    rows = rows[rows["entry_type"].isin(set(POKEDEX_ENTRY_TYPES))].copy()
-    rows = rows[rows["region"].isin(set(POKEDEX_REGIONS))].copy()
-    return rows[cols].reset_index(drop=True)
-
-
-def _add_pokedex_dashboard_labels(rows: pd.DataFrame) -> pd.DataFrame:
-    out = rows.copy()
-    if "entry_type" in out.columns:
-        out["entry_type_label"] = out["entry_type"].map(POKEDEX_ENTRY_TYPE_LABELS).fillna(out["entry_type"])
-    if "region" in out.columns:
-        out["region_label"] = out["region"].map(POKEDEX_REGION_LABELS).fillna(out["region"])
-    return out
-
-
-def _filter_pokedex_dashboard_rows(
-    pokedex_df: pd.DataFrame,
-    accounts: Sequence[object] | None = None,
-    entry_types: Sequence[object] | None = None,
-    regions: Sequence[object] | None = None,
-    start_date: object | None = None,
-    end_date: object | None = None,
-) -> pd.DataFrame:
-    rows = _normalize_pokedex_dashboard_rows(pokedex_df)
-    if rows.empty:
-        return rows
-
-    if accounts is not None:
-        account_set = {str(a).strip() for a in accounts if str(a).strip()}
-        rows = rows[rows["account"].isin(account_set)].copy()
-    if entry_types is not None:
-        entry_type_set = {str(t).strip().lower() for t in entry_types if str(t).strip()}
-        rows = rows[rows["entry_type"].isin(entry_type_set)].copy()
-    if regions is not None:
-        region_set = {str(r).strip().lower() for r in regions if str(r).strip()}
-        rows = rows[rows["region"].isin(region_set)].copy()
-
-    start_ts = pd.to_datetime(start_date, errors="coerce") if start_date is not None else pd.NaT
-    end_ts = pd.to_datetime(end_date, errors="coerce") if end_date is not None else pd.NaT
-    if pd.notna(start_ts):
-        rows = rows[rows["date"] >= pd.Timestamp(start_ts)].copy()
-    if pd.notna(end_ts):
-        rows = rows[rows["date"] <= pd.Timestamp(end_ts)].copy()
-    return rows.reset_index(drop=True)
-
-
-def build_pokedex_dashboard_latest_rows(
-    pokedex_df: pd.DataFrame,
-    accounts: Sequence[object] | None = None,
-    entry_types: Sequence[object] | None = None,
-    regions: Sequence[object] | None = None,
-    start_date: object | None = None,
-    end_date: object | None = None,
-) -> pd.DataFrame:
-    rows = _filter_pokedex_dashboard_rows(
-        pokedex_df,
-        accounts=accounts,
-        entry_types=entry_types,
-        regions=regions,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    if rows.empty:
-        return _add_pokedex_dashboard_labels(rows)
-    latest = rows.sort_values(["account", "entry_type", "region", "date"]).groupby(
-        ["account", "entry_type", "region"],
-        as_index=False,
-    ).tail(1)
-    return _add_pokedex_dashboard_labels(latest.sort_values(["account", "entry_type", "region"]).reset_index(drop=True))
-
-
-def build_pokedex_dashboard_trend_rows(
-    pokedex_df: pd.DataFrame,
-    accounts: Sequence[object] | None = None,
-    entry_types: Sequence[object] | None = None,
-    start_date: object | None = None,
-    end_date: object | None = None,
-) -> pd.DataFrame:
-    rows = _filter_pokedex_dashboard_rows(
-        pokedex_df,
-        accounts=accounts,
-        entry_types=entry_types,
-        regions=["overall"],
-        start_date=start_date,
-        end_date=end_date,
-    )
-    if rows.empty:
-        return _add_pokedex_dashboard_labels(rows)
-    rows = rows.sort_values(["account", "entry_type", "date"]).drop_duplicates(
-        ["date", "account", "entry_type"],
-        keep="last",
-    )
-    return _add_pokedex_dashboard_labels(rows.reset_index(drop=True))
-
-
-def build_pokedex_dashboard_region_breakdown_rows(
-    pokedex_df: pd.DataFrame,
-    account: object,
-    entry_type: object,
-    as_of_date: object,
-) -> pd.DataFrame:
-    account_name = str(account).strip()
-    entry_type_key = str(entry_type).strip().lower()
-    if not account_name or not entry_type_key:
-        return pd.DataFrame(columns=["date", "account", "entry_type", "region", "value", "entry_type_label", "region_label"])
-    rows = _filter_pokedex_dashboard_rows(
-        pokedex_df,
-        accounts=[account_name],
-        entry_types=[entry_type_key],
-    )
-    as_of = pd.to_datetime(as_of_date, errors="coerce")
-    if rows.empty or pd.isna(as_of):
-        return _add_pokedex_dashboard_labels(rows.iloc[0:0])
-    rows = rows[(rows["region"] != "overall") & (rows["date"] <= pd.Timestamp(as_of))].copy()
-    if rows.empty:
-        return _add_pokedex_dashboard_labels(rows)
-    latest = rows.sort_values(["region", "date"]).groupby("region", as_index=False).tail(1)
-    latest["_region_order"] = latest["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
-    latest = latest.sort_values(["_region_order", "region"]).drop(columns=["_region_order"]).reset_index(drop=True)
-    return _add_pokedex_dashboard_labels(latest)
-
-
-def latest_regional_pokedex_medal_references(
-    source_medal_df: pd.DataFrame,
-    account: str,
-    as_of_date: object,
-) -> dict[str, float]:
-    if source_medal_df.empty:
-        return {}
-    as_of = pd.to_datetime(as_of_date, errors="coerce")
-    if pd.isna(as_of):
-        return {}
-
-    refs = source_medal_df[["date", "account", "medal_id", "value"]].copy()
-    refs["date"] = pd.to_datetime(refs["date"], errors="coerce")
-    refs["account"] = refs["account"].astype(str).str.strip()
-    refs["region"] = refs["medal_id"].astype(str).str.strip().str.lower()
-    refs["value"] = pd.to_numeric(refs["value"], errors="coerce")
-    refs = refs[
-        (refs["account"] == str(account).strip())
-        & (refs["date"] <= pd.Timestamp(as_of))
-        & refs["region"].isin(POKEDEX_MEDAL_REGION_IDS)
-    ].copy()
-    refs = refs.dropna(subset=["date", "region", "value"]).sort_values(["date", "region"])
-    if refs.empty:
-        return {}
-
-    refs = refs.drop_duplicates(subset=["region"], keep="last")
-    return {str(row["region"]): float(row["value"]) for _, row in refs.iterrows()}
-
-
-def seed_pokedex_pokemon_rows_from_medals(path: Path, source_medal_df: pd.DataFrame) -> int:
-    cols = ["date", "account", "entry_type", "region", "value"]
-    if source_medal_df.empty:
-        return 0
-
-    existing = load_pokedex_entry_snapshots(
-        path,
-        account_order=ACCOUNT_ORDER,
-        valid_entry_types=set(POKEDEX_ENTRY_TYPES),
-        valid_regions=set(POKEDEX_REGIONS),
-    )
-    derived = source_medal_df[["date", "account", "medal_id", "value"]].copy()
-    derived["date"] = pd.to_datetime(derived["date"], errors="coerce")
-    derived["account"] = derived["account"].astype(str).str.strip()
-    derived["region"] = derived["medal_id"].astype(str).str.strip().str.lower()
-    derived["value"] = pd.to_numeric(derived["value"], errors="coerce")
-    derived = derived[derived["region"].isin(POKEDEX_MEDAL_REGION_IDS)].copy()
-    derived = derived.dropna(subset=["date", "account", "region", "value"]).copy()
-    if derived.empty:
-        return 0
-
-    derived["entry_type"] = "pokemon"
-    derived = derived[cols].drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-    existing_keys = set()
-    if not existing.empty:
-        existing_keys = {
-            (
-                pd.Timestamp(row["date"]).date().isoformat(),
-                str(row["account"]).strip(),
-                str(row["entry_type"]).strip().lower(),
-                str(row["region"]).strip().lower(),
-            )
-            for _, row in existing.iterrows()
-        }
-    derived["_key"] = derived.apply(
-        lambda row: (
-            pd.Timestamp(row["date"]).date().isoformat(),
-            str(row["account"]).strip(),
-            str(row["entry_type"]).strip().lower(),
-            str(row["region"]).strip().lower(),
-        ),
-        axis=1,
-    )
-    rows_to_add = derived[~derived["_key"].isin(existing_keys)].drop(columns=["_key"]).copy()
-    if rows_to_add.empty:
-        return 0
-
-    combined = rows_to_add if existing.empty else pd.concat([existing[cols], rows_to_add], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
-    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
-    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
-    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
-    combined = combined.sort_values(
-        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
-    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
-    combined["date"] = pd.to_datetime(combined["date"], errors="coerce").dt.date.astype(str)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    combined[cols].to_csv(path, index=False, encoding="utf-8-sig")
-    return int(len(rows_to_add))
-
-
-def with_derived_pokedex_overall_rows(pokedex_df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["date", "account", "entry_type", "region", "value"]
-    base = pokedex_df[cols].copy() if not pokedex_df.empty else pd.DataFrame(columns=cols)
-    if base.empty:
-        return base
-
-    base["date"] = pd.to_datetime(base["date"], errors="coerce")
-    base["account"] = base["account"].astype(str).str.strip()
-    base["entry_type"] = base["entry_type"].astype(str).str.strip().str.lower()
-    base["region"] = base["region"].astype(str).str.strip().str.lower()
-    base["value"] = pd.to_numeric(base["value"], errors="coerce")
-    base = base.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    regional = base[base["region"] != "overall"].copy()
-    manual_without_overall = base[base["region"] != "overall"].copy()
-    if regional.empty:
-        return manual_without_overall.reset_index(drop=True)
-
-    overall = (
-        regional.groupby(["date", "account", "entry_type"], as_index=False)["value"]
-        .sum()
-        .assign(region="overall")
-    )
-    combined = pd.concat([manual_without_overall, overall[cols]], ignore_index=True)
-    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
-    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
-    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
-    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
-    combined = combined.sort_values(
-        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
-    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
-    return combined.reset_index(drop=True)
-
-
-def _is_medal_derived_pokedex_cell(entry_type: str, region: str) -> bool:
-    return str(entry_type).strip().lower() == "pokemon" and str(region).strip().lower() in POKEDEX_MEDAL_REGION_IDS
-
-
-def _is_overall_pokedex_cell(region: str) -> bool:
-    return str(region).strip().lower() == "overall"
-
-
 def _parse_float_loose_value(raw: object) -> float | None:
     s = str(raw).strip()
     if not s:
@@ -3722,309 +3412,6 @@ def _parse_float_loose_value(raw: object) -> float | None:
         s = s.replace(",", "")
     val = pd.to_numeric(pd.Series([s]), errors="coerce").iloc[0]
     return None if pd.isna(val) else float(val)
-
-
-def _format_pokedex_value(value: object) -> str:
-    num = pd.to_numeric(value, errors="coerce")
-    if pd.isna(num):
-        return "0"
-    num_float = float(num)
-    if num_float.is_integer():
-        return str(int(num_float))
-    return f"{num_float:.2f}".rstrip("0").rstrip(".")
-
-
-def pokedex_entry_config_map(config_df: pd.DataFrame) -> dict[tuple[str, str], dict[str, object]]:
-    if config_df.empty:
-        return {}
-    required = {"entry_type", "region", "max_value", "locked", "notes"}
-    if not required.issubset(config_df.columns):
-        return {}
-    cfg = config_df.copy()
-    cfg["entry_type"] = cfg["entry_type"].astype(str).str.strip().str.lower()
-    cfg["region"] = cfg["region"].astype(str).str.strip().str.lower()
-    cfg["max_value"] = pd.to_numeric(cfg["max_value"], errors="coerce")
-    locked_text = cfg["locked"].fillna("").astype(str).str.strip().str.lower()
-    cfg["locked"] = locked_text.isin({"1", "true", "yes", "y", "locked"})
-    cfg["notes"] = cfg["notes"].fillna("").astype(str).str.strip()
-    return {
-        (str(row["entry_type"]), str(row["region"])): {
-            "max_value": None if pd.isna(row["max_value"]) else float(row["max_value"]),
-            "locked": bool(row["locked"]),
-            "notes": str(row["notes"]),
-        }
-        for _, row in cfg.iterrows()
-    }
-
-
-def _pokedex_entry_config_errors(
-    rows_df: pd.DataFrame,
-    config: dict[tuple[str, str], dict[str, object]],
-) -> list[str]:
-    errors: list[str] = []
-    if rows_df.empty or not config:
-        return errors
-    for _, row in rows_df.iterrows():
-        entry_type = str(row.get("entry_type", "")).strip().lower()
-        region = str(row.get("region", "")).strip().lower()
-        value = pd.to_numeric(row.get("value"), errors="coerce")
-        if pd.isna(value):
-            continue
-        cfg = config.get((entry_type, region), {})
-        label = f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}"
-        if bool(cfg.get("locked", False)):
-            errors.append(f"{label} is locked in `inputs/config/pokedex_entry_config.csv`.")
-            continue
-        max_value = cfg.get("max_value")
-        if max_value is not None and float(value) > float(max_value):
-            errors.append(f"{label}: {float(value):g} is above configured max {float(max_value):g}.")
-    return errors
-
-
-def build_pokedex_category_snapshot_rows(
-    row_date: object,
-    account: str,
-    entry_type: str,
-    region_values: dict[str, object],
-    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
-) -> list[dict[str, object]]:
-    entry_type_key = str(entry_type).strip().lower()
-    account_name = str(account).strip()
-    row_date_text = _input_inactive_date_key(row_date)
-    config = entry_config or {}
-    rows: list[dict[str, object]] = []
-    for raw_region, raw_value in region_values.items():
-        region = str(raw_region).strip().lower()
-        if (
-            entry_type_key not in POKEDEX_ENTRY_TYPES
-            or region not in POKEDEX_REGIONS
-            or _is_overall_pokedex_cell(region)
-            or bool(config.get((entry_type_key, region), {}).get("locked", False))
-        ):
-            continue
-        value = pd.to_numeric(raw_value, errors="coerce")
-        if pd.isna(value):
-            continue
-        rows.append(
-            {
-                "date": row_date_text,
-                "account": account_name,
-                "entry_type": entry_type_key,
-                "region": region,
-                "value": float(value),
-            }
-        )
-    return rows
-
-
-def build_pokedex_category_draft(
-    row_date: object,
-    account: str,
-    entry_type: str,
-    row_inputs: list[dict[str, object]],
-    existing_df: pd.DataFrame,
-    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
-) -> dict[str, object]:
-    entry_type_key = str(entry_type).strip().lower()
-    account_name = str(account).strip()
-    errors: list[str] = []
-    region_values: dict[str, object] = {}
-    category_changed = False
-
-    for r in row_inputs:
-        row_entry_type = str(r.get("entry_type", "")).strip().lower()
-        region = str(r.get("region", "")).strip().lower()
-        last_value = pd.to_numeric(r.get("last_value"), errors="coerce")
-        raw_value = r.get("value")
-        value = _parse_float_loose_value(raw_value)
-        max_value = r.get("max_value")
-        region_label = POKEDEX_REGION_LABELS.get(region, region)
-        if row_entry_type not in POKEDEX_ENTRY_TYPES:
-            errors.append(f"Invalid Pokédex entry type: {row_entry_type}")
-            continue
-        if region not in POKEDEX_REGIONS:
-            errors.append(f"Invalid Pokédex region: {region}")
-            continue
-        if value is None:
-            errors.append(f"{region_label} must be a number.")
-            continue
-        if float(value) < 0:
-            errors.append(f"{region_label} must be >= 0.")
-            continue
-        if max_value is not None and float(value) > float(max_value):
-            errors.append(f"{region_label} must be <= {_format_pokedex_value(max_value)}.")
-            continue
-        if pd.notna(last_value) and float(value) != float(last_value):
-            category_changed = True
-        region_values[region] = float(value)
-        row_df = pd.DataFrame(
-            [
-                {
-                    "date": pd.Timestamp(row_date),
-                    "account": account_name,
-                    "entry_type": row_entry_type,
-                    "region": region,
-                    "value": float(value),
-                }
-            ]
-        )
-        row_mono_errors = _validate_pokedex_entry_rows_non_decreasing(
-            existing_df,
-            row_df,
-        )
-        if row_mono_errors:
-            errors.append(row_mono_errors[0])
-            continue
-
-    rows_to_write: list[dict[str, object]] = []
-    if not errors:
-        rows_to_write = build_pokedex_category_snapshot_rows(
-            row_date,
-            account_name,
-            entry_type_key,
-            region_values,
-            entry_config=entry_config,
-        )
-
-    return {
-        "account": account_name,
-        "entry_type": entry_type_key,
-        "rows": rows_to_write,
-        "inactive": False,
-        "changed": bool(category_changed),
-        "valid": not bool(errors),
-        "errors": errors,
-    }
-
-
-def _validate_pokedex_entry_rows_non_decreasing(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> list[str]:
-    errors: list[str] = []
-    if new_df.empty:
-        return errors
-
-    cols = ["date", "account", "entry_type", "region", "value"]
-    existing = existing_df[cols].copy() if set(cols).issubset(existing_df.columns) else pd.DataFrame(columns=cols)
-    if not existing.empty:
-        existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
-        existing["account"] = existing["account"].astype(str).str.strip()
-        existing["entry_type"] = existing["entry_type"].astype(str).str.strip().str.lower()
-        existing["region"] = existing["region"].astype(str).str.strip().str.lower()
-        existing["value"] = pd.to_numeric(existing["value"], errors="coerce")
-        existing = existing.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-        existing = existing.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-
-    rows = new_df[cols].copy()
-    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
-    rows["account"] = rows["account"].astype(str).str.strip()
-    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
-    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
-    rows["value"] = pd.to_numeric(rows["value"], errors="coerce")
-    rows = rows.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    rows = rows.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-
-    for _, row in rows.iterrows():
-        dt = pd.to_datetime(row["date"], errors="coerce")
-        account = str(row["account"]).strip()
-        entry_type = str(row["entry_type"]).strip().lower()
-        region = str(row["region"]).strip().lower()
-        value = pd.to_numeric(row["value"], errors="coerce")
-        if pd.isna(dt) or not account or not entry_type or not region or pd.isna(value):
-            continue
-
-        hist = existing[
-            (existing["account"] == account)
-            & (existing["entry_type"] == entry_type)
-            & (existing["region"] == region)
-        ].copy()
-        if hist.empty:
-            continue
-        hist = hist[hist["date"] != dt].copy()
-
-        label = f"{account} {POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}"
-        prev_rows = hist[hist["date"] < dt].sort_values("date")
-        if not prev_rows.empty:
-            prev = prev_rows.iloc[-1]
-            prev_value = float(prev["value"])
-            if float(value) < prev_value:
-                prev_date = pd.to_datetime(prev["date"], errors="coerce")
-                prev_date_txt = prev_date.date().isoformat() if pd.notna(prev_date) else "-"
-                errors.append(
-                    f"{label} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is below previous "
-                    f"{prev_value:g} on {prev_date_txt}."
-                )
-
-        next_rows = hist[hist["date"] > dt].sort_values("date")
-        if not next_rows.empty:
-            nxt = next_rows.iloc[0]
-            next_value = float(nxt["value"])
-            if float(value) > next_value:
-                next_date = pd.to_datetime(nxt["date"], errors="coerce")
-                next_date_txt = next_date.date().isoformat() if pd.notna(next_date) else "-"
-                errors.append(
-                    f"{label} {pd.Timestamp(dt).date().isoformat()}: {float(value):g} is above next "
-                    f"{next_value:g} on {next_date_txt}."
-                )
-    return errors
-
-
-def upsert_pokedex_entry_rows(
-    path: Path,
-    rows: list[dict[str, object]],
-    entry_config: dict[tuple[str, str], dict[str, object]] | None = None,
-) -> int:
-    if not rows:
-        return 0
-
-    existing = load_pokedex_entry_snapshots(
-        path,
-        account_order=ACCOUNT_ORDER,
-        valid_entry_types=set(POKEDEX_ENTRY_TYPES),
-        valid_regions=set(POKEDEX_REGIONS),
-    )
-    new_df = pd.DataFrame(rows)
-    new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
-    new_df["account"] = new_df["account"].astype(str).str.strip()
-    new_df["entry_type"] = new_df["entry_type"].astype(str).str.strip().str.lower()
-    new_df["region"] = new_df["region"].astype(str).str.strip().str.lower()
-    new_df["value"] = pd.to_numeric(new_df["value"], errors="coerce")
-    new_df = new_df.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    new_df = new_df[new_df["entry_type"].isin(POKEDEX_ENTRY_TYPES) & new_df["region"].isin(POKEDEX_REGIONS)].copy()
-    new_df = new_df[
-        ~new_df.apply(
-            lambda r: _is_overall_pokedex_cell(r["region"]),
-            axis=1,
-        )
-    ].copy()
-    new_df = new_df.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-    if new_df.empty:
-        return 0
-
-    config_errors = _pokedex_entry_config_errors(new_df, entry_config or {})
-    if config_errors:
-        details = "\n".join(config_errors[:12])
-        extra = f"\n... and {len(config_errors) - 12} more issue(s)." if len(config_errors) > 12 else ""
-        raise ValueError("Pokédex input rejected: values must match configured availability.\n" + details + extra)
-
-    monotonic_errors = _validate_pokedex_entry_rows_non_decreasing(existing, new_df)
-    if monotonic_errors:
-        details = "\n".join(monotonic_errors[:12])
-        extra = f"\n... and {len(monotonic_errors) - 12} more issue(s)." if len(monotonic_errors) > 12 else ""
-        raise ValueError("Pokédex input rejected: values must be non-decreasing over time.\n" + details + extra)
-
-    combined = new_df.copy() if existing.empty else pd.concat([existing, new_df], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["date", "account", "entry_type", "region"], keep="last")
-    order_map = {name: i for i, name in enumerate(ACCOUNT_ORDER)}
-    combined["_acc_order"] = combined["account"].map(order_map).fillna(999)
-    combined["_type_order"] = combined["entry_type"].map({name: i for i, name in enumerate(POKEDEX_ENTRY_TYPES)}).fillna(999)
-    combined["_region_order"] = combined["region"].map({name: i for i, name in enumerate(POKEDEX_REGIONS)}).fillna(999)
-    combined = combined.sort_values(
-        ["date", "_acc_order", "account", "_type_order", "_region_order", "entry_type", "region"]
-    ).drop(columns=["_acc_order", "_type_order", "_region_order"])
-    combined["date"] = combined["date"].dt.date.astype(str)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    combined[["date", "account", "entry_type", "region", "value"]].to_csv(path, index=False, encoding="utf-8-sig")
-    return int(len(new_df))
-
 
 def load_additional_activity(path: Path) -> pd.DataFrame:
     cols = ["date", "account", "battles_won"]
@@ -4266,12 +3653,12 @@ def run_repo_command(args: list[str]) -> tuple[int, str]:
     return proc.returncode, output
 
 
-def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame, pokedex_df: pd.DataFrame | None = None) -> list[str]:
+def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame, species_df: pd.DataFrame | None = None) -> list[str]:
     players = set(xp_df["Spieler"].dropna().astype(str).tolist())
     accounts = set(medal_df["account"].dropna().astype(str).tolist())
-    pokedex_accounts = (
-        set(pokedex_df["account"].dropna().astype(str).tolist())
-        if pokedex_df is not None and not pokedex_df.empty and "account" in pokedex_df.columns
+    species_accounts = (
+        set(species_df["account"].dropna().astype(str).tolist())
+        if species_df is not None and not species_df.empty and "account" in species_df.columns
         else set()
     )
     configured_groups = parse_groups(player_groups_path())
@@ -4282,7 +3669,7 @@ def account_options_from_data(xp_df: pd.DataFrame, medal_df: pd.DataFrame, poked
             if name:
                 group_accounts.add(name)
 
-    all_names = sorted(players | accounts | pokedex_accounts | group_accounts | set(ACCOUNT_ORDER))
+    all_names = sorted(players | accounts | species_accounts | group_accounts | set(ACCOUNT_ORDER))
     ordered = [a for a in ACCOUNT_ORDER if a in all_names]
     fallback_order = ordered + [a for a in all_names if a not in ordered]
     return load_xp_input_order(fallback_order)
@@ -4308,6 +3695,35 @@ def accounts_for_data_input(
     enabled = scoped[scoped["enabled"]]["account"].tolist()
     enabled_set = set(enabled)
     return [a for a in available if a in enabled_set]
+
+
+def pokedex_dashboard_account_options(
+    all_accounts: list[str],
+    species_df: pd.DataFrame,
+    config_df: pd.DataFrame,
+) -> list[str]:
+    species_accounts = (
+        species_df["account"].dropna().astype(str).tolist()
+        if species_df is not None and not species_df.empty and "account" in species_df.columns
+        else []
+    )
+    config_accounts = (
+        config_df["account"].dropna().astype(str).tolist()
+        if config_df is not None and not config_df.empty and "account" in config_df.columns
+        else []
+    )
+    enabled_accounts = accounts_for_data_input(
+        "pokedex",
+        _unique_accounts([*all_accounts, *config_accounts]),
+        config_df,
+        fallback_accounts=[],
+    )
+    wanted = set(_unique_accounts([*species_accounts, *enabled_accounts]))
+    return [
+        account
+        for account in _unique_accounts([*all_accounts, *species_accounts, *enabled_accounts])
+        if account in wanted
+    ]
 
 
 def latest_xp_snapshot(xp_df: pd.DataFrame) -> pd.DataFrame:
@@ -7002,19 +6418,6 @@ medal_df = load_medal_snapshots(
 goals_df = load_medal_goals(medals_config_path())
 medal_explanations_map = medal_explanation_map_from_goals(goals_df)
 display_medal_df = with_derived_platinum_rows(medal_df, goals_df)
-pokedex_df = load_pokedex_entry_snapshots(
-    pokedex_entry_snapshots_path(),
-    account_order=ACCOUNT_ORDER,
-    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
-    valid_regions=set(POKEDEX_REGIONS),
-)
-pokedex_entry_config_df = load_pokedex_entry_config(
-    pokedex_entry_config_path(),
-    valid_entry_types=set(POKEDEX_ENTRY_TYPES),
-    valid_regions=set(POKEDEX_REGIONS),
-)
-pokedex_entry_config = pokedex_entry_config_map(pokedex_entry_config_df)
-display_pokedex_df = with_pokedex_entry_display_rows(pokedex_df)
 pokemon_catalog_df = load_pokemon_catalog_with_availability(
     pokemon_catalog_path(),
     manual_pokemon_availability_path(),
@@ -7023,11 +6426,16 @@ pokedex_species_df = load_pokedex_species_entries(
     pokedex_species_entries_path(),
     valid_entry_types=set(POKEDEX_ENTRY_TYPES),
 )
-pokedex_category_availability_df = load_pokedex_category_availability(
+pokedex_in_go, pokedex_catalog_names = catalog_in_go_and_names(pokemon_catalog_df)
+pokedex_category_availability_df = load_effective_category_availability(
     pokedex_category_availability_path(),
+    manual_category_availability_path(),
+    pokemon_evolutions_path(),
+    in_go=pokedex_in_go,
+    names=pokedex_catalog_names,
     valid_entry_types=set(POKEDEX_ENTRY_TYPES),
 )
-all_accounts = account_options_from_data(xp_input_df, medal_df, display_pokedex_df)
+all_accounts = account_options_from_data(xp_input_df, medal_df, pokedex_species_df)
 data_input_accounts_df = load_data_input_accounts(data_input_accounts_path(), valid_input_types=DATA_INPUT_TYPES)
 xp_input_accounts = accounts_for_data_input("xp", all_accounts, data_input_accounts_df, fallback_accounts=all_accounts)
 medal_input_accounts = accounts_for_data_input(
@@ -7036,11 +6444,10 @@ medal_input_accounts = accounts_for_data_input(
     data_input_accounts_df,
     fallback_accounts=MEDAL_INPUT_CORE_ACCOUNTS,
 )
-pokedex_input_accounts = accounts_for_data_input(
-    "pokedex",
+pokedex_dashboard_accounts = pokedex_dashboard_account_options(
     all_accounts,
+    pokedex_species_df,
     data_input_accounts_df,
-    fallback_accounts=all_accounts,
 )
 latest_xp_df = latest_xp_snapshot(xp_input_df)
 
@@ -7296,27 +6703,19 @@ if page not in {"Dashboard Global", "Dashboard Personal"}:
 
 if page == "Pokédex Dashboard":
     render_pokedex_dashboard_view(
-        display_pokedex_df,
-        pokedex_entry_config_df,
-        pokemon_catalog_df,
         pokedex_species_df,
+        pokemon_catalog_df,
         pokedex_category_availability_df,
-        all_accounts,
+        pokedex_dashboard_accounts,
         xp_df,
         entry_types=POKEDEX_ENTRY_TYPES,
         entry_type_labels=POKEDEX_ENTRY_TYPE_LABELS,
         regions=POKEDEX_REGIONS,
         region_labels=POKEDEX_REGION_LABELS,
-        normalize_rows_fn=_normalize_pokedex_dashboard_rows,
-        latest_rows_fn=build_pokedex_dashboard_latest_rows,
-        trend_rows_fn=build_pokedex_dashboard_trend_rows,
-        region_breakdown_fn=build_pokedex_dashboard_region_breakdown_rows,
-        filter_rows_fn=_filter_pokedex_dashboard_rows,
         select_date_range_fn=select_date_range,
         build_account_color_map_fn=build_account_color_map,
         render_account_color_legend_fn=render_account_color_legend,
         render_plotly_chart_fn=render_plotly_chart,
-        format_kpi_number_fn=format_kpi_number,
     )
 
 if page == "Medal Explorer":
@@ -7779,18 +7178,31 @@ if page == "Last Inputs":
         latest_medal_dates = latest_medal_dates.sort_values(["latest_medal_date", "account"], ascending=[False, True])
         st.dataframe(latest_medal_dates, use_container_width=True, hide_index=True)
 
-    st.markdown("Latest Pokédex Entry Snapshot per Account")
-    if display_pokedex_df.empty:
-        st.warning("No Pokédex entry history found.")
+    st.markdown("Latest Species Entry per Account")
+    species_entry_dates = pokedex_species_df.copy() if not pokedex_species_df.empty else pokedex_species_df
+    if (
+        species_entry_dates.empty
+        or "date" not in species_entry_dates.columns
+        or "account" not in species_entry_dates.columns
+    ):
+        st.info("There are no species entries yet.")
     else:
-        latest_pokedex_dates = display_pokedex_df.groupby("account", as_index=False)["date"].max()
-        latest_pokedex_dates = latest_pokedex_dates.rename(columns={"date": "latest_pokedex_date"})
-        counts = display_pokedex_df.groupby(["account", "date"], as_index=False).size().rename(columns={"size": "rows"})
-        latest_pokedex_dates = latest_pokedex_dates.merge(
-            counts, left_on=["account", "latest_pokedex_date"], right_on=["account", "date"], how="left"
-        ).drop(columns=["date"])
-        latest_pokedex_dates = latest_pokedex_dates.sort_values(["latest_pokedex_date", "account"], ascending=[False, True])
-        st.dataframe(latest_pokedex_dates, use_container_width=True, hide_index=True)
+        species_entry_dates = species_entry_dates.loc[:, ["account", "date"]].copy()
+        species_entry_dates["date"] = pd.to_datetime(species_entry_dates["date"], errors="coerce")
+        species_entry_dates["account"] = species_entry_dates["account"].astype(str).str.strip()
+        species_entry_dates = species_entry_dates.dropna(subset=["date"])
+        species_entry_dates = species_entry_dates[species_entry_dates["account"] != ""].copy()
+        if species_entry_dates.empty:
+            st.info("There are no species entries yet.")
+        else:
+            latest_species_dates = species_entry_dates.groupby("account", as_index=False)["date"].max()
+            latest_species_dates = latest_species_dates.rename(columns={"date": "latest_species_date"})
+            latest_species_dates = latest_species_dates.sort_values(
+                ["latest_species_date", "account"],
+                ascending=[False, True],
+            )
+            latest_species_dates["latest_species_date"] = latest_species_dates["latest_species_date"].dt.date.astype(str)
+            st.dataframe(latest_species_dates, use_container_width=True, hide_index=True)
 
 if page == "Data Input":
     st.subheader("Data Input")
@@ -7805,7 +7217,7 @@ if page == "Data Input":
             default=default_group_selection,
             key="new_account_target_groups",
         )
-        st.caption("Enable this account for Data Input tabs")
+        st.caption("XP and Medal enable Data Input tabs. Pokédex enables the account on the Atlas and phone.")
         input_xp_col, input_medal_col, input_pokedex_col = st.columns(3)
         enable_new_account_xp = input_xp_col.checkbox("XP", value=True, key="new_account_enable_xp")
         enable_new_account_medal = input_medal_col.checkbox("Medal", value=False, key="new_account_enable_medal")
@@ -7849,7 +7261,7 @@ if page == "Data Input":
                     st.success(f"Added account `{account_name}` (groups: {group_label}; inputs: {input_label}).")
                     st.rerun()
 
-    tab_xp, tab_medal, tab_pokedex = st.tabs(["XP Snapshot Input", "Medal Snapshot Input", "Pokédex Entries Input"])
+    tab_xp, tab_medal = st.tabs(["XP Snapshot Input", "Medal Snapshot Input"])
 
     with tab_xp:
         st.caption("Enter one snapshot date and update multiple accounts at once.")
@@ -7982,18 +7394,35 @@ if page == "Data Input":
                     "Check inputs is still required before save."
                 ),
             )
-            st.caption(
-                "Screenshots only prefill this form. Move the round X off Pokémon Caught before the shot. "
-                "Check inputs is still required before save."
+            uploaded_recordings = st.file_uploader(
+                "Trainer profile recording",
+                type=["mp4", "webm", "mov"],
+                accept_multiple_files=True,
+                key=f"xp_recording_uploads_{xp_date.isoformat()}",
+                help=(
+                    "Open each profile, pause on the header, scroll until Battles, Distance, and Caught are visible, "
+                    "pause, then open the next trainer. Check inputs is still required before save."
+                ),
             )
-            if st.button("Fill form from screenshots", key=f"xp_fill_from_screenshots_{xp_date.isoformat()}"):
-                if not uploaded_shots:
-                    fill_report = XpScreenshotFillReport(warnings=["Choose at least one screenshot first."])
+            st.caption(
+                "Screenshots and recordings only prefill this form. "
+                "Pause on the profile header, then scroll to Battles, Distance, and Caught and pause again. "
+                "Move the round X off Pokémon Caught. Check inputs is still required before save."
+            )
+            if st.button("Fill form", key=f"xp_fill_from_screenshots_{xp_date.isoformat()}"):
+                if not uploaded_shots and not uploaded_recordings:
+                    fill_report = XpScreenshotFillReport(
+                        warnings=["Choose at least one screenshot or recording first."]
+                    )
                 else:
-                    files = [(str(item.name), bytes(item.getvalue())) for item in uploaded_shots]
-                    with st.spinner("Reading screenshots..."):
-                        fill_report = fill_xp_inputs_from_screenshots(
+                    files = [(str(item.name), bytes(item.getvalue())) for item in (uploaded_shots or [])]
+                    recordings = [
+                        (str(item.name), bytes(item.getvalue())) for item in (uploaded_recordings or [])
+                    ]
+                    with st.spinner("Reading screenshots and recording..."):
+                        fill_report = fill_xp_inputs_from_screenshots_and_recordings(
                             files,
+                            recordings,
                             xp_date=xp_date,
                             selected_accounts=list(selected_xp_accounts),
                             known_accounts=list(all_players),
@@ -8019,6 +7448,9 @@ if page == "Data Input":
                     st.caption("Set active: " + ", ".join(fill_report.activated))
                 if fill_report.deactivated:
                     st.caption("Set inactive: " + ", ".join(fill_report.deactivated))
+                multi_frame = list(getattr(fill_report, "multi_frame", []) or [])
+                if multi_frame:
+                    st.caption("Built from more than one frame: " + ", ".join(multi_frame))
                 if fill_report.kept_xp:
                     st.caption(
                         "Level 80 profile has no XP bar, kept the previous XP bar: "
@@ -8524,6 +7956,70 @@ if page == "Data Input":
                     return f"{int(num_float):,}"
                 return f"{num_float:,.2f}".rstrip("0").rstrip(".")
 
+            medal_pairs = [
+                (
+                    str(row.get("medal_id", "")).strip().lower(),
+                    str(row.get("display_name", "")).strip() or str(row.get("medal_id", "")).strip(),
+                )
+                for row in editor_rows
+                if str(row.get("medal_id", "")).strip()
+            ]
+            medal_last_known = {str(medal_id).strip().lower(): float(value) for medal_id, value in latest_vals.items()}
+            uploaded_medal_recordings = st.file_uploader(
+                "Medal screen recording",
+                type=["mp4", "webm", "mov"],
+                accept_multiple_files=True,
+                key=f"medal_recording_uploads_{medal_date.isoformat()}_{medal_account}",
+                help=(
+                    "Scroll this account's medal grid and pause while each medal name and its count are both visible. "
+                    "Check inputs is still required before save."
+                ),
+            )
+            st.caption(
+                "A recording prefills this account only. Pause with the medal name and its count on screen together. "
+                "Medals the recording never shows stay at the last saved value. Check inputs is still required before save."
+            )
+            medal_report_key = f"{medal_date.isoformat()}|{medal_account}"
+            if st.button("Fill medals from recording", key=f"medal_fill_from_recording_{medal_report_key}"):
+                if not uploaded_medal_recordings:
+                    medal_fill_report = MedalRecordingReport(warnings=["Choose a medal recording first."])
+                else:
+                    medal_videos = [
+                        (str(item.name), bytes(item.getvalue())) for item in uploaded_medal_recordings
+                    ]
+                    with st.spinner("Reading medal recording..."):
+                        medal_fill_report = fill_medal_inputs_from_recording(
+                            medal_videos,
+                            medal_date=medal_date,
+                            account=str(medal_account),
+                            known_accounts=list(all_accounts),
+                            medals=medal_pairs,
+                            session_state=st.session_state,
+                            last_known=medal_last_known,
+                        )
+                st.session_state["medal_recording_fill_report"] = medal_fill_report
+                st.session_state["medal_recording_fill_report_key"] = medal_report_key
+            medal_fill_report = st.session_state.get("medal_recording_fill_report")
+            if (
+                isinstance(medal_fill_report, MedalRecordingReport)
+                and str(st.session_state.get("medal_recording_fill_report_key") or "") == medal_report_key
+            ):
+                if medal_fill_report.filled:
+                    st.success(
+                        f"Filled {len(medal_fill_report.filled)} medals. Check inputs before save."
+                    )
+                else:
+                    st.error("No medals were filled.")
+                if medal_fill_report.not_seen:
+                    st.caption("Not seen, left at last value: " + ", ".join(medal_fill_report.not_seen))
+                if medal_fill_report.rejected_below_last:
+                    st.caption(
+                        "Left unchanged because the count is below the last save: "
+                        + ", ".join(medal_fill_report.rejected_below_last)
+                    )
+                for warning in medal_fill_report.warnings:
+                    st.caption(warning)
+
             _, medal_input_col, _ = st.columns([0.24, 0.52, 0.24], gap="small")
             col_widths = [2.1, 0.8, 1.0, 1.2, 2.2]
             h1, h2, h3, h4, h5 = medal_input_col.columns(col_widths, gap="small")
@@ -8728,347 +8224,15 @@ if page == "Data Input":
                     save_medal_input_order(medal_account, new_order)
                     st.rerun()
 
-    with tab_pokedex:
-        st.caption("Enter counts by category and region. Pokemon region medal values are shown as references only.")
-        st.caption("Available Pokédex accounts are controlled by `inputs/config/data_input_accounts.csv`.")
-        pokedex_date = st.date_input("Pokédex Date", value=date.today(), key="pokedex_entry_date")
-        pokedex_accounts = list(pokedex_input_accounts) if pokedex_input_accounts else list(ACCOUNT_ORDER)
-
-        def _pokedex_cell_config(entry_type: str, region: str) -> dict[str, object]:
-            return pokedex_entry_config.get((str(entry_type).strip().lower(), str(region).strip().lower()), {})
-
-        def _is_locked_pokedex_cell(entry_type: str, region: str) -> bool:
-            return bool(_pokedex_cell_config(entry_type, region).get("locked", False))
-
-        editable_cells = [
-            (entry_type, region)
-            for entry_type in POKEDEX_ENTRY_TYPES
-            for region in POKEDEX_REGIONS
-            if not _is_overall_pokedex_cell(region)
-            and not _is_locked_pokedex_cell(entry_type, region)
-        ]
-        expected_pokedex_count = len(editable_cells)
-        complete_pokedex_on_date: set[str] = set()
-        partial_pokedex_counts: dict[str, int] = {}
-        if not pokedex_df.empty and expected_pokedex_count > 0:
-            same_day_pokedex = pokedex_df[pokedex_df["date"].dt.date == pokedex_date].copy()
-            if not same_day_pokedex.empty:
-                same_day_pokedex["account"] = same_day_pokedex["account"].astype(str).str.strip()
-                same_day_pokedex["entry_type"] = same_day_pokedex["entry_type"].astype(str).str.strip().str.lower()
-                same_day_pokedex["region"] = same_day_pokedex["region"].astype(str).str.strip().str.lower()
-                same_day_pokedex = same_day_pokedex[
-                    same_day_pokedex.apply(
-                        lambda r: (str(r["entry_type"]), str(r["region"])) in set(editable_cells),
-                        axis=1,
-                    )
-                ].copy()
-                pokedex_counts = (
-                    same_day_pokedex.assign(cell=same_day_pokedex["entry_type"] + ":" + same_day_pokedex["region"])
-                    .groupby("account", as_index=False)["cell"]
-                    .nunique()
-                    .rename(columns={"cell": "entry_count"})
-                )
-                for _, row in pokedex_counts.iterrows():
-                    account_name = str(row["account"]).strip()
-                    entry_count = int(row["entry_count"])
-                    if entry_count >= expected_pokedex_count:
-                        complete_pokedex_on_date.add(account_name)
-                    elif entry_count > 0:
-                        partial_pokedex_counts[account_name] = entry_count
-
-        available_pokedex_accounts = [a for a in pokedex_accounts if a not in complete_pokedex_on_date]
-        if complete_pokedex_on_date:
-            st.caption(f"Already entered for this date: {', '.join(sorted(complete_pokedex_on_date))}")
-        if partial_pokedex_counts:
-            partial_label = ", ".join(
-                f"{acc} ({cnt}/{expected_pokedex_count})" for acc, cnt in sorted(partial_pokedex_counts.items())
-            )
-            st.caption(f"Partial Pokédex rows on this date: {partial_label}")
-        if available_pokedex_accounts:
-            st.caption(f"Missing for this date: {', '.join(available_pokedex_accounts)}")
-            pokedex_account = st.selectbox(
-                "Account (missing only for selected date)",
-                options=available_pokedex_accounts,
-                key="pokedex_entry_account",
-            )
+    with st.expander("Pokemon Catalog (1-1025)", expanded=False):
+        st.caption(
+            "Release exceptions are edited in the Pokédex Atlas, Entry set to Release. "
+            "In GO marks a species available before the API lists it, and Not in GO keeps it off the checklist."
+        )
+        if pokemon_catalog_df.empty:
+            st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
         else:
-            st.success("Pokédex entry snapshot complete for selected date. No missing accounts.")
-            pokedex_account = None
-
-        if pokedex_account is None:
-            st.info("Choose another date to enter new Pokédex counts.")
-        else:
-            latest_pokedex_rows = display_pokedex_df[display_pokedex_df["account"] == pokedex_account].copy()
-            latest_vals: dict[tuple[str, str], float] = {}
-            if not latest_pokedex_rows.empty:
-                latest_pokedex_rows = latest_pokedex_rows[
-                    pd.to_datetime(latest_pokedex_rows["date"], errors="coerce") <= pd.Timestamp(pokedex_date)
-                ].copy()
-                latest_pokedex_rows = latest_pokedex_rows.sort_values("date").drop_duplicates(
-                    ["entry_type", "region"], keep="last"
-                )
-                latest_vals = {
-                    (str(r["entry_type"]), str(r["region"])): float(r["value"])
-                    for _, r in latest_pokedex_rows.iterrows()
-                }
-
-            medal_reference_values = latest_regional_pokedex_medal_references(medal_df, pokedex_account, pokedex_date)
-
-            complete_pokedex_entry_types_on_date: set[str] = set()
-            if not pokedex_df.empty:
-                account_day_pokedex = pokedex_df[
-                    (pokedex_df["date"].dt.date == pokedex_date)
-                    & (pokedex_df["account"].astype(str).str.strip() == str(pokedex_account).strip())
-                ].copy()
-                if not account_day_pokedex.empty:
-                    account_day_pokedex["entry_type"] = (
-                        account_day_pokedex["entry_type"].astype(str).str.strip().str.lower()
-                    )
-                    account_day_pokedex["region"] = account_day_pokedex["region"].astype(str).str.strip().str.lower()
-                    for entry_type in POKEDEX_ENTRY_TYPES:
-                        required_regions = {
-                            region
-                            for cell_entry_type, region in editable_cells
-                            if cell_entry_type == entry_type
-                        }
-                        present_regions = set(
-                            account_day_pokedex[account_day_pokedex["entry_type"] == entry_type]["region"].tolist()
-                        )
-                        if required_regions and required_regions.issubset(present_regions):
-                            complete_pokedex_entry_types_on_date.add(entry_type)
-            visible_pokedex_entry_types = [
-                entry_type for entry_type in POKEDEX_ENTRY_TYPES if entry_type not in complete_pokedex_entry_types_on_date
-            ]
-            if complete_pokedex_entry_types_on_date:
-                completed_labels = [
-                    POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)
-                    for entry_type in POKEDEX_ENTRY_TYPES
-                    if entry_type in complete_pokedex_entry_types_on_date
-                ]
-                st.caption(f"Already saved categories for this date: {', '.join(completed_labels)}")
-
-            st.markdown(f"Full Pokédex entries snapshot for `{pokedex_account}`")
-            st.caption(
-                "Pokemon region medal values are shown as references in input help. Locked cells and max values come from "
-                "`inputs/config/pokedex_entry_config.csv`."
-            )
-
-            col_widths = [1.15] + [0.72] * len(POKEDEX_REGIONS) + [1.6]
-            pokedex_input_col = st.container()
-            header_cols = pokedex_input_col.columns(col_widths, gap="small")
-            header_cols[0].markdown("**Type**")
-            for idx, region in enumerate(POKEDEX_REGIONS, start=1):
-                header_cols[idx].markdown(f"**{POKEDEX_REGION_LABELS.get(region, region)}**")
-            header_cols[-1].markdown("**Status**")
-
-            pokedex_existing_for_validation = (
-                pokedex_df[["date", "account", "entry_type", "region", "value"]].copy()
-                if not pokedex_df.empty
-                else pd.DataFrame(columns=["date", "account", "entry_type", "region", "value"])
-            )
-            pokedex_check_prefix = f"pokedex_check_{pokedex_date.isoformat()}_{pokedex_account}"
-            pokedex_checked_signature_key = f"{pokedex_check_prefix}_signature"
-            pokedex_checked_valid_key = f"{pokedex_check_prefix}_valid"
-            pokedex_checked_errors_key = f"{pokedex_check_prefix}_errors"
-            pokedex_checked_drafts_key = f"{pokedex_check_prefix}_drafts"
-            pokedex_category_inputs: dict[str, list[dict[str, object]]] = {}
-            pokedex_signature_config: list[dict[str, object]] = []
-            pokedex_status_slots = {}
-            for entry_type in visible_pokedex_entry_types:
-                with pokedex_input_col.container():
-                    row_cols = st.columns(col_widths, gap="small")
-                    row_cols[0].markdown(f"**{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}**")
-                    row_inputs: list[dict[str, object]] = []
-                    for idx, region in enumerate(POKEDEX_REGIONS, start=1):
-                        last_value = latest_vals.get((entry_type, region), 0.0)
-                        is_overall = _is_overall_pokedex_cell(region)
-                        cell_config = _pokedex_cell_config(entry_type, region)
-                        is_locked = bool(cell_config.get("locked", False))
-                        max_value = cell_config.get("max_value")
-                        config_notes = str(cell_config.get("notes", "")).strip()
-                        if not is_overall:
-                            pokedex_signature_config.append(
-                                {
-                                    "entry_type": entry_type,
-                                    "region": region,
-                                    "locked": bool(is_locked),
-                                    "max_value": None if max_value is None else float(max_value),
-                                }
-                            )
-                        value_default = _format_pokedex_value(last_value)
-                        if is_overall:
-                            row_cols[idx].markdown(
-                                f"<span style='color:#9ca3af'>{escape(value_default)}</span>",
-                                unsafe_allow_html=True,
-                            )
-                            continue
-                        if is_locked:
-                            locked_value = max_value if max_value is not None else last_value
-                            locked_label = _format_pokedex_value(locked_value)
-                            note = f" title='{escape(config_notes)}'" if config_notes else ""
-                            row_cols[idx].markdown(
-                                f"<span style='color:#9ca3af'{note}>{escape(locked_label)}</span>",
-                                unsafe_allow_html=True,
-                            )
-                            continue
-
-                        input_key = f"pokedex_value_input_{pokedex_date.isoformat()}_{pokedex_account}_{entry_type}_{region}"
-                        if input_key not in st.session_state:
-                            st.session_state[input_key] = value_default
-                        help_parts = []
-                        if max_value is not None:
-                            help_parts.append(f"Configured max: {_format_pokedex_value(max_value)}")
-                        if entry_type == "pokemon" and region in medal_reference_values:
-                            help_parts.append(f"Medal reference: {_format_pokedex_value(medal_reference_values[region])}")
-                        if config_notes:
-                            help_parts.append(config_notes)
-                        value_input = row_cols[idx].text_input(
-                            f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)} {POKEDEX_REGION_LABELS.get(region, region)}",
-                            key=input_key,
-                            label_visibility="collapsed",
-                            help=" | ".join(help_parts) if help_parts else None,
-                        )
-                        row_inputs.append(
-                            {
-                                "entry_type": entry_type,
-                                "region": region,
-                                "value": value_input,
-                                "last_value": last_value,
-                                "max_value": max_value,
-                            }
-                        )
-
-                    pokedex_category_inputs[entry_type] = row_inputs
-                    pokedex_status_slots[entry_type] = row_cols[-1].empty()
-
-            pokedex_current_signature = build_input_check_signature(
-                {
-                    "date": pokedex_date.isoformat(),
-                    "account": str(pokedex_account),
-                    "entry_types": list(visible_pokedex_entry_types),
-                    "config": pokedex_signature_config,
-                    "categories": pokedex_category_inputs,
-                }
-            )
-            pokedex_check_state = evaluate_input_check_state(
-                pokedex_current_signature,
-                st.session_state.get(pokedex_checked_signature_key),
-                bool(st.session_state.get(pokedex_checked_valid_key, False)),
-                list(st.session_state.get(pokedex_checked_errors_key, [])),
-            )
-            pokedex_action_cols = st.columns([1.0, 1.7, 2.2], gap="small")
-            if pokedex_action_cols[0].button("Check inputs", key="pokedex_check_inputs"):
-                checked_pokedex_drafts: dict[str, dict[str, object]] = {}
-                check_errors: list[str] = []
-                for entry_type, row_inputs in pokedex_category_inputs.items():
-                    category_draft = build_pokedex_category_draft(
-                        pokedex_date,
-                        pokedex_account,
-                        entry_type,
-                        row_inputs,
-                        pokedex_existing_for_validation,
-                        entry_config=pokedex_entry_config,
-                    )
-                    checked_pokedex_drafts[entry_type] = category_draft
-                    for error in category_draft.get("errors", []):
-                        check_errors.append(f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: {error}")
-                st.session_state[pokedex_checked_signature_key] = pokedex_current_signature
-                st.session_state[pokedex_checked_valid_key] = not bool(check_errors)
-                st.session_state[pokedex_checked_errors_key] = check_errors
-                st.session_state[pokedex_checked_drafts_key] = checked_pokedex_drafts
-                pokedex_check_state = evaluate_input_check_state(
-                    pokedex_current_signature,
-                    st.session_state.get(pokedex_checked_signature_key),
-                    bool(st.session_state.get(pokedex_checked_valid_key, False)),
-                    check_errors,
-                )
-
-            checked_pokedex_drafts = st.session_state.get(pokedex_checked_drafts_key, {})
-            for entry_type, status_slot in pokedex_status_slots.items():
-                if not bool(pokedex_check_state.get("fresh", False)):
-                    status_slot.caption("Needs check")
-                    continue
-                draft = checked_pokedex_drafts.get(entry_type, {}) if isinstance(checked_pokedex_drafts, dict) else {}
-                if not bool(draft.get("valid", False)):
-                    status_slot.caption("Check failed")
-                elif bool(draft.get("changed", False)):
-                    status_slot.caption("Checked OK")
-                else:
-                    status_slot.caption("Unchanged")
-
-            if not bool(pokedex_check_state.get("fresh", False)):
-                pokedex_action_cols[2].warning("Needs check")
-            elif not bool(pokedex_check_state.get("valid", False)):
-                pokedex_action_cols[2].error("Check failed")
-                pokedex_errors = list(pokedex_check_state.get("errors", []))
-                if pokedex_errors:
-                    st.error("Check failed:\n" + "\n".join([f"- {x}" for x in pokedex_errors[:12]]))
-            else:
-                pokedex_action_cols[2].success("Checked OK")
-
-            if pokedex_action_cols[1].button(
-                "Save all Pokédex changes",
-                key="pokedex_final_save",
-                disabled=not bool(pokedex_check_state.get("save_allowed", False)),
-            ):
-                if not bool(pokedex_check_state.get("save_allowed", False)):
-                    st.error("Check inputs first.")
-                    st.stop()
-                rows_to_write: list[dict[str, object]] = []
-                final_errors: list[str] = []
-                skipped_unchanged: list[str] = []
-                checked_drafts = st.session_state.get(pokedex_checked_drafts_key, {})
-                for entry_type in visible_pokedex_entry_types:
-                    draft = checked_drafts.get(entry_type) if isinstance(checked_drafts, dict) else None
-                    if isinstance(draft, dict):
-                        if not bool(draft.get("valid", False)):
-                            final_errors.extend(
-                                [
-                                    f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: {err}"
-                                    for err in draft.get("errors", [])
-                                ]
-                            )
-                            continue
-                        should_write = bool(draft.get("changed", False)) or bool(draft.get("inactive", False))
-                        if not should_write:
-                            skipped_unchanged.append(POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type))
-                            continue
-                        rows_to_write.extend(list(draft.get("rows", [])))
-                    else:
-                        final_errors.append(
-                            f"{POKEDEX_ENTRY_TYPE_LABELS.get(entry_type, entry_type)}: missing checked draft."
-                        )
-                if final_errors:
-                    st.error("Fix Pokédex draft errors before saving:\n" + "\n".join(final_errors[:12]))
-                elif not rows_to_write:
-                    st.info("No changed Pokédex categories to save.")
-                else:
-                    try:
-                        written = upsert_pokedex_entry_rows(
-                            pokedex_entry_snapshots_path(),
-                            rows_to_write,
-                            entry_config=pokedex_entry_config,
-                        )
-                    except ValueError as e:
-                        st.error(str(e))
-                    else:
-                        st.success(f"Saved Pokédex entry rows: {written} for {pokedex_account}")
-                        if skipped_unchanged:
-                            st.caption(
-                                "Unchanged without inactive marker stayed open: "
-                                + ", ".join(skipped_unchanged)
-                            )
-                        notify_google_drive_export_result(kind=EXPORT_KIND_XP)
-
-        with st.expander("Pokemon Catalog (1-1025)", expanded=False):
-            st.caption(
-                "Release exceptions are edited in the Pokédex Atlas, Entry set to Release. "
-                "In GO marks a species available before the API lists it, and Not in GO keeps it off the checklist."
-            )
-            if pokemon_catalog_df.empty:
-                st.warning("No Pokemon catalog found. Run `python tools/update_pokemon_catalog.py`.")
-            else:
-                st.dataframe(pokemon_catalog_df, use_container_width=True, hide_index=True)
+            st.dataframe(pokemon_catalog_df, use_container_width=True, hide_index=True)
 
 if page == "Pipelines":
     st.subheader("Pipelines")
@@ -9113,10 +8277,4 @@ if page == "Generated Files":
         else:
             selected_png = st.selectbox("Image", [p.name for p in pngs])
             st.image(str(folder / selected_png), caption=selected_png, use_container_width=True)
-
-
-
-
-
-
 

@@ -179,6 +179,30 @@ def inject_responsive_styles() -> None:
           box-shadow: 0 12px 24px rgba(2, 8, 23, 0.28);
           min-height: 16.2rem;
         }
+        a.pogo-dex-card-link,
+        a.pogo-dex-card-link:visited,
+        a.pogo-dex-card-link:hover,
+        a.pogo-dex-card-link:active {
+          color: inherit;
+          text-decoration: none;
+          display: block;
+          cursor: pointer;
+        }
+        a.pogo-dex-card-link:focus-visible {
+          outline: none;
+        }
+        a.pogo-dex-card-link:hover .pogo-dex-card,
+        a.pogo-dex-card-link:focus-visible .pogo-dex-card {
+          outline: 2px solid rgba(125, 211, 252, 0.7);
+          outline-offset: 2px;
+        }
+        div[class*="st-key-atlas_card_event"] {
+          height: 0 !important;
+          min-height: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          overflow: hidden !important;
+        }
         .pogo-dex-card--registered { box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.45), 0 12px 24px rgba(2, 8, 23, 0.28); }
         .pogo-dex-card--missing { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.38), 0 12px 24px rgba(2, 8, 23, 0.28); }
         .pogo-dex-card--unavailable { filter: grayscale(0.55); opacity: 0.78; }
@@ -252,11 +276,21 @@ def inject_responsive_styles() -> None:
         .pogo-dex-card--registered .pogo-dex-status { background: rgba(22, 163, 74, 0.78); }
         .pogo-dex-card--missing .pogo-dex-status { background: rgba(202, 138, 4, 0.82); }
         .pogo-dex-card--unavailable .pogo-dex-status { background: rgba(71, 85, 105, 0.86); }
+        .pogo-dex-status--unreleased { background: rgba(71, 85, 105, 0.86); }
         .pogo-dex-extra {
           display: block;
           font-size: 0.7rem;
           line-height: 1.25;
           opacity: 0.9;
+        }
+        .pogo-dex-path {
+          display: block;
+          font-size: 0.7rem;
+          line-height: 1.25;
+          font-weight: 700;
+          color: #7dd3fc;
+          margin-bottom: 0.28rem;
+          overflow-wrap: break-word;
         }
         @media (max-width: 1200px) {
           .block-container { padding-left: 1rem; padding-right: 1rem; }

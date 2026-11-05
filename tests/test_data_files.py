@@ -13,8 +13,6 @@ from webapp.data_files import (
     load_manual_pokemon_availability_frame,
     load_medal_goals,
     load_pokedex_category_availability,
-    load_pokedex_entry_config,
-    load_pokedex_entry_snapshots,
     load_pokemon_catalog,
     load_pokemon_catalog_with_availability,
     merge_pokemon_catalog,
@@ -91,90 +89,6 @@ class DataFilesTest(unittest.TestCase):
 
         self.assertIn("explanation", goals.columns)
         self.assertEqual(goals.iloc[0]["explanation"], "")
-
-    def test_load_pokedex_entry_snapshots_normalizes_rows(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "pokedex_entry_snapshots.csv"
-            pd.DataFrame(
-                [
-                    {
-                        "date": "2026-04-30",
-                        "account": " Thombay ",
-                        "entry_type": "Shiny",
-                        "region": "Kanto",
-                        "value": "12",
-                    },
-                    {
-                        "date": "2026-04-30",
-                        "account": "Thombay",
-                        "entry_type": "ignored",
-                        "region": "kanto",
-                        "value": "99",
-                    },
-                    {
-                        "date": "2026-04-30",
-                        "account": "Cerius",
-                        "entry_type": "Lucky",
-                        "region": "Unidentified",
-                        "value": "2",
-                    },
-                    {
-                        "date": "2026-04-30",
-                        "account": "Thomzay",
-                        "entry_type": "Pokemon",
-                        "region": "Paldea",
-                        "value": "103",
-                    },
-                ]
-            ).to_csv(path, index=False, encoding="utf-8-sig")
-
-            snapshots = load_pokedex_entry_snapshots(
-                path,
-                account_order=["Thombay"],
-                valid_entry_types={"shiny", "lucky", "pokemon"},
-                valid_regions={"kanto", "unidentified", "paldea"},
-            )
-
-        self.assertEqual(len(snapshots), 3)
-        self.assertEqual(snapshots.iloc[0]["account"], "Thombay")
-        self.assertEqual(snapshots.iloc[0]["entry_type"], "shiny")
-        self.assertEqual(snapshots.iloc[0]["region"], "kanto")
-        self.assertEqual(float(snapshots.iloc[0]["value"]), 12.0)
-        self.assertEqual(snapshots.iloc[1]["region"], "unidentified")
-        self.assertEqual(snapshots.iloc[2]["entry_type"], "pokemon")
-        self.assertEqual(snapshots.iloc[2]["region"], "paldea")
-
-    def test_load_pokedex_entry_config_normalizes_locked_and_max(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "pokedex_entry_config.csv"
-            pd.DataFrame(
-                [
-                    {
-                        "entry_type": "Shiny",
-                        "region": "Hisui",
-                        "max_value": "0",
-                        "locked": "true",
-                        "notes": "No entries yet",
-                    },
-                    {
-                        "entry_type": "Mega",
-                        "region": "Kalos",
-                        "max_value": "2",
-                        "locked": "false",
-                        "notes": "",
-                    },
-                ]
-            ).to_csv(path, index=False, encoding="utf-8-sig")
-
-            config = load_pokedex_entry_config(
-                path,
-                valid_entry_types={"shiny", "mega"},
-                valid_regions={"hisui", "kalos"},
-            )
-
-        self.assertEqual(len(config), 2)
-        self.assertTrue(bool(config[config["entry_type"] == "shiny"].iloc[0]["locked"]))
-        self.assertEqual(float(config[config["entry_type"] == "mega"].iloc[0]["max_value"]), 2.0)
 
     def test_load_data_input_accounts_normalizes_enabled_flags(self):
         with tempfile.TemporaryDirectory() as tmp:

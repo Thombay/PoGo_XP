@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 from collections.abc import Sequence
@@ -18,6 +19,7 @@ from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from shared.paths import (
     data_input_accounts_path,
     google_drive_credentials_path,
+    manual_category_availability_path,
     manual_pokemon_availability_path,
     pokedex_category_availability_path,
     pokedex_species_entries_path,
@@ -25,11 +27,12 @@ from shared.paths import (
     pokedex_sync_state_path,
     pokedex_sync_token_path,
     pokemon_catalog_path,
+    pokemon_evolutions_path,
     private_dir,
 )
+from webapp.category_release import load_effective_category_availability
 from webapp.data_files import (
     load_data_input_accounts,
-    load_pokedex_category_availability,
     load_pokemon_catalog_with_availability,
 )
 from webapp.google_drive import ensure_folder, find_child_by_name, upload_or_update_file
@@ -38,6 +41,7 @@ from webapp.pokedex import (
     _atlas_targets_by_kind,
     _available_form_map,
     _prepare_atlas_catalog,
+    is_available_in_pogo,
     location_restriction_for_dex,
 )
 
@@ -140,11 +144,54 @@ def read_species_pending(path: Path | None = None) -> bool:
     return bool(value)
 
 
+def _read_sync_state_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return dict(raw)
+
+
+def _write_sync_state_dict(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"species_pending": bool(state.get("species_pending", False))}
+    content_sha256 = state.get("content_sha256")
+    if isinstance(content_sha256, dict):
+        cleaned: dict[str, str] = {}
+        for name in (REFERENCE_SYNC_NAME, ACCOUNTS_SYNC_NAME):
+            digest = content_sha256.get(name)
+            if isinstance(digest, str) and digest.strip():
+                cleaned[name] = digest.strip()
+        if cleaned:
+            payload["content_sha256"] = cleaned
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _content_sha256_hex(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _content_hashes_from_state(state: dict[str, Any]) -> dict[str, str]:
+    raw = state.get("content_sha256")
+    if not isinstance(raw, dict):
+        return {}
+    hashes: dict[str, str] = {}
+    for name in (REFERENCE_SYNC_NAME, ACCOUNTS_SYNC_NAME):
+        digest = raw.get(name)
+        if isinstance(digest, str) and digest.strip():
+            hashes[name] = digest.strip()
+    return hashes
+
+
 def set_species_pending(pending: bool, path: Path | None = None) -> Path:
     state_path = path or pokedex_sync_state_path()
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"species_pending": bool(pending)}
-    state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    state = _read_sync_state_dict(state_path)
+    state["species_pending"] = bool(pending)
+    _write_sync_state_dict(state_path, state)
     return state_path
 
 
@@ -480,6 +527,38 @@ def pokedex_sync_status_line(result: dict[str, Any]) -> str:
     return f"Pokedex sync: {status} ({detail})"
 
 
+def catalog_in_go_and_names(catalog: pd.DataFrame) -> tuple[set[int], dict[int, str]]:
+    """Return GO dex numbers and catalog names for effective category availability."""
+    in_go: set[int] = set()
+    names: dict[int, str] = {}
+    if catalog is None or catalog.empty or "dex_number" not in catalog.columns:
+        return in_go, names
+    dex_numbers = pd.to_numeric(catalog["dex_number"], errors="coerce")
+    if "available_in_pogo" in catalog.columns:
+        released_flags = catalog["available_in_pogo"].map(is_available_in_pogo)
+    else:
+        released_flags = pd.Series(False, index=catalog.index)
+    if "name" in catalog.columns:
+        name_values = catalog["name"].tolist()
+    else:
+        name_values = [""] * len(catalog)
+    for dex_raw, released, name in zip(dex_numbers.tolist(), released_flags.tolist(), name_values, strict=True):
+        if pd.isna(dex_raw):
+            continue
+        dex = int(dex_raw)
+        if dex <= 0:
+            continue
+        if name is None or (not isinstance(name, str) and pd.isna(name)):
+            text = ""
+        else:
+            text = str(name).strip()
+        if dex not in names or (not names[dex] and text):
+            names[dex] = text
+        if released:
+            in_go.add(dex)
+    return in_go, names
+
+
 def sync_pokedex(
     service: Any,
     *,
@@ -495,7 +574,8 @@ def sync_pokedex(
     A missing config or blank folder_id skips without raising. Species bytes
     upload only while the pending flag is set. A failed species upload leaves
     that flag set and does not download over the local file. Reference and
-    account files are rebuilt and uploaded whenever sync runs.
+    account files upload only when rebuilt bytes differ from the last
+    successful upload (sha256 in sync state).
     """
     config_file = config_path or pokedex_sync_config_path()
     state_file = state_path or pokedex_sync_state_path()
@@ -514,6 +594,8 @@ def sync_pokedex(
     species_action = "unchanged"
     file_ids = {name: str(config["files"].get(name) or "").strip() for name in POKEDEX_SYNC_FILE_NAMES}
     folder_id = str(config["folder_id"]).strip()
+    sync_state = _read_sync_state_dict(state_file)
+    content_hashes = _content_hashes_from_state(sync_state)
 
     if read_species_pending(state_file):
         try:
@@ -545,33 +627,58 @@ def sync_pokedex(
             errors.append(f"{SPECIES_SYNC_NAME}: {exc}")
 
     try:
+        reference_catalog = load_pokemon_catalog_with_availability(
+            catalog_file,
+            manual_pokemon_availability_path(),
+        )
+        reference_in_go, reference_names = catalog_in_go_and_names(reference_catalog)
         reference_bytes = pokedex_atlas_reference_csv_bytes(
-            load_pokemon_catalog_with_availability(catalog_file, manual_pokemon_availability_path()),
-            load_pokedex_category_availability(availability_file),
+            reference_catalog,
+            load_effective_category_availability(
+                availability_file,
+                manual_category_availability_path(),
+                pokemon_evolutions_path(),
+                in_go=reference_in_go,
+                names=reference_names,
+                valid_entry_types=None,
+            ),
         )
-        uploaded = _upload_private_csv(
-            service,
-            folder_id=folder_id,
-            file_name=REFERENCE_SYNC_NAME,
-            content=reference_bytes,
-            file_id=file_ids.get(REFERENCE_SYNC_NAME, ""),
-        )
-        _remember_file_id(file_ids, REFERENCE_SYNC_NAME, uploaded)
+        reference_digest = _content_sha256_hex(reference_bytes)
+        if content_hashes.get(REFERENCE_SYNC_NAME) != reference_digest:
+            uploaded = _upload_private_csv(
+                service,
+                folder_id=folder_id,
+                file_name=REFERENCE_SYNC_NAME,
+                content=reference_bytes,
+                file_id=file_ids.get(REFERENCE_SYNC_NAME, ""),
+            )
+            _remember_file_id(file_ids, REFERENCE_SYNC_NAME, uploaded)
+            content_hashes[REFERENCE_SYNC_NAME] = reference_digest
     except Exception as exc:
         errors.append(f"{REFERENCE_SYNC_NAME}: {exc}")
 
     try:
         account_bytes = pokedex_accounts_csv_bytes(pokedex_sync_account_names(accounts_file))
-        uploaded = _upload_private_csv(
-            service,
-            folder_id=folder_id,
-            file_name=ACCOUNTS_SYNC_NAME,
-            content=account_bytes,
-            file_id=file_ids.get(ACCOUNTS_SYNC_NAME, ""),
-        )
-        _remember_file_id(file_ids, ACCOUNTS_SYNC_NAME, uploaded)
+        account_digest = _content_sha256_hex(account_bytes)
+        if content_hashes.get(ACCOUNTS_SYNC_NAME) != account_digest:
+            uploaded = _upload_private_csv(
+                service,
+                folder_id=folder_id,
+                file_name=ACCOUNTS_SYNC_NAME,
+                content=account_bytes,
+                file_id=file_ids.get(ACCOUNTS_SYNC_NAME, ""),
+            )
+            _remember_file_id(file_ids, ACCOUNTS_SYNC_NAME, uploaded)
+            content_hashes[ACCOUNTS_SYNC_NAME] = account_digest
     except Exception as exc:
         errors.append(f"{ACCOUNTS_SYNC_NAME}: {exc}")
+
+    sync_state["species_pending"] = read_species_pending(state_file)
+    if content_hashes:
+        sync_state["content_sha256"] = content_hashes
+    elif "content_sha256" in sync_state:
+        sync_state.pop("content_sha256", None)
+    _write_sync_state_dict(state_file, sync_state)
 
     config["folder_id"] = folder_id
     config["files"] = file_ids

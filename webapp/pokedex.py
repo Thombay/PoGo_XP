@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections import deque
 from collections.abc import Sequence
 from datetime import date
 from html import escape
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from webapp.category_release import effective_category_availability
 from webapp.data_files import (
     POKEDEX_CATEGORY_AVAILABILITY_COLUMNS,
     POKEDEX_SPECIES_ENTRY_COLUMNS,
@@ -42,6 +44,20 @@ ATLAS_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
 ATLAS_COMPARISON_KINDS: tuple[tuple[str, str], ...] = ATLAS_ENTRY_KINDS + (
     ("gmax", "G-Max"),
     ("mega", "Mega"),
+)
+# Catalog regions that participate in species counts. Snapshot-only buckets such as
+# "unidentified" are intentionally absent so All is the sum of these columns.
+_CATALOG_COUNT_REGIONS: tuple[str, ...] = (
+    "kanto",
+    "johto",
+    "hoenn",
+    "sinnoh",
+    "unova",
+    "kalos",
+    "alola",
+    "galar",
+    "hisui",
+    "paldea",
 )
 
 # National-dex regionals. Form-only regionals are intentionally omitted.
@@ -459,6 +475,374 @@ def _with_species_form(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _atlas_registered_is_blank(value: object) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(missing, bool) and missing
+
+
+def _atlas_bool_from_checkbox(value: object) -> bool:
+    return False if _atlas_registered_is_blank(value) else bool(value)
+
+
+def _atlas_previous_caught(card: pd.Series, column: str) -> bool:
+    if column not in card.index:
+        return False
+    raw = card[column]
+    if _atlas_registered_is_blank(raw):
+        return False
+    return bool(raw)
+
+
+def _atlas_json_form_list(raw: object) -> list[str]:
+    try:
+        loaded = json.loads(str(raw or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item).strip() for item in loaded]
+
+
+def _atlas_available_kinds_by_dex(cards: pd.DataFrame) -> dict[int, set[str]]:
+    available: dict[int, set[str]] = {}
+    for _, card in cards.iterrows():
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        kinds: set[str] = set()
+        for kind_id, _label in ATLAS_ENTRY_KINDS:
+            column = f"registered_{kind_id}"
+            raw = card[column] if column in card.index else pd.NA
+            if not _atlas_registered_is_blank(raw):
+                kinds.add(kind_id)
+        available[int(dex_number)] = kinds
+    return available
+
+
+def _pokedex_species_entry_row(
+    *,
+    save_date: date,
+    account: object,
+    entry_type: str,
+    dex_number: int,
+    form: str,
+    registered: bool,
+) -> dict[str, object]:
+    return {
+        "date": save_date.isoformat(),
+        "account": str(account),
+        "entry_type": entry_type,
+        "dex_number": dex_number,
+        "form": form,
+        "registered": registered,
+        "can_evolve_now": False,
+        "notes": "",
+    }
+
+
+def species_rows_delta_from_atlas_editor(
+    cards: pd.DataFrame,
+    edited: pd.DataFrame,
+    *,
+    account: object,
+    save_date: date,
+    entry_mode: str = "standard",
+) -> list[dict[str, object]]:
+    mode = str(entry_mode or "standard").strip().lower()
+    cards_by_dex: dict[int, pd.Series] = {}
+    for _, card in cards.iterrows():
+        dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        cards_by_dex[int(dex_number)] = card
+
+    if mode == "mega":
+        rows: list[dict[str, object]] = []
+        for _, row in edited.iterrows():
+            dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+            if pd.isna(dex_number):
+                continue
+            dex = int(dex_number)
+            card = cards_by_dex.get(dex)
+            if card is None:
+                continue
+            registered_forms = {form.casefold() for form in _atlas_json_form_list(card.get("registered_mega_forms"))}
+            form = str(row.get("Form") or "").strip()
+            edited_registered = _atlas_bool_from_checkbox(row["Registered"] if "Registered" in row.index else False)
+            card_registered = form.casefold() in registered_forms
+            if edited_registered == card_registered:
+                continue
+            rows.append(
+                _pokedex_species_entry_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type="mega",
+                    dex_number=dex,
+                    form=form,
+                    registered=edited_registered,
+                )
+            )
+        return rows
+
+    if mode == "gmax":
+        rows = []
+        for _, row in edited.iterrows():
+            dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+            if pd.isna(dex_number):
+                continue
+            dex = int(dex_number)
+            card = cards_by_dex.get(dex)
+            if card is None or _atlas_registered_is_blank(card.get("registered_gmax")):
+                continue
+            edited_registered = _atlas_bool_from_checkbox(row["Registered"] if "Registered" in row.index else False)
+            card_registered = bool(card.get("registered_gmax"))
+            if edited_registered == card_registered:
+                continue
+            rows.append(
+                _pokedex_species_entry_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type="gmax",
+                    dex_number=dex,
+                    form="",
+                    registered=edited_registered,
+                )
+            )
+        return rows
+
+    available_by_dex = _atlas_available_kinds_by_dex(cards)
+    rows = []
+    for _, row in edited.iterrows():
+        dex_number = pd.to_numeric(row.get("Dex"), errors="coerce")
+        if pd.isna(dex_number):
+            continue
+        dex = int(dex_number)
+        card = cards_by_dex.get(dex)
+        if card is None:
+            continue
+        available = available_by_dex.get(dex, set())
+        for kind_id, label in ATLAS_ENTRY_KINDS:
+            if kind_id not in available:
+                continue
+            column = f"registered_{kind_id}"
+            card_raw = card[column] if column in card.index else pd.NA
+            card_registered = _atlas_bool_from_checkbox(card_raw)
+            edited_registered = _atlas_bool_from_checkbox(row[label] if label in row.index else False)
+            if edited_registered == card_registered:
+                continue
+            rows.append(
+                _pokedex_species_entry_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type=kind_id,
+                    dex_number=dex,
+                    form="",
+                    registered=edited_registered,
+                )
+            )
+    return rows
+
+
+def species_rows_from_card_registration(
+    card: pd.Series,
+    *,
+    account: object,
+    save_date: date,
+    kind_values: dict[str, bool],
+    mega_values: dict[str, bool] | None = None,
+    gmax_value: bool | None = None,
+) -> list[dict[str, object]]:
+    cards = pd.DataFrame([card])
+    dex_number = pd.to_numeric(card.get("dex_number"), errors="coerce")
+    if pd.isna(dex_number):
+        return []
+    dex = int(dex_number)
+    name = str(card.get("name") or "")
+
+    edited_row: dict[str, object] = {"Dex": dex}
+    for kind_id, label in ATLAS_ENTRY_KINDS:
+        if kind_id in kind_values:
+            edited_row[label] = bool(kind_values[kind_id])
+        else:
+            column = f"registered_{kind_id}"
+            raw = card[column] if column in card.index else pd.NA
+            edited_row[label] = _atlas_bool_from_checkbox(raw)
+    rows = species_rows_delta_from_atlas_editor(
+        cards,
+        pd.DataFrame([edited_row]),
+        account=account,
+        save_date=save_date,
+        entry_mode="standard",
+    )
+
+    if mega_values is not None:
+        registered_forms = {form.casefold() for form in _atlas_json_form_list(card.get("registered_mega_forms"))}
+        mega_records: list[dict[str, object]] = []
+        for form in _atlas_json_form_list(card.get("mega_forms")):
+            if form in mega_values:
+                registered = bool(mega_values[form])
+            else:
+                registered = form.casefold() in registered_forms
+            mega_records.append({"Dex": dex, "Name": name, "Form": form, "Registered": registered})
+        rows.extend(
+            species_rows_delta_from_atlas_editor(
+                cards,
+                pd.DataFrame(mega_records, columns=["Dex", "Name", "Form", "Registered"]),
+                account=account,
+                save_date=save_date,
+                entry_mode="mega",
+            )
+        )
+        listed_forms = {form.casefold() for form in _atlas_json_form_list(card.get("mega_forms"))}
+        for form, value in mega_values.items():
+            token = str(form).strip()
+            if token.casefold() in listed_forms or not bool(value):
+                continue
+            rows.append(
+                _pokedex_species_entry_row(
+                    save_date=save_date,
+                    account=account,
+                    entry_type="mega",
+                    dex_number=dex,
+                    form=token,
+                    registered=True,
+                )
+            )
+
+    if gmax_value is not None:
+        rows.extend(
+            species_rows_delta_from_atlas_editor(
+                cards,
+                pd.DataFrame([{"Dex": dex, "Name": name, "Registered": bool(gmax_value)}]),
+                account=account,
+                save_date=save_date,
+                entry_mode="gmax",
+            )
+        )
+        if _atlas_registered_is_blank(card.get("registered_gmax")):
+            registered = bool(gmax_value)
+            if registered != _atlas_previous_caught(card, "caught_gmax"):
+                rows.append(
+                    _pokedex_species_entry_row(
+                        save_date=save_date,
+                        account=account,
+                        entry_type="gmax",
+                        dex_number=dex,
+                        form="",
+                        registered=registered,
+                    )
+                )
+
+    atlas_kind_ids = {kind_id for kind_id, _label in ATLAS_ENTRY_KINDS}
+    for kind_id, value in kind_values.items():
+        if kind_id not in atlas_kind_ids:
+            continue
+        column = f"registered_{kind_id}"
+        raw = card[column] if column in card.index else pd.NA
+        if not _atlas_registered_is_blank(raw):
+            continue
+        registered = bool(value)
+        if registered == _atlas_previous_caught(card, f"caught_{kind_id}"):
+            continue
+        rows.append(
+            _pokedex_species_entry_row(
+                save_date=save_date,
+                account=account,
+                entry_type=kind_id,
+                dex_number=dex,
+                form="",
+                registered=registered,
+            )
+        )
+    return rows
+
+
+def _normalize_species_history_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    cols = POKEDEX_SPECIES_ENTRY_COLUMNS
+    if frame.empty:
+        return pd.DataFrame(columns=cols)
+    rows = frame.copy()
+    for col in cols:
+        if col not in rows.columns:
+            if col in {"registered", "can_evolve_now"}:
+                rows[col] = False
+            elif col in {"notes", "form"}:
+                rows[col] = ""
+            else:
+                rows[col] = pd.NA
+    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
+    rows["account"] = rows["account"].astype(str).str.strip()
+    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
+    rows["dex_number"] = pd.to_numeric(rows["dex_number"], errors="coerce")
+    rows = rows.dropna(subset=["date", "account", "entry_type", "dex_number"]).copy()
+    rows["dex_number"] = rows["dex_number"].astype(int)
+    if rows["registered"].dtype != bool:
+        rows["registered"] = rows["registered"].map(parse_bool_text)
+    if rows["can_evolve_now"].dtype != bool:
+        rows["can_evolve_now"] = rows["can_evolve_now"].map(parse_bool_text)
+    rows["notes"] = rows["notes"].fillna("").astype(str).str.strip()
+    rows = _with_species_form(rows)
+    return rows
+
+
+def compact_pokedex_species_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    rows = _normalize_species_history_frame(frame)
+    if rows.empty:
+        return pd.DataFrame(columns=POKEDEX_SPECIES_ENTRY_COLUMNS)
+    group_cols = ["account", "entry_type", "dex_number", "_form_key"]
+    kept_frames: list[pd.DataFrame] = []
+    for _key, group in rows.sort_values([*group_cols, "date"]).groupby(group_cols, sort=False):
+        day_rows = group.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        kept_indices: list[object] = []
+        prev_state: tuple[bool, bool, str] | None = None
+        for index, row in day_rows.iterrows():
+            state = (bool(row["registered"]), bool(row["can_evolve_now"]), str(row["notes"]))
+            if prev_state is None or state != prev_state:
+                kept_indices.append(index)
+                prev_state = state
+        if not kept_indices:
+            continue
+        compact_group = day_rows.loc[kept_indices].copy()
+        if len(compact_group) > 1:
+            first = compact_group.iloc[0]
+            if (
+                not bool(first["registered"])
+                and not bool(first["can_evolve_now"])
+                and str(first["notes"]).strip() == ""
+            ):
+                compact_group = compact_group.iloc[1:].copy()
+        if not compact_group.empty:
+            kept_frames.append(compact_group)
+    if not kept_frames:
+        return pd.DataFrame(columns=POKEDEX_SPECIES_ENTRY_COLUMNS)
+    out = pd.concat(kept_frames, ignore_index=True)
+    out = out.drop(columns=["_form_key"])
+    out = out[POKEDEX_SPECIES_ENTRY_COLUMNS].sort_values(["date", "account", "entry_type", "dex_number", "form"]).reset_index(
+        drop=True
+    )
+    return out
+
+
+def save_pokedex_species_entries(path: Path, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        out = pd.DataFrame(columns=POKEDEX_SPECIES_ENTRY_COLUMNS)
+    else:
+        out = _normalize_species_history_frame(frame).drop(columns=["_form_key"])
+        out = out[POKEDEX_SPECIES_ENTRY_COLUMNS].sort_values(["date", "account", "entry_type", "dex_number", "form"]).reset_index(
+            drop=True
+        )
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out["registered"] = out["registered"].map(lambda value: "true" if bool(value) else "false")
+    out["can_evolve_now"] = out["can_evolve_now"].map(lambda value: "true" if bool(value) else "false")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+
+
 def latest_pokedex_species_state(
     species_df: pd.DataFrame,
     *,
@@ -703,162 +1087,6 @@ def build_missing_pokemon_rows(
     return missing[keep].sort_values(["region", "dex_number"]).reset_index(drop=True)
 
 
-def build_pokedex_target_rows(
-    config_df: pd.DataFrame,
-    *,
-    entry_types: Sequence[object] | None = None,
-    regions: Sequence[object] | None = None,
-    entry_type_labels: dict[str, str] | None = None,
-    region_labels: dict[str, str] | None = None,
-) -> pd.DataFrame:
-    cols = ["entry_type", "region", "max_value", "locked", "notes", "entry_type_label", "region_label"]
-    if config_df.empty or not {"entry_type", "region", "max_value"}.issubset(config_df.columns):
-        return pd.DataFrame(columns=cols)
-    rows = config_df.copy()
-    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
-    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
-    rows["max_value"] = pd.to_numeric(rows["max_value"], errors="coerce").fillna(0.0)
-    if "locked" in rows.columns:
-        rows["locked"] = rows["locked"].map(lambda value: value if isinstance(value, bool) else parse_bool_text(value))
-    else:
-        rows["locked"] = False
-    if "notes" not in rows.columns:
-        rows["notes"] = ""
-    rows["notes"] = rows["notes"].fillna("").astype(str).str.strip()
-    if entry_types is not None:
-        type_set = {str(t).strip().lower() for t in entry_types if str(t).strip()}
-        rows = rows[rows["entry_type"].isin(type_set)].copy()
-    regional = rows[rows["region"] != "overall"].copy()
-    derived_overall = (
-        regional.groupby("entry_type", as_index=False)["max_value"]
-        .sum()
-        .assign(region="overall", locked=True, notes="Derived as the sum of regional targets.")
-    )
-    combined = pd.concat([regional, derived_overall], ignore_index=True)
-    if regions is not None:
-        region_set = {str(r).strip().lower() for r in regions if str(r).strip()}
-        combined = combined[combined["region"].isin(region_set)].copy()
-    type_labels = entry_type_labels or {}
-    region_label_map = region_labels or {}
-    combined["entry_type_label"] = combined["entry_type"].map(lambda value: type_labels.get(value, value))
-    combined["region_label"] = combined["region"].map(lambda value: region_label_map.get(value, value))
-    return combined[cols].sort_values(["entry_type", "region"]).reset_index(drop=True)
-
-
-def build_pokedex_missing_count_rows(
-    pokedex_df: pd.DataFrame,
-    config_df: pd.DataFrame,
-    *,
-    accounts: Sequence[object] | None = None,
-    entry_types: Sequence[object] | None = None,
-    regions: Sequence[object] | None = None,
-    start_date: object | None = None,
-    end_date: object | None = None,
-    entry_type_labels: dict[str, str] | None = None,
-    region_labels: dict[str, str] | None = None,
-) -> pd.DataFrame:
-    targets = build_pokedex_target_rows(
-        config_df,
-        entry_types=entry_types,
-        regions=regions,
-        entry_type_labels=entry_type_labels,
-        region_labels=region_labels,
-    )
-    snapshot_cols = ["date", "account", "entry_type", "region", "value"]
-    if targets.empty:
-        return pd.DataFrame(
-            columns=[
-                *snapshot_cols,
-                "max_value",
-                "missing_count",
-                "progress_pct",
-                "entry_type_label",
-                "region_label",
-            ]
-        )
-
-    snapshots = pokedex_df.copy() if not pokedex_df.empty else pd.DataFrame(columns=snapshot_cols)
-    for col in snapshot_cols:
-        if col not in snapshots.columns:
-            snapshots[col] = pd.NA
-    snapshots = snapshots[snapshot_cols].copy()
-    snapshots["date"] = pd.to_datetime(snapshots["date"], errors="coerce")
-    snapshots["account"] = snapshots["account"].astype(str).str.strip()
-    snapshots["entry_type"] = snapshots["entry_type"].astype(str).str.strip().str.lower()
-    snapshots["region"] = snapshots["region"].astype(str).str.strip().str.lower()
-    snapshots["value"] = pd.to_numeric(snapshots["value"], errors="coerce")
-    snapshots = snapshots.dropna(subset=["date", "account", "entry_type", "region", "value"]).copy()
-    snapshots = snapshots[snapshots["account"] != ""].copy()
-    if accounts is not None:
-        account_set = {str(a).strip() for a in accounts if str(a).strip()}
-        snapshots = snapshots[snapshots["account"].isin(account_set)].copy()
-    if entry_types is not None:
-        type_set = {str(t).strip().lower() for t in entry_types if str(t).strip()}
-        snapshots = snapshots[snapshots["entry_type"].isin(type_set)].copy()
-    start_ts = pd.to_datetime(start_date, errors="coerce") if start_date is not None else pd.NaT
-    end_ts = pd.to_datetime(end_date, errors="coerce") if end_date is not None else pd.NaT
-    if pd.notna(start_ts):
-        snapshots = snapshots[snapshots["date"] >= pd.Timestamp(start_ts)].copy()
-    if pd.notna(end_ts):
-        snapshots = snapshots[snapshots["date"] <= pd.Timestamp(end_ts)].copy()
-
-    account_list = [str(a).strip() for a in (accounts or []) if str(a).strip()]
-    if not account_list:
-        account_list = sorted(snapshots["account"].dropna().astype(str).unique().tolist())
-    if not account_list:
-        return pd.DataFrame(
-            columns=[
-                *snapshot_cols,
-                "max_value",
-                "missing_count",
-                "progress_pct",
-                "entry_type_label",
-                "region_label",
-            ]
-        )
-
-    latest = pd.DataFrame(columns=snapshot_cols)
-    if not snapshots.empty:
-        latest = snapshots.sort_values(["account", "entry_type", "region", "date"]).groupby(
-            ["account", "entry_type", "region"],
-            as_index=False,
-        ).tail(1)
-
-    grid = (
-        pd.MultiIndex.from_product(
-            [account_list, targets["entry_type"].unique().tolist(), targets["region"].unique().tolist()],
-            names=["account", "entry_type", "region"],
-        )
-        .to_frame(index=False)
-    )
-    grid = grid.merge(targets, on=["entry_type", "region"], how="inner")
-    merged = grid.merge(
-        latest[["account", "entry_type", "region", "date", "value"]],
-        on=["account", "entry_type", "region"],
-        how="left",
-    )
-    merged["value"] = pd.to_numeric(merged["value"], errors="coerce").fillna(0.0)
-    merged["max_value"] = pd.to_numeric(merged["max_value"], errors="coerce").fillna(0.0)
-    merged["missing_count"] = (merged["max_value"] - merged["value"]).clip(lower=0)
-    merged["progress_pct"] = merged.apply(
-        lambda row: float(row["value"]) / float(row["max_value"]) if float(row["max_value"]) > 0 else 0.0,
-        axis=1,
-    )
-    return merged[
-        [
-            "date",
-            "account",
-            "entry_type",
-            "region",
-            "value",
-            "max_value",
-            "missing_count",
-            "progress_pct",
-            "entry_type_label",
-            "region_label",
-        ]
-    ].sort_values(["account", "entry_type", "region"]).reset_index(drop=True)
-
 
 def _ordered_unique_text(values: Sequence[object] | None) -> list[str]:
     if not values:
@@ -878,7 +1106,14 @@ def _selected_atlas_kinds(entry_types: Sequence[object] | None) -> list[tuple[st
     if entry_types is None:
         return list(ATLAS_ENTRY_KINDS)
     requested = {str(item).strip().lower() for item in entry_types if str(item).strip()}
-    return [(kind, label) for kind, label in ATLAS_ENTRY_KINDS if kind in requested]
+    return [(kind, label) for kind, label in ATLAS_COMPARISON_KINDS if kind in requested]
+
+
+def _selected_comparison_kinds(entry_types: Sequence[object] | None) -> list[tuple[str, str]]:
+    if entry_types is None:
+        return list(ATLAS_COMPARISON_KINDS)
+    requested = {str(item).strip().lower() for item in entry_types if str(item).strip()}
+    return [(kind, label) for kind, label in ATLAS_COMPARISON_KINDS if kind in requested]
 
 
 def _prepare_atlas_catalog(catalog_df: pd.DataFrame, regions: Sequence[object] | None) -> pd.DataFrame:
@@ -909,6 +1144,13 @@ def _in_go_dex_numbers(catalog: pd.DataFrame) -> set[int]:
     return set(catalog.loc[available, "dex_number"].astype(int).tolist())
 
 
+def _availability_has_shadow_rows(availability_df: pd.DataFrame | None) -> bool:
+    if availability_df is None or availability_df.empty or "entry_type" not in availability_df.columns:
+        return False
+    entry_types = availability_df["entry_type"].astype(str).str.strip().str.lower()
+    return bool(entry_types.eq("shadow").any())
+
+
 def _atlas_targets_by_kind(
     catalog: pd.DataFrame,
     availability_df: pd.DataFrame | None,
@@ -919,10 +1161,17 @@ def _atlas_targets_by_kind(
         catalog_dex: set[int] = set()
     else:
         catalog_dex = set(catalog["dex_number"].astype(int).tolist())
+    requested = [str(kind) for kind in kinds]
+    compute = list(requested)
+    has_shadow_rows = _availability_has_shadow_rows(availability_df)
+    if has_shadow_rows and "shadow" not in compute:
+        compute.append("shadow")
     targets: dict[str, set[int]] = {}
-    for kind in kinds:
+    for kind in compute:
         raw = category_target_dex_numbers(kind, catalog, availability_df)
         targets[str(kind)] = {int(dex) for dex in raw if int(dex) in catalog_dex and int(dex) in in_go}
+    if has_shadow_rows:
+        targets["purified"] = set(targets.get("shadow", set()))
     return targets
 
 
@@ -965,6 +1214,244 @@ def _registered_dex_by_account_kind(
     return found
 
 
+def _catalog_dex_numbers(catalog: pd.DataFrame) -> set[int]:
+    if catalog.empty or "dex_number" not in catalog.columns:
+        return set()
+    return set(catalog["dex_number"].astype(int).tolist())
+
+
+def _mega_target_forms(catalog: pd.DataFrame, availability_df: pd.DataFrame | None) -> list[tuple[int, str]]:
+    """Available Mega forms whose dex is in this catalog and in GO, as (dex, casefolded form)."""
+    if catalog.empty:
+        return []
+    in_go = _in_go_dex_numbers(catalog)
+    catalog_dex = _catalog_dex_numbers(catalog)
+    found: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for dex, forms in _available_form_map(availability_df, "mega").items():
+        if dex not in catalog_dex or dex not in in_go:
+            continue
+        for form in forms:
+            key = (int(dex), str(form).casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(key)
+    return found
+
+
+def _gmax_target_dexes(catalog: pd.DataFrame, availability_df: pd.DataFrame | None) -> set[int]:
+    """Dex numbers with an available G-Max form that are in this catalog and in GO."""
+    if catalog.empty:
+        return set()
+    in_go = _in_go_dex_numbers(catalog)
+    catalog_dex = _catalog_dex_numbers(catalog)
+    return {
+        int(dex)
+        for dex in _available_form_map(availability_df, "gmax")
+        if int(dex) in catalog_dex and int(dex) in in_go
+    }
+
+
+def _target_keys_for_kind(
+    kind: str,
+    catalog: pd.DataFrame,
+    availability_df: pd.DataFrame | None,
+) -> set[object]:
+    if kind == "mega":
+        return set(_mega_target_forms(catalog, availability_df))
+    if kind == "gmax":
+        return set(_gmax_target_dexes(catalog, availability_df))
+    return set(_atlas_targets_by_kind(catalog, availability_df, [kind]).get(kind, set()))
+
+
+def _registered_form_keys_by_account(
+    species_df: pd.DataFrame,
+    accounts: Sequence[str],
+    entry_type: str,
+    as_of_date: object | None,
+    *,
+    blank_only: bool,
+) -> dict[str, set[tuple[int, str]]]:
+    found: dict[str, set[tuple[int, str]]] = {}
+    if not accounts:
+        return found
+    latest = latest_pokedex_species_state(
+        species_df,
+        accounts=list(accounts),
+        entry_types=[entry_type],
+        as_of_date=as_of_date,
+    )
+    if latest.empty:
+        return found
+    for row in latest.itertuples(index=False):
+        if not bool(row.registered):
+            continue
+        form = str(getattr(row, "form", "") or "").strip()
+        if blank_only and form != "":
+            continue
+        found.setdefault(str(row.account), set()).add((int(row.dex_number), form.casefold()))
+    return found
+
+
+def _counting_catalog(catalog_df: pd.DataFrame, regions: Sequence[object] | None) -> pd.DataFrame:
+    """Catalog rows in the ten counted regions, optionally limited to ``regions``.
+
+    ``overall`` in the filter means no extra limit. Dex outside the ten regions are dropped
+    so an overall total matches the sum of regional rows.
+    """
+    catalog = _prepare_atlas_catalog(catalog_df, regions)
+    if catalog.empty or "dex_number" not in catalog.columns:
+        columns = list(catalog.columns) if len(getattr(catalog, "columns", [])) else ["dex_number", "region"]
+        return pd.DataFrame(columns=columns)
+    catalog = catalog.copy()
+    if "region" not in catalog.columns:
+        catalog["region"] = ""
+    catalog["region"] = catalog["region"].fillna("").astype(str).str.strip().str.lower()
+    catalog = catalog[catalog["region"].isin(_CATALOG_COUNT_REGIONS)].copy()
+    if catalog.empty:
+        return catalog
+    return catalog.drop_duplicates(subset=["dex_number"], keep="first").reset_index(drop=True)
+
+
+def _present_count_regions(catalog: pd.DataFrame) -> list[str]:
+    if catalog.empty or "region" not in catalog.columns:
+        return []
+    present = set(catalog["region"].astype(str).tolist())
+    return [region for region in _CATALOG_COUNT_REGIONS if region in present]
+
+
+def _normalize_day(value: object | None) -> pd.Timestamp:
+    if value is None:
+        return pd.NaT
+    stamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(stamp):
+        return pd.NaT
+    return pd.Timestamp(stamp).normalize()
+
+
+def _normalize_species_history(species_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["date", "account", "entry_type", "dex_number", "form_key", "registered", "seq"]
+    if species_df.empty or not {"account", "entry_type", "dex_number", "date"}.issubset(species_df.columns):
+        return pd.DataFrame(columns=columns)
+    rows = species_df.copy()
+    rows["_seq"] = range(len(rows))
+    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
+    if pd.api.types.is_datetime64_any_dtype(rows["date"]):
+        rows["date"] = rows["date"].dt.normalize()
+    rows["account"] = rows["account"].astype(str).str.strip()
+    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
+    rows["dex_number"] = pd.to_numeric(rows["dex_number"], errors="coerce")
+    rows = rows.dropna(subset=["date", "account", "entry_type", "dex_number"]).copy()
+    if rows.empty:
+        return pd.DataFrame(columns=columns)
+    rows["dex_number"] = rows["dex_number"].astype(int)
+    rows = rows[(rows["account"] != "") & (rows["entry_type"] != "") & (rows["dex_number"] > 0)].copy()
+    known = {kind for kind, _label in ATLAS_COMPARISON_KINDS}
+    rows = rows[rows["entry_type"].isin(known)].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=columns)
+    if "registered" in rows.columns:
+        rows["registered"] = rows["registered"].map(lambda value: value if isinstance(value, bool) else parse_bool_text(value))
+    else:
+        rows["registered"] = False
+    rows = _with_species_form(rows)
+    rows["form_key"] = rows["_form_key"]
+    rows["seq"] = rows["_seq"]
+    rows = rows.sort_values(["date", "seq"], kind="mergesort")
+    return rows[columns].reset_index(drop=True)
+
+
+def _events_for_kind(
+    history: pd.DataFrame,
+    kind: str,
+    keys: set[object],
+) -> list[tuple[pd.Timestamp, object, bool, int]]:
+    if history.empty or not keys:
+        return []
+    events: list[tuple[pd.Timestamp, object, bool, int]] = []
+    matched = history[history["entry_type"] == kind]
+    for row in matched.itertuples(index=False):
+        dex = int(row.dex_number)
+        form_key = str(row.form_key)
+        if kind == "mega":
+            key: object = (dex, form_key)
+        else:
+            if form_key != "":
+                continue
+            key = dex
+        if key not in keys:
+            continue
+        events.append((pd.Timestamp(row.date), key, bool(row.registered), int(row.seq)))
+    events.sort(key=lambda event: (event[0], event[3]))
+    return events
+
+
+def _points_from_events(
+    events: list[tuple[pd.Timestamp, object, bool, int]],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> list[tuple[pd.Timestamp, int]]:
+    """Opening point on the window anchor, then one point per later day the count changes."""
+    if pd.notna(start) and pd.notna(end) and start > end:
+        return []
+
+    usable = [event for event in events if pd.isna(end) or event[0] <= end]
+    state: dict[object, bool] = {}
+
+    def current() -> int:
+        return sum(1 for value in state.values() if value)
+
+    def apply(batch: list[tuple[pd.Timestamp, object, bool, int]]) -> None:
+        for _stamp, key, registered, _seq in batch:
+            state[key] = bool(registered)
+
+    def daily_counts(batch: list[tuple[pd.Timestamp, object, bool, int]]) -> list[tuple[pd.Timestamp, int]]:
+        grouped: list[tuple[pd.Timestamp, int]] = []
+        index = 0
+        while index < len(batch):
+            day = batch[index][0]
+            day_rows: list[tuple[pd.Timestamp, object, bool, int]] = []
+            while index < len(batch) and batch[index][0] == day:
+                day_rows.append(batch[index])
+                index += 1
+            apply(day_rows)
+            grouped.append((day, current()))
+        return grouped
+
+    if pd.notna(start):
+        apply([event for event in usable if event[0] < start])
+        opening = current()
+        daily = daily_counts([event for event in usable if event[0] >= start])
+        if daily and daily[0][0] == start:
+            anchor_count = daily[0][1]
+            rest = daily[1:]
+        else:
+            anchor_count = opening
+            rest = daily
+        later_change = anchor_count != opening or any(count != anchor_count for _day, count in rest)
+        if opening <= 0 and not later_change:
+            return []
+        points = [(start, anchor_count)]
+        previous = anchor_count
+        for day, count in rest:
+            if count != previous:
+                points.append((day, count))
+                previous = count
+        return points
+
+    daily = daily_counts(usable)
+    if not daily or all(count == 0 for _day, count in daily):
+        return []
+    points = [(daily[0][0], daily[0][1])]
+    previous = daily[0][1]
+    for day, count in daily[1:]:
+        if count != previous:
+            points.append((day, count))
+            previous = count
+    return points
+
+
 def build_species_missing_summary(
     catalog_df: pd.DataFrame,
     species_df: pd.DataFrame,
@@ -988,13 +1475,35 @@ def build_species_missing_summary(
         return empty
     catalog = _prepare_atlas_catalog(base, regions)
     kind_ids = [kind for kind, _label in kinds]
-    targets = _atlas_targets_by_kind(catalog, availability_df, kind_ids)
-    registered = _registered_dex_by_account_kind(species_df, account_list, kind_ids, targets, as_of_date)
+    standard_ids = [kind for kind in kind_ids if kind not in {"mega", "gmax"}]
+    targets = _atlas_targets_by_kind(catalog, availability_df, standard_ids)
+    registered = _registered_dex_by_account_kind(species_df, account_list, standard_ids, targets, as_of_date)
+    mega_target_set = set(_mega_target_forms(catalog, availability_df)) if "mega" in kind_ids else set()
+    gmax_targets = _gmax_target_dexes(catalog, availability_df) if "gmax" in kind_ids else set()
+    mega_registered = (
+        _registered_form_keys_by_account(species_df, account_list, "mega", as_of_date, blank_only=False)
+        if "mega" in kind_ids
+        else {}
+    )
+    gmax_registered = (
+        _registered_form_keys_by_account(species_df, account_list, "gmax", as_of_date, blank_only=True)
+        if "gmax" in kind_ids
+        else {}
+    )
     rows: list[dict[str, object]] = []
     for account_name in account_list:
         for kind, label in kinds:
-            target_count = len(targets.get(kind, set()))
-            registered_count = len(registered.get((account_name, kind), set()))
+            if kind == "mega":
+                target_count = len(mega_target_set)
+                registered_count = len(mega_registered.get(account_name, set()) & mega_target_set)
+            elif kind == "gmax":
+                target_count = len(gmax_targets)
+                registered_count = len(
+                    {dex for dex, _form in gmax_registered.get(account_name, set()) if dex in gmax_targets}
+                )
+            else:
+                target_count = len(targets.get(kind, set()))
+                registered_count = len(registered.get((account_name, kind), set()))
             rows.append(
                 {
                     "account": account_name,
@@ -1009,6 +1518,141 @@ def build_species_missing_summary(
     for column in ("target_count", "registered_count", "missing_count"):
         summary[column] = summary[column].astype(int)
     return summary
+
+
+_SPECIES_REGION_COUNT_COLUMNS = [
+    "entry_type",
+    "entry_type_label",
+    "region",
+    "registered_count",
+    "target_count",
+]
+
+_SPECIES_PROGRESS_COLUMNS = [
+    "date",
+    "account",
+    "entry_type",
+    "entry_type_label",
+    "registered_count",
+    "target_count",
+]
+
+
+def _kind_region_counts(
+    kind: str,
+    region_catalog: pd.DataFrame,
+    availability_df: pd.DataFrame | None,
+    registered: dict[tuple[str, int, str], bool],
+) -> tuple[int, int]:
+    if kind == "mega":
+        forms = _mega_target_forms(region_catalog, availability_df)
+        registered_count = sum(1 for dex, form_key in forms if registered.get((kind, dex, form_key), False))
+        return registered_count, len(forms)
+    if kind == "gmax":
+        targets = _gmax_target_dexes(region_catalog, availability_df)
+        registered_count = sum(1 for dex in targets if registered.get((kind, int(dex), ""), False))
+        return registered_count, len(targets)
+    targets = _atlas_targets_by_kind(region_catalog, availability_df, [kind]).get(kind, set())
+    registered_count = sum(1 for dex in targets if registered.get((kind, int(dex), ""), False))
+    return registered_count, len(targets)
+
+
+def build_species_region_counts(
+    catalog_df: pd.DataFrame,
+    species_df: pd.DataFrame,
+    *,
+    account: object,
+    availability_df: pd.DataFrame | None = None,
+    as_of_date: object | None = None,
+    regions: Sequence[object] | None = None,
+) -> pd.DataFrame:
+    columns = list(_SPECIES_REGION_COUNT_COLUMNS)
+    catalog = _counting_catalog(catalog_df, regions)
+    present = _present_count_regions(catalog)
+    if not present:
+        return pd.DataFrame(columns=columns)
+    account_name = str(account or "").strip()
+    kind_ids = [kind for kind, _label in ATLAS_COMPARISON_KINDS]
+    registered = _registration_index(species_df, account_name, kind_ids, as_of_date)
+    rows: list[dict[str, object]] = []
+    for kind, label in ATLAS_COMPARISON_KINDS:
+        registered_total = 0
+        target_total = 0
+        for region in present:
+            region_catalog = catalog[catalog["region"] == region]
+            registered_count, target_count = _kind_region_counts(kind, region_catalog, availability_df, registered)
+            registered_total += registered_count
+            target_total += target_count
+            rows.append(
+                {
+                    "entry_type": kind,
+                    "entry_type_label": label,
+                    "region": region,
+                    "registered_count": registered_count,
+                    "target_count": target_count,
+                }
+            )
+        rows.append(
+            {
+                "entry_type": kind,
+                "entry_type_label": label,
+                "region": "overall",
+                "registered_count": registered_total,
+                "target_count": target_total,
+            }
+        )
+    counts = pd.DataFrame(rows, columns=columns)
+    counts["registered_count"] = counts["registered_count"].astype(int)
+    counts["target_count"] = counts["target_count"].astype(int)
+    return counts
+
+
+def build_species_progress_rows(
+    catalog_df: pd.DataFrame,
+    species_df: pd.DataFrame,
+    *,
+    accounts: Sequence[object],
+    entry_types: Sequence[object] | None = None,
+    regions: Sequence[object] | None = None,
+    start_date: object | None = None,
+    end_date: object | None = None,
+    availability_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    columns = list(_SPECIES_PROGRESS_COLUMNS)
+    empty = pd.DataFrame(columns=columns)
+    account_list = _ordered_unique_text(accounts)
+    kinds = _selected_comparison_kinds(entry_types)
+    catalog = _counting_catalog(catalog_df, regions)
+    if not account_list or not kinds or catalog.empty:
+        return empty
+    history = _normalize_species_history(species_df)
+    start = _normalize_day(start_date)
+    end = _normalize_day(end_date)
+    rows: list[dict[str, object]] = []
+    for account_name in account_list:
+        account_history = history[history["account"] == account_name] if not history.empty else history
+        for kind, label in kinds:
+            keys = _target_keys_for_kind(kind, catalog, availability_df)
+            target_count = len(keys)
+            events = _events_for_kind(account_history, kind, keys)
+            for point_date, registered_count in _points_from_events(events, start, end):
+                rows.append(
+                    {
+                        "date": point_date,
+                        "account": account_name,
+                        "entry_type": kind,
+                        "entry_type_label": label,
+                        "registered_count": registered_count,
+                        "target_count": target_count,
+                    }
+                )
+    if not rows:
+        return empty
+    progress = pd.DataFrame(rows, columns=columns)
+    progress["date"] = pd.to_datetime(progress["date"])
+    progress["registered_count"] = progress["registered_count"].astype(int)
+    progress["target_count"] = progress["target_count"].astype(int)
+    return progress.sort_values(["date", "account", "entry_type"], kind="mergesort").reset_index(drop=True)
 
 
 def mega_badge_label(form: object) -> str:
@@ -1132,142 +1776,6 @@ def _resolved_kind_state(
     return _alias_kind(kind_filter), _alias_state(state_filter)
 
 
-_COMPARISON_COLUMNS = [
-    "entry_type",
-    "entry_type_label",
-    "snapshot_value",
-    "atlas_count",
-    "max_value",
-    "gap",
-]
-
-
-def _latest_snapshot_values(
-    snapshots_df: pd.DataFrame | None,
-    account: str,
-    region: str,
-    as_of_date: object | None,
-) -> dict[str, int]:
-    if snapshots_df is None or snapshots_df.empty:
-        return {}
-    required = {"date", "account", "entry_type", "region", "value"}
-    if not required.issubset(snapshots_df.columns):
-        return {}
-    rows = snapshots_df.loc[:, list(required)].copy()
-    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
-    rows["account"] = rows["account"].astype(str).str.strip()
-    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
-    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
-    rows["value"] = pd.to_numeric(rows["value"], errors="coerce")
-    rows = rows.dropna(subset=["date", "value"]).copy()
-    rows = rows[(rows["account"] == account) & (rows["region"] == region)].copy()
-    as_of = pd.to_datetime(as_of_date, errors="coerce") if as_of_date is not None else pd.NaT
-    if pd.notna(as_of):
-        rows = rows[rows["date"] <= pd.Timestamp(as_of)].copy()
-    if rows.empty:
-        return {}
-    latest = rows.sort_values("date").groupby("entry_type", as_index=False).tail(1)
-    values: dict[str, int] = {}
-    for row in latest.itertuples(index=False):
-        number = float(row.value)
-        values[str(row.entry_type)] = int(number) if number == int(number) else int(number)
-    return values
-
-
-def _config_max_values(config_df: pd.DataFrame | None, region: str) -> dict[str, int]:
-    if config_df is None or config_df.empty or not {"entry_type", "region", "max_value"}.issubset(config_df.columns):
-        return {}
-    rows = config_df.copy()
-    rows["entry_type"] = rows["entry_type"].astype(str).str.strip().str.lower()
-    rows["region"] = rows["region"].astype(str).str.strip().str.lower()
-    rows["max_value"] = pd.to_numeric(rows["max_value"], errors="coerce")
-    rows = rows[(rows["region"] == region) & rows["max_value"].notna()].copy()
-    values: dict[str, int] = {}
-    for row in rows.itertuples(index=False):
-        number = float(row.max_value)
-        values[str(row.entry_type)] = int(number) if number == int(number) else int(number)
-    return values
-
-
-def build_atlas_snapshot_comparison(
-    catalog_df: pd.DataFrame,
-    species_df: pd.DataFrame,
-    snapshots_df: pd.DataFrame | None,
-    config_df: pd.DataFrame | None,
-    *,
-    account: object,
-    region: object,
-    availability_df: pd.DataFrame | None = None,
-    as_of_date: object | None = None,
-    entry_type_labels: dict[str, str] | None = None,
-) -> pd.DataFrame:
-    columns = list(_COMPARISON_COLUMNS)
-    empty = pd.DataFrame(columns=columns)
-    account_name = str(account or "").strip()
-    region_key = str(region or "").strip().lower()
-    if not account_name or catalog_df.empty or "dex_number" not in catalog_df.columns:
-        return empty
-    region_filter = None if not region_key or region_key == "overall" else [region_key]
-    catalog = _prepare_atlas_catalog(catalog_df, region_filter)
-    if catalog.empty:
-        return empty
-    in_go = _in_go_dex_numbers(catalog)
-    catalog_dex = set(catalog["dex_number"].astype(int).tolist())
-    kind_ids = [kind for kind, _label in ATLAS_COMPARISON_KINDS]
-    targets = _atlas_targets_by_kind(catalog, availability_df, [kind for kind, _label in ATLAS_COMPARISON_KINDS if kind != "mega"])
-    registered = _registration_index(species_df, account_name, kind_ids, as_of_date)
-    mega_forms = _available_form_map(availability_df, "mega")
-    snapshots = _latest_snapshot_values(snapshots_df, account_name, region_key, as_of_date)
-    maximums = _config_max_values(config_df, region_key)
-    labels = entry_type_labels or {}
-    rows: list[dict[str, object]] = []
-    for kind, fallback_label in ATLAS_COMPARISON_KINDS:
-        if kind == "mega":
-            atlas_count = 0
-            for dex, forms in mega_forms.items():
-                if dex not in catalog_dex or dex not in in_go:
-                    continue
-                for form in forms:
-                    if registered.get((kind, dex, form.casefold()), False):
-                        atlas_count += 1
-        else:
-            atlas_count = sum(
-                1
-                for dex in targets.get(kind, set())
-                if registered.get((kind, int(dex), ""), False)
-            )
-        snapshot_value = snapshots.get(kind)
-        max_value = maximums.get(kind)
-        gap = None if snapshot_value is None else int(snapshot_value) - int(atlas_count)
-        rows.append(
-            {
-                "entry_type": kind,
-                "entry_type_label": labels.get(kind, fallback_label),
-                "snapshot_value": snapshot_value,
-                "atlas_count": int(atlas_count),
-                "max_value": max_value,
-                "gap": gap,
-            }
-        )
-    comparison = pd.DataFrame(rows, columns=columns)
-    for column in ("snapshot_value", "atlas_count", "max_value", "gap"):
-        comparison[column] = pd.array(
-            [_nullable_int(value) for value in comparison[column].tolist()],
-            dtype="Int64",
-        )
-    return comparison
-
-
-def _nullable_int(value: object) -> object:
-    if value is None or value is pd.NA:
-        return pd.NA
-    try:
-        if bool(pd.isna(value)):
-            return pd.NA
-    except (TypeError, ValueError):
-        return pd.NA
-    return int(value)
-
 
 def _atlas_card_columns() -> list[str]:
     return [
@@ -1288,12 +1796,18 @@ def _atlas_card_columns() -> list[str]:
         "status",
         "status_label",
         "missing_kinds",
+        "fill_path",
         "notes",
         "mega_forms",
         "registered_mega_forms",
         "registered_mega",
         "registered_gmax",
         *[f"registered_{kind}" for kind, _label in ATLAS_ENTRY_KINDS],
+        *[f"caught_{kind}" for kind, _label in ATLAS_ENTRY_KINDS],
+        "caught_gmax",
+        "unreleased_kinds",
+        "mega_host",
+        "gmax_host",
     ]
 
 
@@ -1317,6 +1831,263 @@ def _normalize_release_overrides(release_overrides: dict[int, str] | None) -> di
     return normalized
 
 
+_ATLAS_KIND_LABELS: dict[str, str] = {kind: label for kind, label in ATLAS_ENTRY_KINDS}
+_ATLAS_KIND_ORDER: dict[str, int] = {kind: index for index, (kind, _label) in enumerate(ATLAS_ENTRY_KINDS)}
+
+
+def _evolution_positive_dex(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number):
+        return None
+    dex = int(number)
+    if dex <= 0 or float(number) != float(dex):
+        return None
+    return dex
+
+
+def _text_or_blank(value: object) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return str(value).strip()
+
+
+def _catalog_names(catalog: pd.DataFrame) -> dict[int, str]:
+    names: dict[int, str] = {}
+    if catalog.empty or "dex_number" not in catalog.columns:
+        return names
+    raw_names = catalog["name"].tolist() if "name" in catalog.columns else [""] * len(catalog)
+    for dex_raw, name_raw in zip(catalog["dex_number"].tolist(), raw_names, strict=True):
+        dex = _evolution_positive_dex(dex_raw)
+        if dex is None:
+            continue
+        text = _text_or_blank(name_raw)
+        if dex not in names or (not names[dex] and text):
+            names[dex] = text
+    return names
+
+
+def _evolution_predecessors(
+    evolutions_df: pd.DataFrame | None,
+    in_go: set[int],
+) -> dict[int, list[tuple[int, str]]]:
+    predecessors: dict[int, list[tuple[int, str]]] = {}
+    if evolutions_df is None or evolutions_df.empty or not in_go:
+        return predecessors
+    total = len(evolutions_df)
+    sources = (
+        evolutions_df["source_dex_number"].tolist()
+        if "source_dex_number" in evolutions_df.columns
+        else [None] * total
+    )
+    targets = (
+        evolutions_df["target_dex_number"].tolist()
+        if "target_dex_number" in evolutions_df.columns
+        else [None] * total
+    )
+    forms = evolutions_df["source_form"].tolist() if "source_form" in evolutions_df.columns else [""] * total
+    seen: set[tuple[int, int, str]] = set()
+    for source_raw, target_raw, form_raw in zip(sources, targets, forms, strict=True):
+        source = _evolution_positive_dex(source_raw)
+        target = _evolution_positive_dex(target_raw)
+        if source is None or target is None or source == target:
+            continue
+        if source not in in_go or target not in in_go:
+            continue
+        form = _text_or_blank(form_raw)
+        key = (source, target, form)
+        if key in seen:
+            continue
+        seen.add(key)
+        predecessors.setdefault(target, []).append((source, form))
+    return predecessors
+
+
+def _evolution_sources(
+    evolutions_df: pd.DataFrame | None,
+    in_go: set[int],
+) -> set[int]:
+    evolving: set[int] = set()
+    if evolutions_df is None or evolutions_df.empty or not in_go:
+        return evolving
+    total = len(evolutions_df)
+    sources = (
+        evolutions_df["source_dex_number"].tolist()
+        if "source_dex_number" in evolutions_df.columns
+        else [None] * total
+    )
+    targets = (
+        evolutions_df["target_dex_number"].tolist()
+        if "target_dex_number" in evolutions_df.columns
+        else [None] * total
+    )
+    for source_raw, target_raw in zip(sources, targets, strict=True):
+        source = _evolution_positive_dex(source_raw)
+        target = _evolution_positive_dex(target_raw)
+        if source is None or target is None or source == target:
+            continue
+        if source not in in_go or target not in in_go:
+            continue
+        evolving.add(source)
+    return evolving
+
+
+def _source_display_name(catalog_name: str, forms: list[str]) -> str:
+    cleaned = [_text_or_blank(form) for form in forms]
+    if cleaned and all(cleaned) and len(set(cleaned)) == 1:
+        return f"{cleaned[0]} {catalog_name}".strip()
+    return catalog_name
+
+
+def _nearest_registered_ancestor(
+    start: int,
+    registered: set[int],
+    predecessors: dict[int, list[tuple[int, str]]],
+    names: dict[int, str],
+) -> tuple[int, str] | None:
+    """Nearest registered pre-evolution. Distance wins, then lower source dex.
+
+    Registered ancestors are not expanded, so a path does not continue past them.
+    The rest of that BFS level still runs, and a nearer ancestor on another branch wins.
+    """
+    queue: deque[int] = deque([start])
+    distance: dict[int, int] = {start: 0}
+    hop_forms: dict[int, list[str]] = {}
+    best: tuple[int, int] | None = None
+
+    while queue:
+        node = queue.popleft()
+        node_distance = distance[node]
+        if best is not None and node_distance > best[0]:
+            break
+        if node != start and node in registered:
+            candidate = (node_distance, node)
+            if best is None or candidate < best:
+                best = candidate
+            continue
+        grouped: dict[int, list[str]] = {}
+        for source, form in predecessors.get(node, []):
+            grouped.setdefault(source, []).append(form)
+        for source in sorted(grouped):
+            next_distance = node_distance + 1
+            if source not in distance:
+                distance[source] = next_distance
+                hop_forms[source] = list(grouped[source])
+                queue.append(source)
+            elif distance[source] == next_distance:
+                hop_forms.setdefault(source, []).extend(grouped[source])
+
+    if best is None:
+        return None
+    _ancestor_distance, ancestor = best
+    display = _source_display_name(names.get(ancestor, ""), hop_forms.get(ancestor, []))
+    return ancestor, display
+
+
+def _species_fill_path(
+    dex: int,
+    missing_kinds: list[tuple[str, str]],
+    registered_by_kind: dict[str, set[int]],
+    predecessors: dict[int, list[tuple[int, str]]],
+    names: dict[int, str],
+) -> tuple[str, str, bool]:
+    """Return the fill sentence, evolution-reachable kind keys, and purify reachability.
+
+    Mega and G-Max are never evolution fills. Purify fills only a missing purified kind.
+    """
+    grouped: dict[tuple[int, str], list[tuple[str, str]]] = {}
+    for kind, label in missing_kinds:
+        if kind not in _ATLAS_KIND_ORDER:
+            continue
+        hit = _nearest_registered_ancestor(dex, registered_by_kind.get(kind, set()), predecessors, names)
+        if hit is None:
+            continue
+        source_dex, display = hit
+        grouped.setdefault((source_dex, display), []).append((kind, label))
+
+    sentences: list[str] = []
+    reached: list[str] = []
+    for source_dex, display in sorted(grouped):
+        items = sorted(grouped[(source_dex, display)], key=lambda item: _ATLAS_KIND_ORDER[item[0]])
+        reached.extend(kind for kind, _label in items)
+        label_text = ", ".join(_ATLAS_KIND_LABELS[kind] for kind, _label in items)
+        sentences.append(f"Via evolution from {display}: {label_text}")
+
+    purify_reachable = False
+    purified_missing = any(kind == "purified" for kind, _label in missing_kinds)
+    if purified_missing:
+        if dex in registered_by_kind.get("shadow", set()):
+            sentences.append("Via purify")
+            purify_reachable = True
+        elif "purified" not in reached:
+            shadow_hit = _nearest_registered_ancestor(
+                dex,
+                registered_by_kind.get("shadow", set()),
+                predecessors,
+                names,
+            )
+            if shadow_hit is not None:
+                sentences.append(f"Via purify from {shadow_hit[1]}, then evolve")
+                purify_reachable = True
+    return ". ".join(sentences), ",".join(reached), purify_reachable
+
+
+def _alias_path_filter(value: object) -> str:
+    if value is None:
+        return "any"
+    text = str(value).strip().lower()
+    aliases = {
+        "": "any",
+        "any": "any",
+        "all": "any",
+        "blank": "any",
+        "evolution": "evolution",
+        "via evolution": "evolution",
+        "purify": "purify",
+        "via purify": "purify",
+        "either": "either",
+        "via evolution or purify": "either",
+        "both": "either",
+    }
+    return aliases.get(text, "any")
+
+
+def _path_matches(evolution_kinds: object, purify_reachable: object, path_key: str, kind_key: str) -> bool:
+    if path_key == "any":
+        return True
+    kinds = {part for part in str(evolution_kinds or "").split(",") if part}
+    evolution_match = bool(kinds) if kind_key == "any" else kind_key in kinds
+    purify_match = bool(purify_reachable) and kind_key in {"any", "purified"}
+    if path_key == "evolution":
+        return evolution_match
+    if path_key == "purify":
+        return purify_match
+    if path_key == "either":
+        return evolution_match or purify_match
+    return True
+
+
+def _filter_cards_by_path(cards: pd.DataFrame, path_filter: object, kind_key: str) -> pd.DataFrame:
+    path_key = _alias_path_filter(path_filter)
+    if path_key == "any" or cards.empty:
+        return cards
+    mask = [
+        _path_matches(evolution_kinds, purify_reachable, path_key, kind_key)
+        for evolution_kinds, purify_reachable in zip(
+            cards["_evolution_kinds"].tolist(),
+            cards["_purify_reachable"].tolist(),
+            strict=True,
+        )
+    ]
+    return cards.loc[pd.Series(mask, index=cards.index)].copy()
+
+
 def build_pokedex_atlas_cards(
     catalog_df: pd.DataFrame,
     species_df: pd.DataFrame,
@@ -1331,19 +2102,32 @@ def build_pokedex_atlas_cards(
     as_of_date: object | None = None,
     entry_type: object | None = None,
     release_overrides: dict[int, str] | None = None,
+    evolutions_df: pd.DataFrame | None = None,
+    path_filter: object | None = None,
 ) -> pd.DataFrame:
     # entry_type is ignored. kind_filter and state_filter select cards.
     # When both are omitted, status_filter keeps the previous single-status behavior.
+    # evolutions_df and path_filter are optional; omitted arguments leave existing callers unchanged.
     _ = entry_type
     cols = _atlas_card_columns()
     normalized_overrides = _normalize_release_overrides(release_overrides)
     if catalog_df.empty or "dex_number" not in catalog_df.columns:
         return pd.DataFrame(columns=cols)
+    full_catalog = _prepare_atlas_catalog(catalog_df, None)
     region_key = str(region or "").strip().lower()
     region_filter = None if not region_key or region_key == "overall" else [region_key]
-    catalog = _prepare_atlas_catalog(catalog_df, region_filter)
+    catalog = _prepare_atlas_catalog(full_catalog, region_filter)
     if catalog.empty:
         return pd.DataFrame(columns=cols)
+    ancestor_names = _catalog_names(full_catalog)
+    predecessors = _evolution_predecessors(evolutions_df, _in_go_dex_numbers(full_catalog))
+    evolution_sources = _evolution_sources(evolutions_df, _in_go_dex_numbers(full_catalog))
+    availability_df = effective_category_availability(
+        availability_df,
+        evolutions=evolutions_df,
+        in_go=_in_go_dex_numbers(full_catalog),
+        names=ancestor_names,
+    )
 
     kind_ids = [kind for kind, _label in ATLAS_ENTRY_KINDS]
     targets = _atlas_targets_by_kind(catalog, availability_df, kind_ids)
@@ -1400,16 +2184,26 @@ def build_pokedex_atlas_cards(
     missing_kind_values: list[str] = []
     category_available: list[bool] = []
     per_kind_values: dict[str, list[object]] = {kind: [] for kind in kind_ids}
+    caught_by_kind: dict[str, list[bool]] = {kind: [] for kind in kind_ids}
+    caught_gmax_values: list[bool] = []
+    unreleased_kind_values: list[str] = []
+    mega_host_values: list[bool] = []
+    gmax_host_values: list[bool] = []
     mega_form_values: list[str] = []
     registered_mega_form_values: list[str] = []
     registered_mega_values: list[object] = []
     registered_gmax_values: list[object] = []
     form_search_values: list[str] = []
+    fill_paths: list[str] = []
+    evolution_kind_values: list[str] = []
+    purify_reachable_values: list[bool] = []
     for dex, species_in_go in zip(cards["dex_number"].astype(int).tolist(), in_go.tolist(), strict=True):
         missing_labels: list[str] = []
+        missing_evolution: list[tuple[str, str]] = []
         available_kinds = 0
         registered_kinds = 0
         for kind, label in ATLAS_ENTRY_KINDS:
+            caught_by_kind[kind].append(dex in registered_by_kind[kind])
             kind_available = bool(species_in_go) and dex in targets.get(kind, set())
             if not kind_available:
                 per_kind_values[kind].append(pd.NA)
@@ -1421,6 +2215,7 @@ def build_pokedex_atlas_cards(
                 registered_kinds += 1
             else:
                 missing_labels.append(label)
+                missing_evolution.append((kind, label))
         species_mega_forms = list(mega_forms_by_dex.get(dex, [])) if species_in_go else []
         registered_forms = [
             form for form in species_mega_forms if form.casefold() in registered_mega.get(dex, set())
@@ -1445,6 +2240,24 @@ def build_pokedex_atlas_cards(
                 registered_gmax_values.append(False)
         else:
             registered_gmax_values.append(pd.NA)
+        caught_gmax_values.append(dex in registered_gmax)
+        mega_host = bool(species_in_go) and (dex not in evolution_sources or bool(species_mega_forms))
+        gmax_host = bool(species_in_go) and (dex not in evolution_sources or gmax_available)
+        mega_host_values.append(mega_host)
+        gmax_host_values.append(gmax_host)
+        if species_in_go:
+            unreleased_labels: list[str] = []
+            if dex not in targets.get("shiny", set()):
+                unreleased_labels.append("Shiny")
+            if dex not in targets.get("shadow", set()):
+                unreleased_labels.append("Shadow")
+            if mega_host and not species_mega_forms:
+                unreleased_labels.append("Mega")
+            if gmax_host and not gmax_available:
+                unreleased_labels.append("G-Max")
+            unreleased_kind_values.append(", ".join(unreleased_labels))
+        else:
+            unreleased_kind_values.append("")
         mega_form_values.append(json.dumps(species_mega_forms))
         registered_mega_form_values.append(json.dumps(registered_forms))
         search_bits = [mega_badge_label(form) for form in species_mega_forms]
@@ -1472,11 +2285,24 @@ def build_pokedex_atlas_cards(
         release_override_values.append(override)
         missing_kind_values.append(missing_text)
         category_available.append(bool(available_kinds))
+        fill_path, reached_kinds, purify_reachable = _species_fill_path(
+            dex,
+            missing_evolution,
+            registered_by_kind,
+            predecessors,
+            ancestor_names,
+        )
+        fill_paths.append(fill_path)
+        evolution_kind_values.append(reached_kinds)
+        purify_reachable_values.append(purify_reachable)
 
     cards["status"] = statuses
     cards["status_label"] = status_labels
     cards["release_override"] = release_override_values
     cards["missing_kinds"] = missing_kind_values
+    cards["fill_path"] = fill_paths
+    cards["_evolution_kinds"] = evolution_kind_values
+    cards["_purify_reachable"] = purify_reachable_values
     cards["category_available"] = category_available
     cards["registered"] = [status == "registered" for status in statuses]
     cards["mega_forms"] = mega_form_values
@@ -1486,6 +2312,11 @@ def build_pokedex_atlas_cards(
     cards["form_search"] = form_search_values
     for kind in kind_ids:
         cards[f"registered_{kind}"] = pd.array(per_kind_values[kind], dtype="boolean")
+        cards[f"caught_{kind}"] = caught_by_kind[kind]
+    cards["caught_gmax"] = caught_gmax_values
+    cards["unreleased_kinds"] = unreleased_kind_values
+    cards["mega_host"] = mega_host_values
+    cards["gmax_host"] = gmax_host_values
 
     query = normalize_pokemon_name(search)
     if query:
@@ -1497,11 +2328,14 @@ def build_pokedex_atlas_cards(
             + cards["dex_number"].astype(str)
             + " "
             + cards["form_search"].map(normalize_pokemon_name)
+            + " "
+            + cards["fill_path"].map(normalize_pokemon_name)
         )
         cards = cards[haystack.str.contains(query, regex=False)].copy()
 
     kind_key, state_key = _resolved_kind_state(kind_filter, state_filter, status_filter)
     cards = _filter_atlas_cards(cards, kind_key, state_key)
+    cards = _filter_cards_by_path(cards, path_filter, kind_key)
     return cards[cols].sort_values("dex_number").reset_index(drop=True)
 
 
@@ -1602,8 +2436,18 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
                 event_label += f" ({escape(last_event_date)})"
             extra_bits.append(f'<span class="pogo-dex-extra">Last event: {event_label}</span>')
         extras = "".join(extra_bits)
+        fill_path = str(row.get("fill_path") or "").strip()
+        path_html = f'<span class="pogo-dex-path">{escape(fill_path)}</span>' if fill_path else ""
+        unreleased_text = _text_or_blank(row.get("unreleased_kinds"))
+        unreleased_html = ""
+        if unreleased_text:
+            unreleased_html = (
+                '<div class="pogo-dex-status pogo-dex-status--unreleased">'
+                f"Not released: {escape(unreleased_text)}</div>"
+            )
         parts.append(
             (
+                f'<a class="pogo-dex-card-link" href="#atlas-dex-{dex}" data-atlas-dex="{dex}">'
                 f'<article class="pogo-dex-card pogo-dex-card--{escape(status, quote=True)} '
                 f'pogo-dex-card-type--{escape(type_1 or "normal", quote=True)}">'
                 f'<img class="pogo-dex-art" src="{sprite}" alt="{name}" loading="lazy">'
@@ -1612,8 +2456,11 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
                 f'<div class="pogo-dex-german">{german}</div>'
                 f'<div class="pogo-dex-types">{type_chips}</div>'
                 f'<div class="pogo-dex-status">{escape(badge)}</div>'
+                f"{unreleased_html}"
+                f"{path_html}"
                 f"{extras}"
                 "</article>"
+                "</a>"
             )
         )
     parts.append("</div>")
