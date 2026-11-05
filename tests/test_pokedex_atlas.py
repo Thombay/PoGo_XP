@@ -1063,7 +1063,7 @@ class PokedexAtlasTest(unittest.TestCase):
             kind_filter="shiny",
             state_filter="any",
         )
-        self.assertEqual(shiny_any["dex_number"].tolist(), [25, 83])
+        self.assertEqual(shiny_any["dex_number"].tolist(), [1, 25, 83])
         mega_any = build_pokedex_atlas_cards(
             catalog,
             species,
@@ -1073,7 +1073,40 @@ class PokedexAtlasTest(unittest.TestCase):
             kind_filter="mega",
             state_filter="any",
         )
-        self.assertEqual(mega_any["dex_number"].tolist(), [])
+        self.assertEqual(mega_any["dex_number"].tolist(), [1, 25, 83])
+
+    def test_release_filter_after_kind_state_mirrors_dashboard(self):
+        catalog = pd.DataFrame(
+            [
+                _mon(1, "Bulbasaur", "kanto", "yes"),
+                _mon(25, "Pikachu", "kanto", "yes"),
+                _mon(387, "Turtwig", "sinnoh", "no"),
+            ]
+        )
+        release_overrides = {25: "YES", 1: "maybe"}
+        cards = build_pokedex_atlas_cards(
+            catalog,
+            pd.DataFrame(),
+            account="Thombay",
+            region=None,
+            release_overrides=release_overrides,
+            kind_filter="pokemon",
+            state_filter="any",
+        )
+        self.assertEqual(cards["dex_number"].tolist(), [1, 25, 387])
+
+        self.assertEqual(
+            filter_atlas_cards_by_release(cards, "any")["dex_number"].tolist(),
+            [1, 25, 387],
+        )
+        self.assertEqual(
+            filter_atlas_cards_by_release(cards, "not in go")["dex_number"].tolist(),
+            [387],
+        )
+        self.assertEqual(
+            filter_atlas_cards_by_release(cards, "manual override")["dex_number"].tolist(),
+            [25],
+        )
 
     def test_overall_cards_include_every_catalog_region(self):
         catalog = pd.DataFrame(

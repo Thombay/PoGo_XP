@@ -2362,7 +2362,7 @@ def _atlas_released_mask(cards: pd.DataFrame) -> pd.Series:
 
 
 def _filter_atlas_cards(cards: pd.DataFrame, kind: str, state: str) -> pd.DataFrame:
-    if cards.empty or (kind == "any" and state == "any"):
+    if cards.empty or state == "any":
         return cards
     if state == "restricted":
         mask = cards["location_restriction"].astype(str).str.strip() != ""
@@ -2399,7 +2399,9 @@ def _kind_state_mask(cards: pd.DataFrame, kind: str, state: str) -> pd.Series:
         return states.map(lambda item: item is True)
     if state in {"unavailable", "not available"}:
         return states.map(lambda item: item is None)
-    if state in {"any", "available"}:
+    if state == "any":
+        return pd.Series(True, index=cards.index)
+    if state == "available":
         return states.map(lambda item: item is not None)
     return pd.Series(False, index=cards.index)
 

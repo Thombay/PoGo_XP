@@ -1115,7 +1115,7 @@ def _render_atlas_view(
         else set()
     )
     region_options = [region for region in region_options if not catalog_regions or region in catalog_regions] or region_options
-    default_region = "kanto" if "kanto" in region_options else (region_options[0] if region_options else "overall")
+    default_region = "overall"
     region_options = ["overall", *region_options]
 
     def atlas_region_label(value: object) -> str:
