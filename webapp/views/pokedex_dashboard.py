@@ -33,6 +33,8 @@ from webapp.atlas_card_events import atlas_card_event, atlas_card_event_dex
 from webapp.pokedex import (
     ATLAS_COMPARISON_KINDS,
     ATLAS_ENTRY_KINDS,
+    TRADE_ENTRY_KINDS,
+    annotate_trade_sources,
     build_pokedex_atlas_cards,
     build_species_missing_summary,
     build_species_progress_rows,
@@ -1059,6 +1061,7 @@ def _open_selected_atlas_registration(
     account: object,
     as_of_date: object,
     availability_df: pd.DataFrame,
+    fallback_cards: pd.DataFrame | None = None,
 ) -> None:
     event = atlas_card_event()
     dex = atlas_card_event_dex(event)
@@ -1071,6 +1074,8 @@ def _open_selected_atlas_registration(
         _clear_atlas_registration_dialog_state()
         return
     card = _atlas_card_for_dex(cards, dex)
+    if card is None and fallback_cards is not None:
+        card = _atlas_card_for_dex(fallback_cards, dex)
     if card is None:
         st.session_state[_ATLAS_CARD_DISMISSED_NONCE_KEY] = nonce
         _clear_atlas_registration_dialog_state()
@@ -1086,6 +1091,67 @@ def _open_selected_atlas_registration(
         save_date=save_date,
         availability_df=availability_df,
     )
+
+
+def _rows_with_trade_sources(cards: pd.DataFrame) -> pd.DataFrame:
+    if "trade_sources" not in cards.columns:
+        return cards.iloc[0:0].copy()
+    keep = cards["trade_sources"].map(_text_key).ne("")
+    return cards.loc[keep].copy()
+
+
+def _atlas_kind_transfers_in_trade(kind_filter: object) -> bool:
+    kind = str(kind_filter).strip().casefold()
+    if kind == "any":
+        return True
+    trade_kind_ids = {str(kind_id).strip().casefold() for kind_id, _label in TRADE_ENTRY_KINDS}
+    return kind in trade_kind_ids
+
+
+def _atlas_trade_cards(
+    pokemon_catalog_df: pd.DataFrame,
+    species_df: pd.DataFrame,
+    *,
+    account: object,
+    region: object,
+    availability_df: pd.DataFrame,
+    search: object,
+    as_of_date: object,
+    release_overrides: dict[int, str],
+    evolutions_df: pd.DataFrame,
+    release_filter: object,
+    kind_filter: object,
+) -> pd.DataFrame:
+    # State and fill stay on the main grid so a Registered or Via evolution view still lists trades.
+    if release_filter == "override":
+        card_region = "overall"
+        release_key = "manual override"
+    else:
+        card_region = region
+        release_key = release_filter
+    trade_cards = build_pokedex_atlas_cards(
+        pokemon_catalog_df,
+        species_df,
+        account=account,
+        region=card_region,
+        availability_df=availability_df,
+        search=search,
+        kind_filter="any",
+        state_filter="any",
+        as_of_date=as_of_date,
+        release_overrides=release_overrides,
+        evolutions_df=evolutions_df,
+        path_filter="any",
+    )
+    trade_cards = filter_atlas_cards_by_release(trade_cards, release_key)
+    annotated = annotate_trade_sources(
+        trade_cards,
+        species_df,
+        account=account,
+        as_of_date=as_of_date,
+        kind=kind_filter,
+    )
+    return _rows_with_trade_sources(annotated)
 
 
 def _render_atlas_view(
@@ -1144,6 +1210,7 @@ def _render_atlas_view(
         "evolution": "Via evolution",
         "purify": "Via purify",
         "either": "Via evolution or purify",
+        "trade": "Via trade",
     }
     atlas_col_account, atlas_col_region = st.columns([1.1, 1.4])
     atlas_account = atlas_col_account.selectbox(
@@ -1184,7 +1251,10 @@ def _render_atlas_view(
         key="pokedex_dashboard_atlas_path",
     )
     if release_filter != "override":
-        st.caption("Fill uses registered checklist entries. One Pokémon can only take one evolution branch.")
+        st.caption(
+            "Fill uses registered checklist entries. One Pokémon can only take one evolution branch. "
+            "Via trade lists kinds another account has registered."
+        )
     search = st.text_input("Search name, dex number, or form", key="pokedex_dashboard_atlas_search")
 
     region_counts = build_species_region_counts(
@@ -1244,12 +1314,49 @@ def _render_atlas_view(
     st.caption(f"Showing {len(cards):,}")
     st.caption("Click a card to edit that species' registration.")
     st.markdown(pokedex_atlas_html(cards), unsafe_allow_html=True)
+    # Via trade already narrows the grid above, so the group below would repeat those cards.
+    show_trade_group = path_filter != "trade" or release_filter == "override"
+    trade_cards = (
+        _atlas_trade_cards(
+            pokemon_catalog_df,
+            species_df,
+            account=atlas_account,
+            region=atlas_region,
+            availability_df=availability_df,
+            search=search,
+            as_of_date=as_of_date,
+            release_overrides=release_overrides,
+            evolutions_df=evolutions_df,
+            release_filter=release_filter,
+            kind_filter=kind_filter,
+        )
+        if show_trade_group
+        else None
+    )
     _open_selected_atlas_registration(
         cards,
         account=atlas_account,
         as_of_date=as_of_date,
         availability_df=availability_df,
+        fallback_cards=trade_cards,
     )
+    if show_trade_group:
+        st.subheader("Obtainable via trade", anchor=False)
+        st.caption(
+            "A checked entry means that account has the kind registered. "
+            "It does not mean a spare is still in storage."
+        )
+        st.caption(
+            "Shadow cannot be traded. A 100% has its IVs rerolled, so it does not arrive as a 100%. "
+            "Mega registration does not transfer."
+        )
+        if not _atlas_kind_transfers_in_trade(kind_filter):
+            st.caption("This kind does not transfer in a trade.")
+        elif trade_cards is None or trade_cards.empty:
+            st.caption("Nothing missing here is registered on another account.")
+        else:
+            st.caption(f"Showing {len(trade_cards):,}")
+            st.markdown(pokedex_atlas_html(trade_cards), unsafe_allow_html=True)
 
     region_name = atlas_region_label(atlas_region)
     if release_filter == "override":

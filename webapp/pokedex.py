@@ -41,6 +41,21 @@ ATLAS_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
     ("shadow", "Shadow"),
     ("purified", "Purified"),
 )
+# Kinds another account can trade in. Shadow, 100%, and Mega are not tradeable.
+TRADE_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
+    ("pokemon", "Pokemon"),
+    ("shiny", "Shiny"),
+    ("lucky", "Lucky"),
+    ("xxl", "XXL"),
+    ("xxs", "XXS"),
+    ("purified", "Purified"),
+    ("gmax", "G-Max"),
+)
+# g-max and gigantamax select G-Max. 100% is hundo and is intentionally absent.
+_TRADE_KIND_ALIASES: dict[str, str] = {
+    "g-max": "gmax",
+    "gigantamax": "gmax",
+}
 ATLAS_COMPARISON_KINDS: tuple[tuple[str, str], ...] = ATLAS_ENTRY_KINDS + (
     ("gmax", "G-Max"),
     ("mega", "Mega"),
@@ -2054,6 +2069,8 @@ def _alias_path_filter(value: object) -> str:
         "either": "either",
         "via evolution or purify": "either",
         "both": "either",
+        "trade": "trade",
+        "via trade": "trade",
     }
     return aliases.get(text, "any")
 
@@ -2073,10 +2090,52 @@ def _path_matches(evolution_kinds: object, purify_reachable: object, path_key: s
     return True
 
 
+def _trade_fill_sentence(trade_sources: object) -> str:
+    if _atlas_registered_is_blank(trade_sources):
+        return ""
+    lines = [line.strip() for line in str(trade_sources).split("\n") if line.strip()]
+    if not lines:
+        return ""
+    return ". ".join(f"Via trade from {line}" for line in lines)
+
+
+def _merge_trade_fill_paths(cards: pd.DataFrame) -> pd.DataFrame:
+    """Append donor lines to fill_path so Fill and the name search can find trades."""
+    if "trade_sources" not in cards.columns or "fill_path" not in cards.columns or cards.empty:
+        return cards
+    merged: list[str] = []
+    for existing, extra in zip(cards["fill_path"].tolist(), cards["trade_sources"].map(_trade_fill_sentence).tolist(), strict=True):
+        base = "" if _atlas_registered_is_blank(existing) else str(existing).strip()
+        extra_text = "" if _atlas_registered_is_blank(extra) else str(extra).strip()
+        if base and extra_text:
+            merged.append(f"{base}. {extra_text}")
+        else:
+            merged.append(base or extra_text)
+    cards["fill_path"] = merged
+    return cards
+
+
+def _display_fill_path(fill_path: object, *, hide_trade: bool) -> str:
+    text = "" if _atlas_registered_is_blank(fill_path) else str(fill_path).strip()
+    if not text or not hide_trade:
+        return text
+    kept = [
+        part.strip()
+        for part in text.split(". ")
+        if part.strip() and not part.strip().casefold().startswith("via trade from ")
+    ]
+    return ". ".join(kept)
+
+
 def _filter_cards_by_path(cards: pd.DataFrame, path_filter: object, kind_key: str) -> pd.DataFrame:
     path_key = _alias_path_filter(path_filter)
     if path_key == "any" or cards.empty:
         return cards
+    if path_key == "trade":
+        if "trade_sources" not in cards.columns:
+            return cards.iloc[0:0].copy()
+        text = cards["trade_sources"].map(_trade_fill_sentence)
+        return cards.loc[text.ne("")].copy()
     mask = [
         _path_matches(evolution_kinds, purify_reachable, path_key, kind_key)
         for evolution_kinds, purify_reachable in zip(
@@ -2318,6 +2377,16 @@ def build_pokedex_atlas_cards(
     cards["mega_host"] = mega_host_values
     cards["gmax_host"] = gmax_host_values
 
+    kind_key, state_key = _resolved_kind_state(kind_filter, state_filter, status_filter)
+    cards = annotate_trade_sources(
+        cards,
+        species_df,
+        account=account,
+        as_of_date=as_of_date,
+        kind=kind_key,
+    )
+    cards = _merge_trade_fill_paths(cards)
+
     query = normalize_pokemon_name(search)
     if query:
         haystack = (
@@ -2333,7 +2402,6 @@ def build_pokedex_atlas_cards(
         )
         cards = cards[haystack.str.contains(query, regex=False)].copy()
 
-    kind_key, state_key = _resolved_kind_state(kind_filter, state_filter, status_filter)
     cards = _filter_atlas_cards(cards, kind_key, state_key)
     cards = _filter_cards_by_path(cards, path_filter, kind_key)
     return cards[cols].sort_values("dex_number").reset_index(drop=True)
@@ -2406,6 +2474,202 @@ def _kind_state_mask(cards: pd.DataFrame, kind: str, state: str) -> pd.Series:
     return pd.Series(False, index=cards.index)
 
 
+def _selected_trade_entry_kinds(kind: object) -> list[tuple[str, str]] | None:
+    if kind is None or _atlas_registered_is_blank(kind):
+        return list(TRADE_ENTRY_KINDS)
+    text = str(kind).strip().casefold()
+    if text in {"", "any", "all"}:
+        return list(TRADE_ENTRY_KINDS)
+    resolved = _TRADE_KIND_ALIASES.get(text, text)
+    for kind_id, label in TRADE_ENTRY_KINDS:
+        if resolved == kind_id or resolved == label.casefold():
+            return [(kind_id, label)]
+    return None
+
+
+# Preferred donor order. Every other account in the species rows can still donate.
+_TRADE_DONOR_SORT_RANK: dict[str, int] = {
+    "thombay": 0,
+    "cerius": 1,
+    "thomzay": 2,
+}
+
+
+def _trade_account_key(account: object) -> str:
+    return _text_or_blank(account).casefold()
+
+
+def _trade_donor_sort_key(name: str) -> tuple[int, str]:
+    key = name.casefold()
+    return (_TRADE_DONOR_SORT_RANK.get(key, len(_TRADE_DONOR_SORT_RANK)), key)
+
+
+def _trade_account_spellings(species_df: pd.DataFrame, as_of_date: object | None = None) -> dict[str, str]:
+    """Map each case-insensitive account to the spelling on its latest species row."""
+    if (
+        not isinstance(species_df, pd.DataFrame)
+        or species_df.empty
+        or not {"account", "date"}.issubset(species_df.columns)
+    ):
+        return {}
+    spelling = [_text_or_blank(value) for value in species_df["account"].tolist()]
+    frame = pd.DataFrame(
+        {
+            "key": [value.casefold() for value in spelling],
+            "spelling": spelling,
+            "date": pd.to_datetime(species_df["date"], errors="coerce").tolist(),
+            "pos": range(len(spelling)),
+        }
+    )
+    frame = frame.loc[frame["key"].ne("") & frame["date"].notna()]
+    as_of = pd.to_datetime(as_of_date, errors="coerce") if as_of_date is not None else pd.NaT
+    if pd.notna(as_of):
+        frame = frame.loc[frame["date"] <= pd.Timestamp(as_of)]
+    if frame.empty:
+        return {}
+    frame = frame.sort_values(["key", "date", "pos"], na_position="first")
+    latest = frame.groupby("key", sort=False).tail(1)
+    return dict(zip(latest["key"].tolist(), latest["spelling"].tolist(), strict=True))
+
+
+def _species_with_trade_account_spellings(species_df: pd.DataFrame, spellings: dict[str, str]) -> pd.DataFrame:
+    if species_df.empty or "account" not in species_df.columns or not spellings:
+        return species_df
+    rows = species_df.copy()
+    rows["account"] = rows["account"].map(
+        lambda value: spellings.get(_trade_account_key(value), _text_or_blank(value))
+    )
+    return rows
+
+
+def _trade_donors_for_account(
+    species_df: pd.DataFrame,
+    account: object,
+    as_of_date: object | None = None,
+) -> list[str]:
+    viewer = _trade_account_key(account)
+    names = [
+        spelling
+        for key, spelling in _trade_account_spellings(species_df, as_of_date).items()
+        if key and key != viewer
+    ]
+    names.sort(key=_trade_donor_sort_key)
+    return names
+
+
+def _trade_value_is_true(value: object) -> bool:
+    if _atlas_registered_is_blank(value):
+        return False
+    try:
+        return bool(value) is True
+    except (TypeError, ValueError):
+        return False
+
+
+def _trade_kind_is_missing(value: object) -> bool:
+    if _atlas_registered_is_blank(value):
+        return False
+    try:
+        return bool(value) is False
+    except (TypeError, ValueError):
+        return False
+
+
+def _registered_trade_donor_kinds(
+    species_df: pd.DataFrame,
+    donors: Sequence[str],
+    kinds: Sequence[tuple[str, str]],
+    as_of_date: object | None,
+) -> set[tuple[str, int, str]]:
+    owned: set[tuple[str, int, str]] = set()
+    if not isinstance(species_df, pd.DataFrame) or not donors or not kinds:
+        return owned
+    latest = latest_pokedex_species_state(
+        species_df,
+        accounts=list(donors),
+        entry_types=[kind_id for kind_id, _label in kinds],
+        as_of_date=as_of_date,
+    )
+    if latest.empty:
+        return owned
+    canonical = {name.casefold(): name for name in donors}
+    selected = {kind_id for kind_id, _label in kinds}
+    for row in latest.itertuples(index=False):
+        if _text_or_blank(getattr(row, "form", "")):
+            continue
+        if not _trade_value_is_true(getattr(row, "registered", False)):
+            continue
+        donor = canonical.get(str(getattr(row, "account", "") or "").strip().casefold())
+        kind_id = str(getattr(row, "entry_type", "") or "").strip().casefold()
+        dex = _evolution_positive_dex(getattr(row, "dex_number", None))
+        if donor is None or kind_id not in selected or dex is None:
+            continue
+        owned.add((donor, dex, kind_id))
+    return owned
+
+
+def annotate_trade_sources(
+    cards: pd.DataFrame,
+    species_df: pd.DataFrame,
+    *,
+    account: object,
+    as_of_date: object | None = None,
+    kind: object = "any",
+) -> pd.DataFrame:
+    out = cards.copy()
+    if out.empty:
+        out["trade_sources"] = ""
+        return out
+    kinds = _selected_trade_entry_kinds(kind)
+    donors = _trade_donors_for_account(species_df, account, as_of_date)
+    if not kinds or not donors:
+        out["trade_sources"] = ""
+        return out
+    spellings = {name.casefold(): name for name in donors}
+    owned = _registered_trade_donor_kinds(
+        _species_with_trade_account_spellings(species_df, spellings),
+        donors,
+        kinds,
+        as_of_date,
+    )
+    dex_values = out["dex_number"].tolist() if "dex_number" in out.columns else [None] * len(out)
+    missing_flags: dict[str, list[bool]] = {}
+    for kind_id, _label in kinds:
+        column = _kind_registered_column(kind_id)
+        if column in out.columns:
+            missing_flags[kind_id] = [_trade_kind_is_missing(value) for value in out[column].tolist()]
+        else:
+            missing_flags[kind_id] = [False] * len(out)
+    texts: list[str] = []
+    for row_index, dex_value in enumerate(dex_values):
+        dex = _evolution_positive_dex(dex_value)
+        lines: list[str] = []
+        if dex is not None:
+            for donor in donors:
+                labels = [
+                    label
+                    for kind_id, label in kinds
+                    if missing_flags[kind_id][row_index] and (donor, dex, kind_id) in owned
+                ]
+                if labels:
+                    lines.append(f"{donor}: {', '.join(labels)}")
+        texts.append("\n".join(lines))
+    out["trade_sources"] = texts
+    return out
+
+
+def _atlas_trade_status_lines(row: pd.Series) -> list[str]:
+    if "trade_sources" not in row.index:
+        return []
+    raw = row["trade_sources"]
+    if _atlas_registered_is_blank(raw):
+        return []
+    text = str(raw).strip()
+    if not text:
+        return []
+    return [line.strip() for line in text.split("\n") if line.strip()]
+
+
 def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
     if cards_df.empty:
         return '<div class="pogo-dex-empty">No Pokemon match the current Atlas filters.</div>'
@@ -2421,6 +2685,13 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
         badge = str(row.get("status_label") or "").strip()
         if not badge:
             badge = status.replace("_", " ").title()
+        trade_lines = _atlas_trade_status_lines(row)
+        if trade_lines:
+            status_html = "".join(
+                f'<div class="pogo-dex-status">{escape(line)}</div>' for line in trade_lines
+            )
+        else:
+            status_html = f'<div class="pogo-dex-status">{escape(badge)}</div>'
         location = str(row.get("location_restriction") or "").strip()
         last_event = str(row.get("last_event") or "").strip()
         last_event_date = str(row.get("last_event_date") or "").strip()
@@ -2438,7 +2709,7 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
                 event_label += f" ({escape(last_event_date)})"
             extra_bits.append(f'<span class="pogo-dex-extra">Last event: {event_label}</span>')
         extras = "".join(extra_bits)
-        fill_path = str(row.get("fill_path") or "").strip()
+        fill_path = _display_fill_path(row.get("fill_path"), hide_trade=bool(trade_lines))
         path_html = f'<span class="pogo-dex-path">{escape(fill_path)}</span>' if fill_path else ""
         unreleased_text = _text_or_blank(row.get("unreleased_kinds"))
         unreleased_html = ""
@@ -2457,7 +2728,7 @@ def pokedex_atlas_html(cards_df: pd.DataFrame) -> str:
                 f'<div class="pogo-dex-name">{name}</div>'
                 f'<div class="pogo-dex-german">{german}</div>'
                 f'<div class="pogo-dex-types">{type_chips}</div>'
-                f'<div class="pogo-dex-status">{escape(badge)}</div>'
+                f"{status_html}"
                 f"{unreleased_html}"
                 f"{path_html}"
                 f"{extras}"

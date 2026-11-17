@@ -18,6 +18,8 @@ from webapp.atlas_card_events import atlas_card_event_dex
 from webapp.pokedex import (
     ATLAS_COMPARISON_KINDS,
     ATLAS_ENTRY_KINDS,
+    TRADE_ENTRY_KINDS,
+    annotate_trade_sources,
     apply_catalog_community_fields,
     build_category_availability_rows,
     build_missing_pokemon_rows,
@@ -166,6 +168,10 @@ def _evolutions(edges: list[tuple[int, int] | tuple[int, int, str]]) -> pd.DataF
 
 def _iso_dates(frame: pd.DataFrame) -> list[str]:
     return pd.to_datetime(frame["date"]).dt.strftime("%Y-%m-%d").tolist()
+
+
+def _trade_at(frame: pd.DataFrame, dex: int = 1) -> object:
+    return frame.set_index("dex_number").loc[dex, "trade_sources"]
 
 
 _SUMMARY_COLUMNS = [
@@ -2317,6 +2323,529 @@ class PokedexAtlasTest(unittest.TestCase):
         self.assertIn("Mega", missing)
         self.assertFalse(bool(bulbasaur["gmax_host"]))
         self.assertNotIn("G-Max", unreleased)
+
+
+
+    def test_trade_sources_lists_missing_kinds_from_donors(self):
+        self.assertEqual(
+            TRADE_ENTRY_KINDS,
+            (
+                ("pokemon", "Pokemon"),
+                ("shiny", "Shiny"),
+                ("lucky", "Lucky"),
+                ("xxl", "XXL"),
+                ("xxs", "XXS"),
+                ("purified", "Purified"),
+                ("gmax", "G-Max"),
+            ),
+        )
+        self.assertTrue({"shadow", "hundo", "mega"}.isdisjoint(kind for kind, _label in TRADE_ENTRY_KINDS))
+        catalog = _catalog_rows()
+        species = pd.DataFrame(
+            [
+                _species("Cerius", "shiny", 1),
+                _species("Thomzay", "pokemon", 1),
+                _species("Cerius", "shiny", 1025),
+            ]
+        )
+        cards = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        by_dex = cards.set_index("dex_number")
+        self.assertEqual(by_dex.loc[1, "registered_shiny"], False)
+        self.assertEqual(by_dex.loc[1, "registered_pokemon"], False)
+        self.assertTrue(pd.isna(by_dex.loc[1025, "registered_shiny"]))
+        annotated = annotate_trade_sources(cards, species, account="Thombay", kind="any")
+        self.assertNotIn("trade_sources", cards.columns)
+        self.assertEqual(len(annotated), len(cards))
+        self.assertEqual(annotated["dex_number"].tolist(), cards["dex_number"].tolist())
+        pd.testing.assert_frame_equal(cards, annotated.drop(columns=["trade_sources"]))
+        self.assertEqual(_trade_at(annotated, 1), "Cerius: Shiny\nThomzay: Pokemon")
+        self.assertEqual(_trade_at(annotated, 2), "")
+        self.assertEqual(_trade_at(annotated, 83), "")
+        self.assertEqual(_trade_at(annotated, 1025), "")
+        self.assertEqual(
+            by_dex.loc[1, "fill_path"],
+            "Via trade from Cerius: Shiny. Via trade from Thomzay: Pokemon",
+        )
+        self.assertEqual(by_dex.loc[2, "fill_path"], "")
+
+        lucky_species = pd.concat(
+            [species, pd.DataFrame([_species("Cerius", "lucky", 1)])],
+            ignore_index=True,
+        )
+        lucky = annotate_trade_sources(cards, lucky_species, account="Thombay", kind="all")
+        self.assertEqual(_trade_at(lucky, 1), "Cerius: Shiny, Lucky\nThomzay: Pokemon")
+        shiny_only = annotate_trade_sources(cards, lucky_species, account="Thombay", kind="Shiny")
+        self.assertEqual(_trade_at(shiny_only, 1), "Cerius: Shiny")
+        lucky_only = annotate_trade_sources(cards, lucky_species, account="Thombay", kind="Lucky")
+        self.assertEqual(_trade_at(lucky_only, 1), "Cerius: Lucky")
+        blank_kind = annotate_trade_sources(cards, lucky_species, account="Thombay", kind="")
+        none_kind = annotate_trade_sources(cards, lucky_species, account="Thombay", kind=None)
+        self.assertEqual(_trade_at(blank_kind, 1), _trade_at(lucky, 1))
+        self.assertEqual(_trade_at(none_kind, 1), _trade_at(lucky, 1))
+
+        ordered_species = pd.concat(
+            [
+                lucky_species,
+                pd.DataFrame(
+                    [
+                        _species("Cerius", "xxs", 1),
+                        _species("Cerius", "purified", 1),
+                        _species("Cerius", "xxl", 1),
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        ordered = annotate_trade_sources(cards, ordered_species, account="Thombay", kind="any")
+        self.assertEqual(
+            _trade_at(ordered, 1),
+            "Cerius: Shiny, Lucky, XXL, XXS, Purified\nThomzay: Pokemon",
+        )
+
+        dated = pd.DataFrame(
+            [
+                _species("Cerius", "shiny", 1, date="2026-06-01"),
+                _species("Thomzay", "pokemon", 1, date="2026-01-15"),
+            ]
+        )
+        dated_cards = build_pokedex_atlas_cards(catalog, dated, account="Thombay")
+        early = annotate_trade_sources(dated_cards, dated, account="Thombay", as_of_date="2026-03-01")
+        self.assertEqual(_trade_at(early, 1), "Thomzay: Pokemon")
+        current = annotate_trade_sources(dated_cards, dated, account="Thombay", as_of_date="2026-06-01")
+        self.assertEqual(_trade_at(current, 1), "Cerius: Shiny\nThomzay: Pokemon")
+
+    def test_fill_search_finds_trade_from_donors(self):
+        catalog = _catalog_rows()
+        species = pd.DataFrame(
+            [
+                _species("Thombay", "pokemon", 1),
+                _species("Cerius", "shiny", 1),
+                _species("Cerius", "hundo", 1),
+                _species("Cerius", "shadow", 2),
+                _species("Thomzay", "pokemon", 2),
+                _species("Cerius", "mega", 1, ),
+            ]
+        )
+        # Mega rows need a form column to stay a mega and not a blank trade kind.
+        species.loc[species["entry_type"].eq("mega"), "form"] = "X"
+        traded = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            path_filter="trade",
+        )
+        self.assertEqual(traded["dex_number"].tolist(), [1, 2])
+        by_dex = traded.set_index("dex_number")
+        self.assertEqual(by_dex.loc[1, "fill_path"], "Via trade from Cerius: Shiny")
+        self.assertNotIn("100%", by_dex.loc[1, "fill_path"])
+        self.assertNotIn("Shadow", by_dex.loc[1, "fill_path"])
+        self.assertNotIn("Mega", by_dex.loc[1, "fill_path"])
+        self.assertEqual(by_dex.loc[2, "fill_path"], "Via trade from Thomzay: Pokemon")
+        self.assertNotIn("trade_sources", traded.columns)
+
+        via_trade = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            path_filter="Via trade",
+        )
+        self.assertEqual(via_trade["dex_number"].tolist(), [1, 2])
+        searched = build_pokedex_atlas_cards(catalog, species, account="Thombay", search="trade")
+        self.assertEqual(searched["dex_number"].tolist(), [1, 2])
+        shiny = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            kind_filter="shiny",
+            path_filter="trade",
+        )
+        self.assertEqual(shiny["dex_number"].tolist(), [1])
+        self.assertEqual(shiny.loc[0, "fill_path"], "Via trade from Cerius: Shiny")
+        blocked = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            kind_filter="shadow",
+            path_filter="trade",
+        )
+        self.assertTrue(blocked.empty)
+        owned = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            kind_filter="pokemon",
+            path_filter="trade",
+        )
+        self.assertEqual(owned["dex_number"].tolist(), [2])
+
+    def test_trade_sources_omits_kinds_the_account_already_has(self):
+        catalog = _catalog_rows()
+        pokemon_only = pd.DataFrame(
+            [
+                _species("Thombay", "pokemon", 1),
+                _species("Cerius", "shiny", 1),
+                _species("Cerius", "pokemon", 1),
+                _species("Thomzay", "pokemon", 1),
+                _species("Thomzay", "shiny", 1),
+            ]
+        )
+        pokemon_cards = build_pokedex_atlas_cards(catalog, pokemon_only, account="Thombay")
+        pokemon_row = pokemon_cards.set_index("dex_number").loc[1]
+        self.assertEqual(pokemon_row["registered_pokemon"], True)
+        self.assertEqual(pokemon_row["registered_shiny"], False)
+        pokemon_annotated = annotate_trade_sources(pokemon_cards, pokemon_only, account="Thombay")
+        self.assertEqual(_trade_at(pokemon_annotated, 1), "Cerius: Shiny\nThomzay: Shiny")
+        self.assertNotIn("Pokemon", _trade_at(pokemon_annotated, 1))
+
+        species = pd.DataFrame(
+            [
+                _species("Thombay", "pokemon", 1),
+                _species("Thombay", "shiny", 1),
+                _species("Cerius", "shiny", 1),
+                _species("Cerius", "lucky", 1),
+                _species("Cerius", "pokemon", 1),
+                _species("Thomzay", "pokemon", 1),
+                _species("Thomzay", "shiny", 1),
+                _species("Thomzay", "lucky", 1),
+            ]
+        )
+        cards = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        row = cards.set_index("dex_number").loc[1]
+        self.assertEqual(row["registered_pokemon"], True)
+        self.assertEqual(row["registered_shiny"], True)
+        self.assertEqual(row["registered_lucky"], False)
+        annotated = annotate_trade_sources(cards, species, account="Thombay", kind="any")
+        self.assertEqual(_trade_at(annotated, 1), "Cerius: Lucky\nThomzay: Lucky")
+
+    def test_trade_sources_ignores_untradeable_kinds(self):
+        catalog = pd.DataFrame([_mon(1, "Bulbasaur", "kanto")])
+        cerius_mega = _species("Cerius", "mega", 1)
+        cerius_mega["form"] = "Y"
+        thomzay_mega = _species("Thomzay", "mega", 1)
+        thomzay_mega["form"] = "X"
+        formed_shiny = _species("Cerius", "shiny", 1)
+        formed_shiny["form"] = "Party Hat"
+        species = pd.DataFrame(
+            [
+                _species("Cerius", "shadow", 1),
+                _species("Cerius", "hundo", 1),
+                cerius_mega,
+                formed_shiny,
+                _species("Cerius", "lucky", 1, registered=False),
+                _species("Thomzay", "shadow", 1),
+                _species("Thomzay", "hundo", 1),
+                thomzay_mega,
+            ]
+        )
+        cards = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        annotated = annotate_trade_sources(cards, species, account="Thombay", kind="any")
+        self.assertTrue((annotated["trade_sources"] == "").all())
+
+        tradeable = pd.concat(
+            [
+                species,
+                pd.DataFrame(
+                    [
+                        _species("Cerius", "shiny", 1),
+                        _species("Thomzay", "pokemon", 1),
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        listed = annotate_trade_sources(cards, tradeable, account="Thombay", kind="any")
+        self.assertEqual(listed.loc[0, "trade_sources"], "Cerius: Shiny\nThomzay: Pokemon")
+        self.assertNotIn("Shadow", listed.loc[0, "trade_sources"])
+        self.assertNotIn("100%", listed.loc[0, "trade_sources"])
+        self.assertNotIn("Mega", listed.loc[0, "trade_sources"])
+        for kind in ("shadow", "hundo", "mega", "100%", "100", "Shadow", "Mega"):
+            blocked = annotate_trade_sources(cards, tradeable, account="Thombay", kind=kind)
+            self.assertEqual(len(blocked), len(cards))
+            self.assertTrue((blocked["trade_sources"] == "").all(), kind)
+
+        revoked = pd.DataFrame(
+            [
+                _species("Cerius", "shiny", 1, registered=True, date="2026-01-01"),
+                _species("Cerius", "shiny", 1, registered=False, date="2026-05-01"),
+                _species("Thomzay", "pokemon", 1),
+            ]
+        )
+        revoked_cards = build_pokedex_atlas_cards(catalog, revoked, account="Thombay")
+        revoked_text = annotate_trade_sources(revoked_cards, revoked, account="Thombay")
+        self.assertEqual(revoked_text.loc[0, "trade_sources"], "Thomzay: Pokemon")
+
+    def test_trade_sources_excludes_the_atlas_account(self):
+        catalog = pd.DataFrame([_mon(1, "Bulbasaur", "kanto")])
+        species = pd.DataFrame(
+            [
+                _species("Cerius", "pokemon", 1),
+                _species("Cerius", "shiny", 1),
+                _species("Thomzay", "shiny", 1),
+                _species("Thomzay", "lucky", 1),
+            ]
+        )
+        cerius_cards = build_pokedex_atlas_cards(catalog, species, account="Cerius")
+        cerius_row = cerius_cards.loc[0]
+        self.assertEqual(cerius_row["registered_pokemon"], True)
+        self.assertEqual(cerius_row["registered_shiny"], True)
+        self.assertEqual(cerius_row["registered_lucky"], False)
+        cerius_annotated = annotate_trade_sources(cerius_cards, species, account="Cerius")
+        self.assertEqual(cerius_annotated.loc[0, "trade_sources"], "Thomzay: Lucky")
+        self.assertNotIn("Cerius", cerius_annotated.loc[0, "trade_sources"])
+
+        thomzay_cards = build_pokedex_atlas_cards(catalog, species, account="Thomzay")
+        thomzay_row = thomzay_cards.loc[0]
+        self.assertEqual(thomzay_row["registered_pokemon"], False)
+        self.assertEqual(thomzay_row["registered_shiny"], True)
+        self.assertEqual(thomzay_row["registered_lucky"], True)
+        thomzay_annotated = annotate_trade_sources(thomzay_cards, species, account=" thomzay ")
+        self.assertEqual(thomzay_annotated.loc[0, "trade_sources"], "Cerius: Pokemon")
+        self.assertNotIn("Thomzay", thomzay_annotated.loc[0, "trade_sources"])
+
+        viewer_missing = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        self.assertEqual(viewer_missing.loc[0, "registered_pokemon"], False)
+        self.assertEqual(viewer_missing.loc[0, "registered_shiny"], False)
+        self.assertEqual(viewer_missing.loc[0, "registered_lucky"], False)
+        as_cerius = annotate_trade_sources(viewer_missing, species, account=" cerius ")
+        self.assertEqual(as_cerius.loc[0, "trade_sources"], "Thomzay: Shiny, Lucky")
+        self.assertNotIn("Cerius", as_cerius.loc[0, "trade_sources"])
+        as_thomzay = annotate_trade_sources(viewer_missing, species, account="  THOMZAY ")
+        self.assertEqual(as_thomzay.loc[0, "trade_sources"], "Cerius: Pokemon, Shiny")
+        self.assertNotIn("Thomzay", as_thomzay.loc[0, "trade_sources"])
+
+    def test_trade_sources_include_any_other_registered_account(self):
+        catalog = pd.DataFrame(
+            [
+                _mon(1, "Bulbasaur", "kanto"),
+                _mon(2, "Ivysaur", "kanto"),
+            ]
+        )
+        species = pd.DataFrame(
+            [
+                _species("Cerius", "pokemon", 1),
+                _species("Thombay", "shiny", 1),
+            ]
+        )
+        cards = build_pokedex_atlas_cards(catalog, species, account="Cerius")
+        by_dex = cards.set_index("dex_number")
+        self.assertEqual(by_dex.loc[1, "registered_pokemon"], True)
+        self.assertEqual(by_dex.loc[1, "registered_shiny"], False)
+        self.assertEqual(by_dex.loc[1, "fill_path"], "Via trade from Thombay: Shiny")
+        self.assertEqual(by_dex.loc[2, "fill_path"], "")
+        annotated = annotate_trade_sources(cards, species, account="Cerius")
+        self.assertEqual(_trade_at(annotated, 1), "Thombay: Shiny")
+        self.assertEqual(_trade_at(annotated, 2), "")
+        self.assertNotIn("Cerius", _trade_at(annotated, 1))
+        as_thombay = annotate_trade_sources(cards, species, account=" thombay ")
+        self.assertEqual(_trade_at(as_thombay, 1), "")
+
+        shiny = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Cerius",
+            kind_filter="shiny",
+            state_filter="missing",
+            path_filter="trade",
+        )
+        self.assertEqual(shiny["dex_number"].tolist(), [1])
+        self.assertEqual(shiny.loc[0, "fill_path"], "Via trade from Thombay: Shiny")
+        via_trade = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Cerius",
+            path_filter="Via trade",
+        )
+        self.assertEqual(via_trade["dex_number"].tolist(), [1])
+        searched = build_pokedex_atlas_cards(catalog, species, account="Cerius", search="trade")
+        self.assertEqual(searched["dex_number"].tolist(), [1])
+
+        both = pd.concat(
+            [species, pd.DataFrame([_species("Thomzay", "shiny", 1)])],
+            ignore_index=True,
+        )
+        both_cards = build_pokedex_atlas_cards(catalog, both, account="Cerius")
+        self.assertEqual(
+            both_cards.set_index("dex_number").loc[1, "fill_path"],
+            "Via trade from Thombay: Shiny. Via trade from Thomzay: Shiny",
+        )
+        both_annotated = annotate_trade_sources(both_cards, both, account="Cerius")
+        self.assertEqual(_trade_at(both_annotated, 1), "Thombay: Shiny\nThomzay: Shiny")
+
+        spaced = pd.DataFrame(
+            [
+                _species(" cerius ", "shiny", 1),
+                _species("Thombay", "pokemon", 1),
+            ]
+        )
+        spaced_cards = build_pokedex_atlas_cards(catalog, spaced, account="Cerius")
+        self.assertEqual(spaced_cards.set_index("dex_number").loc[1, "registered_shiny"], False)
+        spaced_annotated = annotate_trade_sources(spaced_cards, spaced, account="Cerius")
+        self.assertEqual(_trade_at(spaced_annotated, 1), "Thombay: Pokemon")
+        self.assertNotIn("shiny", _trade_at(spaced_annotated, 1).casefold())
+
+        stored_spelling = pd.DataFrame([_species("thombay", "shiny", 1)])
+        stored_cards = build_pokedex_atlas_cards(catalog, stored_spelling, account="Cerius")
+        self.assertEqual(
+            stored_cards.set_index("dex_number").loc[1, "fill_path"],
+            "Via trade from thombay: Shiny",
+        )
+        stored_annotated = annotate_trade_sources(stored_cards, stored_spelling, account="Cerius")
+        self.assertEqual(_trade_at(stored_annotated, 1), "thombay: Shiny")
+
+        ordered = pd.DataFrame(
+            [
+                _species("Aaron", "pokemon", 1),
+                _species("Thomzay", "pokemon", 1),
+                _species("Zeta", "pokemon", 1),
+                _species("Cerius", "pokemon", 1),
+                _species("Thombay", "pokemon", 1),
+                _species("myAlt", "pokemon", 1),
+                _species("mina", "lucky", 1),
+            ]
+        )
+        ordered_cards = build_pokedex_atlas_cards(catalog, ordered, account="Mina")
+        self.assertEqual(ordered_cards.set_index("dex_number").loc[1, "registered_pokemon"], False)
+        self.assertEqual(ordered_cards.set_index("dex_number").loc[1, "registered_lucky"], False)
+        ordered_annotated = annotate_trade_sources(ordered_cards, ordered, account="Mina")
+        self.assertEqual(
+            _trade_at(ordered_annotated, 1),
+            "\n".join(
+                [
+                    "Thombay: Pokemon",
+                    "Cerius: Pokemon",
+                    "Thomzay: Pokemon",
+                    "Aaron: Pokemon",
+                    "myAlt: Pokemon",
+                    "Zeta: Pokemon",
+                ]
+            ),
+        )
+
+        mega = _species("Thombay", "mega", 1)
+        mega["form"] = "X"
+        blocked_species = pd.DataFrame(
+            [
+                _species("Thombay", "shadow", 1),
+                _species("Thombay", "hundo", 1),
+                mega,
+            ]
+        )
+        blocked_cards = build_pokedex_atlas_cards(catalog, blocked_species, account="Cerius")
+        self.assertEqual(blocked_cards.set_index("dex_number").loc[1, "fill_path"], "")
+        blocked = annotate_trade_sources(blocked_cards, blocked_species, account="Cerius", kind="any")
+        self.assertEqual(_trade_at(blocked, 1), "")
+        for kind in ("shadow", "hundo", "mega", "100%", "100", "Shadow", "Mega"):
+            kind_rows = annotate_trade_sources(blocked_cards, blocked_species, account="Cerius", kind=kind)
+            self.assertEqual(_trade_at(kind_rows, 1), "", kind)
+
+    def test_trade_sources_replace_status_badge_html(self):
+        catalog = pd.DataFrame([_mon(1, "Bulbasaur", "kanto")])
+        species = pd.DataFrame(
+            [
+                _species("Cerius", "shiny", 1),
+                _species("Thomzay", "pokemon", 1),
+            ]
+        )
+        cards = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        label = str(cards.loc[0, "status_label"])
+        self.assertTrue(label.startswith("Missing"))
+        plain = pokedex_atlas_html(cards)
+        self.assertIn(f'<div class="pogo-dex-status">{escape(label)}</div>', plain)
+        self.assertIn("Via trade from Cerius: Shiny", plain)
+        self.assertIn("Via trade from Thomzay: Pokemon", plain)
+        self.assertNotIn('<div class="pogo-dex-status">Cerius:', plain)
+        self.assertNotIn('<div class="pogo-dex-status">Thomzay:', plain)
+
+        registered_cards = build_pokedex_atlas_cards(
+            catalog,
+            pd.DataFrame([_species("Thombay", kind, 1) for kind, _label in ATLAS_ENTRY_KINDS]),
+            account="Thombay",
+        )
+        self.assertEqual(str(registered_cards.loc[0, "status_label"]), "Registered")
+        registered_html = pokedex_atlas_html(registered_cards)
+        self.assertIn('<div class="pogo-dex-status">Registered</div>', registered_html)
+        self.assertNotIn("Cerius:", registered_html)
+
+        annotated = annotate_trade_sources(cards, species, account="Thombay", kind="any")
+        html = pokedex_atlas_html(annotated)
+        trade_badge = (
+            '<div class="pogo-dex-status">Cerius: Shiny</div>'
+            '<div class="pogo-dex-status">Thomzay: Pokemon</div>'
+        )
+        self.assertIn(trade_badge, html)
+        self.assertNotIn(f'<div class="pogo-dex-status">{escape(label)}</div>', html)
+        self.assertIn("pogo-dex-card--missing", html)
+        self.assertIn('class="pogo-dex-card-link"', html)
+
+        blank = cards.copy()
+        blank["trade_sources"] = "  \n "
+        blank_html = pokedex_atlas_html(blank)
+        self.assertIn(f'<div class="pogo-dex-status">{escape(label)}</div>', blank_html)
+        self.assertNotIn('<div class="pogo-dex-status">Cerius:', blank_html)
+        self.assertIn("Via trade from Cerius: Shiny", blank_html)
+
+        spaced = annotated.copy()
+        spaced.loc[:, "trade_sources"] = "Cerius: Shiny\n\nThomzay: Pokemon"
+        spaced_html = pokedex_atlas_html(spaced)
+        self.assertIn(trade_badge, spaced_html)
+        self.assertNotIn('<div class="pogo-dex-status"></div>', spaced_html)
+
+        escaped_cards = annotated.copy()
+        escaped_cards.loc[:, "trade_sources"] = "Cerius: Shiny <b>"
+        escaped_html = pokedex_atlas_html(escaped_cards)
+        self.assertIn('<div class="pogo-dex-status">Cerius: Shiny &lt;b&gt;</div>', escaped_html)
+        self.assertNotIn("Shiny <b>", escaped_html)
+
+    def test_trade_sources_empty_frames_keep_rows(self):
+        catalog = pd.DataFrame([_mon(1, "Bulbasaur", "kanto")])
+        species = pd.DataFrame([_species("Cerius", "shiny", 1)])
+        cards = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        empty = annotate_trade_sources(cards.iloc[0:0], species, account="Thombay")
+        self.assertEqual(len(empty), 0)
+        self.assertIn("trade_sources", empty.columns)
+        self.assertNotIn("trade_sources", cards.columns)
+
+        missing_columns = annotate_trade_sources(cards, pd.DataFrame({"notes": [1]}), account="Thombay")
+        self.assertEqual(len(missing_columns), len(cards))
+        self.assertEqual(missing_columns.loc[0, "trade_sources"], "")
+        pd.testing.assert_frame_equal(cards, missing_columns.drop(columns=["trade_sources"]))
+
+        no_rows = annotate_trade_sources(cards, pd.DataFrame(), account="Thombay", kind=None)
+        self.assertEqual(no_rows.loc[0, "trade_sources"], "")
+        self.assertEqual(list(cards.columns), [column for column in no_rows.columns if column != "trade_sources"])
+
+    def test_trade_sources_gmax_uses_gmax_rows_and_skips_unavailable(self):
+        catalog = pd.DataFrame([_mon(1, "Bulbasaur", "kanto")])
+        costume = _species("Cerius", "pokemon", 1)
+        costume["form"] = "Gigantamax"
+        species = pd.DataFrame(
+            [
+                costume,
+                _species("Thomzay", "gmax", 1),
+                _species("Cerius", "gmax", 1, registered=False),
+            ]
+        )
+        unavailable = build_pokedex_atlas_cards(catalog, species, account="Thombay")
+        self.assertTrue(pd.isna(unavailable.loc[0, "registered_gmax"]))
+        self.assertEqual(unavailable.loc[0, "registered_pokemon"], False)
+        skipped = annotate_trade_sources(unavailable, species, account="Thombay", kind="any")
+        self.assertEqual(skipped.loc[0, "trade_sources"], "")
+        gigantamax = annotate_trade_sources(unavailable, species, account="Thombay", kind="gigantamax")
+        self.assertEqual(gigantamax.loc[0, "trade_sources"], "")
+
+        available = build_pokedex_atlas_cards(
+            catalog,
+            species,
+            account="Thombay",
+            availability_df=_availability([("gmax", 1, True)]),
+        )
+        self.assertEqual(available.loc[0, "registered_gmax"], False)
+        self.assertEqual(available.loc[0, "registered_pokemon"], False)
+        for kind in ("gmax", "G-Max", "g-max", "gigantamax"):
+            labeled = annotate_trade_sources(available, species, account="Thombay", kind=kind)
+            self.assertEqual(labeled.loc[0, "trade_sources"], "Thomzay: G-Max", kind)
+        full = annotate_trade_sources(available, species, account="Thombay", kind="any")
+        self.assertEqual(full.loc[0, "trade_sources"], "Thomzay: G-Max")
 
 
 def _atlas_test_card(dex_number: int, name: str, registered: dict[str, object]) -> dict[str, object]:
