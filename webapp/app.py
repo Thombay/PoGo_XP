@@ -6671,12 +6671,28 @@ if page == "Dashboard Personal":
                     xp_explorer_players=st.session_state.get("dashboard_personal_xp_explorer_players"),
                 )
 if page == "Level Requirements":
+    personal_account_names: list[str] = []
+    seen_personal: set[str] = set()
+    for group_name, members in groups.items():
+        if str(group_name).strip().lower() not in {"ich", "ownaccounts"}:
+            continue
+        for member in members:
+            name = str(member).strip()
+            if name and name not in seen_personal:
+                seen_personal.add(name)
+                personal_account_names.append(name)
+    level_requirement_accounts = [name for name in ACCOUNT_ORDER if name in seen_personal]
+    level_requirement_accounts.extend(
+        name for name in personal_account_names if name not in set(level_requirement_accounts)
+    )
     render_level_requirements_page(
         xp_df=xp_df,
         curve_totals=curve_map,
         requirements_df=level_requirements_df,
         progress_df=level_requirement_progress_df,
         progress_path=level_requirement_progress_path(),
+        medal_df=display_medal_df,
+        accounts=level_requirement_accounts,
     )
 if page not in {"Dashboard Global", "Dashboard Personal"}:
     with group_slot.container():

@@ -1,4 +1,32 @@
 requirement_id,target_level,label,goal,sort_order
+platinum_medals_71,71,Earn platinum medals,15,1
+legendary_powerups_71,71,Power up Legendary or Mythical Pokémon,20,2
+nice_throws_71,71,Make Nice Throws,999,3
+daily_catch_100_71,71,Catch Pokémon in a single day,100,4
+platinum_medals_72,72,Earn platinum medals,20,1
+route_streak_72,72,Complete a Route days in a row,7,2
+charged_attacks_72,72,Use supereffective Charged Attacks,200,3
+stardust_72,72,Earn Stardust,1000000,4
+platinum_medals_73,73,Earn platinum medals,25,1
+purify_shadow_73,73,Purify Shadow Pokémon,100,2
+max_cp_powerups_73,73,Power up Pokémon to their max CP,3,3
+raids_won_73,73,Win raids,30,4
+platinum_medals_74,74,Earn platinum medals,30,1
+max_move_levels_74,74,Level up a Max Move,20,2
+explore_km_74,74,Explore km,200,3
+field_research_74,74,Complete Field Research tasks,250,4
+platinum_medals_75,75,Earn platinum medals,34,1
+great_throws_75,75,Make Great Throws,999,2
+eggs_hatched_75,75,Hatch eggs,75,3
+gifts_sent_75,75,Send Gifts to friends,500,4
+platinum_medals_76,76,Earn platinum medals,38,1
+rocket_grunts_76,76,Defeat Team GO Rocket Grunts,100,2
+explore_km_76,76,Explore km,300,3
+daily_catch_200_76,76,Catch Pokémon in a single day,200,4
+platinum_medals_77,77,Earn platinum medals,41,1
+max_battles_77,77,Win Max Battles,100,2
+max_cp_powerups_77,77,Power up Pokémon to their max CP,7,3
+distance_trades_77,77,Trade Pokémon caught at least 300 km apart,10,4
 platinum_medals_78,78,Earn platinum medals,45,1
 buddy_hearts_78,78,Earn hearts with your buddy,400,2
 explore_km_78,78,Explore km,400,3

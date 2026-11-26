@@ -8,7 +8,10 @@ import pandas as pd
 
 LEVEL_REQUIREMENT_COLUMNS = ["requirement_id", "target_level", "label", "goal", "sort_order"]
 LEVEL_PROGRESS_COLUMNS = ["date", "account", "requirement_id", "value"]
+PROGRESS_TIMELINE_COLUMNS = ["date", "requirement_id", "label", "percent"]
 XP_REQUIREMENT_ID = "xp"
+PLATINUM_MEDAL_ID = "platinum_medals"
+REQUIREMENT_LEVELS = list(range(2, 81))
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,12 @@ def _clean_text(value: object) -> str:
     except (TypeError, ValueError):
         pass
     return str(value).strip()
+
+
+def other_account_names(xp_names: list[str], personal_names: list[str]) -> list[str]:
+    personal = {str(name).strip() for name in personal_names if str(name).strip()}
+    names = {str(name).strip() for name in xp_names if str(name).strip() and str(name).strip() not in personal}
+    return sorted(names)
 
 
 def _read_csv(path: Path) -> pd.DataFrame | None:
@@ -274,6 +283,37 @@ def _latest_xp_row(history: pd.DataFrame) -> pd.Series:
     return ordered.iloc[-1]
 
 
+def is_platinum_requirement(requirement_id: str) -> bool:
+    return str(requirement_id).startswith("platinum_medals")
+
+
+def platinum_points(medal_df: pd.DataFrame | None, account: str) -> list[tuple[pd.Timestamp, int]]:
+    if medal_df is None or medal_df.empty:
+        return []
+    frame = medal_df
+    if "medal_id" in frame.columns:
+        medal_ids = frame["medal_id"].map(_clean_text).str.lower()
+        frame = frame.loc[medal_ids == PLATINUM_MEDAL_ID]
+        if frame.empty:
+            return []
+    needed = ("date", "account", "value")
+    if not set(needed).issubset(frame.columns):
+        return []
+    out = frame.loc[:, ["date", "account", "value"]].copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["date", "account", "value"]).copy()
+    if out.empty:
+        return []
+    account_name = _clean_text(account)
+    out["account"] = out["account"].map(_clean_text)
+    out = out[out["account"] == account_name].copy()
+    if out.empty:
+        return []
+    out = out.reset_index(drop=True)
+    return _daily_points(out["date"], out["value"])
+
+
 def _task_points(progress: pd.DataFrame, account: str, requirement_id: str) -> list[tuple[pd.Timestamp, int]]:
     if progress.empty:
         return []
@@ -299,11 +339,16 @@ def _scored_task(
     sort_order: int,
     observations: list[tuple[pd.Timestamp, int]],
     window_days: int,
+    count_while_locked: bool = False,
 ) -> RequirementRow:
     logged = observations[-1][1] if observations else None
     if status == "locked":
-        value = None
-        remaining = None
+        if count_while_locked:
+            value = int(logged) if logged is not None else 0
+            remaining = int(max(0, goal - value))
+        else:
+            value = None
+            remaining = None
         pace = None
         eta = None
         note = ""
@@ -319,7 +364,9 @@ def _scored_task(
     else:
         value = int(logged) if logged is not None else 0
         remaining = int(max(0, goal - value))
-        if remaining == 0:
+        if count_while_locked and not observations:
+            pace, eta, note = None, None, ""
+        elif remaining == 0:
             pace, eta, note = None, None, ""
         else:
             pace, eta, note = _pace(observations, window_days, remaining)
@@ -438,6 +485,8 @@ def build_level_sets(
     account: str,
     window_days: int,
     as_of: pd.Timestamp | None = None,
+    levels: list[int] | None = None,
+    platinum: pd.DataFrame | None = None,
 ) -> list[LevelSet]:
     account_name = _clean_text(account)
     history = _account_xp(xp_history, account_name)
@@ -451,12 +500,16 @@ def build_level_sets(
     xp_points = _daily_points(history["Date"], history["Total XP"])
 
     catalog = _coerce_requirements(requirements) if requirements is not None else _empty_requirements()
-    if catalog.empty:
-        return []
+    if levels is None:
+        if catalog.empty:
+            return []
+        targets = sorted({int(level) for level in catalog["target_level"].tolist()})
+    else:
+        targets = sorted({int(level) for level in levels})
+        catalog = catalog.loc[catalog["target_level"].isin(targets)].copy()
     logged = _coerce_progress(progress) if progress is not None else _empty_progress()
 
     grouped: dict[str, list[LevelSet]] = {"reached": [], "active": [], "locked": []}
-    targets = sorted({int(level) for level in catalog["target_level"].tolist()})
     for target_level in targets:
         status = set_status(current_level, target_level)
         level_reqs = catalog[catalog["target_level"] == target_level]
@@ -473,6 +526,12 @@ def build_level_sets(
         ]
         for requirement in level_reqs.itertuples(index=False):
             requirement_id = str(requirement.requirement_id)
+            if is_platinum_requirement(requirement_id):
+                observations = platinum_points(platinum, account_name)
+                count_while_locked = True
+            else:
+                observations = _task_points(logged, account_name, requirement_id)
+                count_while_locked = False
             rows.append(
                 _scored_task(
                     requirement_id=requirement_id,
@@ -481,8 +540,9 @@ def build_level_sets(
                     status=status,
                     goal=int(requirement.goal),
                     sort_order=int(requirement.sort_order),
-                    observations=_task_points(logged, account_name, requirement_id),
+                    observations=observations,
                     window_days=window_days,
+                    count_while_locked=count_while_locked,
                 )
             )
         row_tuple = tuple(rows)
@@ -500,3 +560,97 @@ def build_level_sets(
             )
         )
     return grouped["reached"] + grouped["active"] + grouped["locked"]
+
+
+def active_progress_timeline(
+    level_set: LevelSet,
+    *,
+    xp_history: pd.DataFrame,
+    progress: pd.DataFrame,
+    curve_totals: Mapping[int, int],
+    account: str,
+    platinum: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    account_name = _clean_text(account)
+    logged = _coerce_progress(progress) if progress is not None else _empty_progress()
+    recorded: list[tuple[pd.Timestamp, int, str, str, float]] = []
+    for row in level_set.rows:
+        goal = int(row.goal)
+        if goal <= 0:
+            continue
+        if row.requirement_id == XP_REQUIREMENT_ID:
+            start = _curve_total(curve_totals, level_set.target_level - 1)
+            if start is None:
+                continue
+            history = _account_xp(xp_history, account_name)
+            for day, total in _daily_points(history["Date"], history["Total XP"]):
+                value = max(0, int(total) - int(start))
+                percent = float(min(100.0, 100.0 * value / goal))
+                recorded.append((pd.Timestamp(day), int(row.sort_order), row.requirement_id, row.label, percent))
+            continue
+        if is_platinum_requirement(row.requirement_id):
+            observations = platinum_points(platinum, account_name)
+        else:
+            observations = _task_points(logged, account_name, row.requirement_id)
+        for day, value in observations:
+            percent = float(min(100.0, max(0.0, 100.0 * int(value) / goal)))
+            recorded.append((pd.Timestamp(day), int(row.sort_order), row.requirement_id, row.label, percent))
+    if not recorded:
+        return pd.DataFrame(columns=PROGRESS_TIMELINE_COLUMNS)
+    frame = pd.DataFrame(recorded, columns=["date", "_sort", "requirement_id", "label", "percent"])
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+    frame = frame.sort_values(["date", "_sort", "requirement_id"], kind="mergesort")
+    return frame.loc[:, PROGRESS_TIMELINE_COLUMNS].reset_index(drop=True)
+
+
+def _daily_levels(history: pd.DataFrame) -> list[tuple[pd.Timestamp, int]]:
+    ordered = history.reset_index(drop=True)
+    ordered["_ord"] = ordered.index
+    ordered = ordered.sort_values(["Date", "_ord"], kind="mergesort")
+    ordered["Date"] = pd.to_datetime(ordered["Date"]).dt.normalize()
+    ordered = ordered.groupby("Date", sort=True).tail(1)
+    return [(pd.Timestamp(day), int(level)) for day, level in zip(ordered["Date"], ordered["Lvl"])]
+
+
+def _level_change_date(history: pd.DataFrame, unlock_level: int) -> pd.Timestamp | None:
+    previous: int | None = None
+    for day, level in _daily_levels(history):
+        if previous is not None and previous < unlock_level <= level:
+            return pd.Timestamp(day).normalize()
+        previous = level
+    return None
+
+
+def _all_requirements_complete_date(level_set: LevelSet, timeline: pd.DataFrame) -> pd.Timestamp | None:
+    needed = [str(row.requirement_id) for row in level_set.rows if int(row.goal) > 0]
+    if not needed or timeline is None or timeline.empty or "requirement_id" not in timeline.columns:
+        return None
+    frame = timeline.loc[:, ["date", "requirement_id", "percent"]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+    frame["requirement_id"] = frame["requirement_id"].map(_clean_text)
+    frame["percent"] = pd.to_numeric(frame["percent"], errors="coerce")
+    frame = frame.dropna(subset=["date", "requirement_id", "percent"])
+    finished: list[pd.Timestamp] = []
+    for requirement_id in needed:
+        rows = frame[frame["requirement_id"] == requirement_id].sort_values("date", kind="mergesort")
+        done = rows[rows["percent"] >= 100]
+        if done.empty:
+            return None
+        finished.append(pd.Timestamp(done["date"].iloc[0]).normalize())
+    return max(finished)
+
+
+def progression_start_date(
+    level_set: LevelSet,
+    *,
+    xp_history: pd.DataFrame,
+    timeline: pd.DataFrame,
+    account: str,
+) -> pd.Timestamp | None:
+    history = _account_xp(xp_history, _clean_text(account))
+    if history.empty:
+        return None
+    changed = _level_change_date(history, int(level_set.unlock_level))
+    if changed is not None:
+        return changed
+    return _all_requirements_complete_date(level_set, timeline)

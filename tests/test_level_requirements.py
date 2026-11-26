@@ -10,10 +10,15 @@ from shared.paths import level_requirement_progress_path, level_requirements_pat
 from webapp.level_requirements import (
     LEVEL_PROGRESS_COLUMNS,
     LEVEL_REQUIREMENT_COLUMNS,
+    REQUIREMENT_LEVELS,
     XP_REQUIREMENT_ID,
     LevelSet,
     RequirementRow,
+    active_progress_timeline,
     build_level_sets,
+    other_account_names,
+    progression_start_date,
+    is_platinum_requirement,
     load_level_requirement_progress,
     load_level_requirements,
     set_status,
@@ -34,6 +39,10 @@ def _progress(rows: list[tuple[object, ...]]) -> pd.DataFrame:
 
 def _xp(rows: list[tuple[object, ...]]) -> pd.DataFrame:
     return pd.DataFrame(list(rows), columns=["Date", "Spieler", "Lvl", "XP Bar", "Total XP"])
+
+
+def _platinum(rows: list[tuple[object, ...]]) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=["date", "account", "value", "medal_id"])
 
 
 def _catalog() -> pd.DataFrame:
@@ -58,6 +67,8 @@ def _build(
     account: str = "Thombay",
     window_days: int = 7,
     as_of: pd.Timestamp | None = None,
+    levels: list[int] | None = None,
+    platinum: pd.DataFrame | None = None,
 ) -> list[LevelSet]:
     return build_level_sets(
         requirements=requirements,
@@ -67,6 +78,8 @@ def _build(
         account=account,
         window_days=window_days,
         as_of=as_of,
+        levels=levels,
+        platinum=platinum,
     )
 
 
@@ -156,9 +169,10 @@ class LevelRequirementsTest(unittest.TestCase):
     def test_remaining_floored_at_zero_when_value_exceeds_goal(self):
         sets = _build(
             _requirements([("platinum_medals_78", 78, "Earn platinum medals", 45, 1)]),
-            _progress([("2026-09-28", "Thombay", "platinum_medals_78", 50)]),
+            _progress([("2026-09-28", "Thombay", "platinum_medals_78", 1)]),
             _xp([("2026-09-28", "Thombay", 77, 0, 0)]),
             SIMPLE_CURVE,
+            platinum=_platinum([("2026-09-28", "Thombay", 50, "platinum_medals")]),
         )
         row = _row(sets[0], "platinum_medals_78")
         self.assertEqual(row.value, 50)
@@ -332,7 +346,7 @@ class LevelRequirementsTest(unittest.TestCase):
         )
         progress = _progress(
             [
-                ("2026-09-28", "Thombay", "platinum_medals_78", 45),
+                ("2026-09-28", "Thombay", "platinum_medals_78", 1),
                 ("2026-09-28", "Thombay", "buddy_hearts_78", 85),
                 ("2026-09-28", "Thombay", "explore_km_78", 67),
                 ("2026-09-28", "Thombay", "field_research_78", 65),
@@ -348,7 +362,8 @@ class LevelRequirementsTest(unittest.TestCase):
                 ("2026-09-28", "Cerius", 40, 0, 10_000_000),
             ]
         )
-        sets = _build(requirements, progress, xp, REAL_CURVE, window_days=7)
+        platinum = _platinum([("2026-09-28", "Thombay", 45, "platinum_medals")])
+        sets = _build(requirements, progress, xp, REAL_CURVE, window_days=7, platinum=platinum)
         self.assertEqual(len(sets), 1)
         level_set = sets[0]
         self.assertEqual(level_set.status, "active")
@@ -388,7 +403,7 @@ class LevelRequirementsTest(unittest.TestCase):
 
         completed = _progress(
             [
-                ("2026-09-28", "Thombay", "platinum_medals_78", 45),
+                ("2026-09-28", "Thombay", "platinum_medals_78", 1),
                 ("2026-09-28", "Thombay", "buddy_hearts_78", 400),
                 ("2026-09-28", "Thombay", "explore_km_78", 400),
                 ("2026-09-28", "Thombay", "field_research_78", 500),
@@ -401,6 +416,7 @@ class LevelRequirementsTest(unittest.TestCase):
             REAL_CURVE,
             window_days=7,
             as_of=pd.Timestamp("2026-09-28"),
+            platinum=platinum,
         )[0]
         self.assertEqual(finished.finish_date, _row(finished, XP_REQUIREMENT_ID).eta)
         self.assertEqual(finished.finish_date.normalize(), pd.Timestamp("2026-11-05"))
@@ -523,9 +539,10 @@ class LevelRequirementsTest(unittest.TestCase):
     def test_requirements_complete_when_nothing_is_open(self):
         sets = _build(
             _requirements([("platinum_medals_78", 78, "Earn platinum medals", 45, 1)]),
-            _progress([("2026-09-28", "Thombay", "platinum_medals_78", 45)]),
+            _progress([("2026-09-28", "Thombay", "platinum_medals_78", 1)]),
             _xp([("2026-09-28", "Thombay", 77, 1_000, 1_000)]),
             SIMPLE_CURVE,
+            platinum=_platinum([("2026-09-28", "Thombay", 45, "platinum_medals")]),
         )
         self.assertIsNone(sets[0].finish_date)
         self.assertIsNone(sets[0].finish_days)
@@ -582,10 +599,12 @@ class LevelRequirementsTest(unittest.TestCase):
         requirements = load_level_requirements(level_requirements_path())
         progress = load_level_requirement_progress(level_requirement_progress_path())
 
-        self.assertEqual(len(requirements), 12)
+        self.assertEqual(len(requirements), 40)
         self.assertEqual(list(requirements.columns), LEVEL_REQUIREMENT_COLUMNS)
-        self.assertEqual(requirements.iloc[0]["requirement_id"], "platinum_medals_78")
+        self.assertEqual(requirements.iloc[0]["requirement_id"], "platinum_medals_71")
         self.assertEqual(requirements.iloc[-1]["requirement_id"], "raids_won_80")
+        medals_78 = requirements[requirements["requirement_id"] == "platinum_medals_78"].iloc[0]
+        self.assertEqual(int(medals_78["goal"]), 45)
         lucky = requirements[requirements["requirement_id"] == "lucky_trades_79"].iloc[0]
         self.assertEqual(lucky["label"], "Obtain Lucky Pokémon in trades")
 
@@ -602,6 +621,260 @@ class LevelRequirementsTest(unittest.TestCase):
                 "field_research_78": 65,
             },
         )
+
+    def test_platinum_series_is_shared_and_ignores_progress(self):
+        self.assertTrue(is_platinum_requirement("platinum_medals_71"))
+        self.assertTrue(is_platinum_requirement("platinum_medals_72"))
+        self.assertFalse(is_platinum_requirement("normal_task"))
+        self.assertFalse(is_platinum_requirement(XP_REQUIREMENT_ID))
+
+        requirements = _requirements(
+            [
+                ("platinum_medals_71", 71, "Earn platinum medals", 15, 1),
+                ("normal_task", 71, "Normal task", 100, 2),
+                ("platinum_medals_72", 72, "Earn platinum medals", 20, 1),
+            ]
+        )
+        progress = _progress(
+            [
+                ("2026-09-28", "Thombay", "platinum_medals_71", 1),
+                ("2026-09-28", "Thombay", "normal_task", 5),
+                ("2026-09-28", "Thombay", "platinum_medals_72", 99),
+            ]
+        )
+        platinum = _platinum(
+            [
+                ("2026-09-28", "Thombay", 18, "platinum_medals"),
+                ("2026-09-29", "Thombay", 999, "raids_won"),
+                ("2026-09-29", "Cerius", 40, "platinum_medals"),
+            ]
+        )
+        sets = _build(
+            requirements,
+            progress,
+            _xp([("2026-09-28", "Thombay", 70, 0, 0)]),
+            {70: 0, 71: 1_000, 72: 3_000},
+            levels=[71, 72],
+            platinum=platinum,
+        )
+        self.assertEqual([item.target_level for item in sets], [71, 72])
+        self.assertEqual([item.status for item in sets], ["active", "locked"])
+
+        active = _row(_level(sets, 71), "platinum_medals_71")
+        self.assertEqual(active.value, 18)
+        self.assertEqual(active.remaining, 0)
+        self.assertTrue(active.done)
+        self.assertEqual(_row(_level(sets, 71), "normal_task").value, 5)
+
+        locked = _row(_level(sets, 72), "platinum_medals_72")
+        self.assertEqual(locked.value, 18)
+        self.assertEqual(locked.remaining, 2)
+        self.assertFalse(locked.done)
+        self.assertIsNone(locked.eta)
+        self.assertIsNone(locked.pace_per_day)
+        self.assertEqual(locked.note, "")
+
+    def test_requested_levels_include_xp_only_level(self):
+        sets = _build(
+            _requirements([("level_71_task", 71, "Level 71 task", 10, 1)]),
+            _progress([]),
+            _xp([("2026-09-28", "Thombay", 69, 400, 400)]),
+            {69: 0, 70: 1_000, 71: 3_000},
+            levels=[70, 71],
+        )
+        self.assertEqual([item.status for item in sets], ["active", "locked"])
+        self.assertEqual([item.target_level for item in sets], [70, 71])
+
+        level_70 = _level(sets, 70)
+        self.assertEqual([row.requirement_id for row in level_70.rows], [XP_REQUIREMENT_ID])
+        xp_row = _row(level_70, XP_REQUIREMENT_ID)
+        self.assertEqual(xp_row.goal, 1_000)
+        self.assertEqual(xp_row.value, 400)
+        self.assertEqual(_level(sets, 71).unlock_level, 70)
+        self.assertIn("level_71_task", [row.requirement_id for row in _level(sets, 71).rows])
+
+    def test_level_far_below_requested_level_is_locked(self):
+        sets = _build(
+            _requirements([("raids_won_80", 80, "Win raids", 80, 4)]),
+            _progress([]),
+            _xp([("2026-09-28", "Thombay", 65, 0, 100)]),
+            {69: 0, 70: 1_000},
+            levels=[70],
+        )
+        self.assertEqual([item.target_level for item in sets], [70])
+        self.assertEqual([item.status for item in sets], ["locked"])
+
+    def test_active_progress_timeline_caps_percents(self):
+        requirements = _requirements(
+            [
+                ("platinum_medals_78", 78, "Earn platinum medals", 45, 1),
+                ("field_task", 78, "Field task", 100, 2),
+                ("zero_task", 78, "Zero task", 100, 3),
+            ]
+        )
+        progress = _progress(
+            [
+                ("2026-09-01", "Thombay", "platinum_medals_78", 9),
+                ("2026-09-28", "Thombay", "field_task", 50),
+                ("2026-09-28", "Thombay", "zero_task", 0),
+            ]
+        )
+        xp = _xp([("2026-09-28", "Thombay", 77, 100, 50_000)])
+        platinum = _platinum([("2026-09-28", "Thombay", 90, "platinum_medals")])
+        level_set = _build(requirements, progress, xp, SIMPLE_CURVE, platinum=platinum)[0]
+        self.assertEqual(level_set.target_level, 78)
+        self.assertEqual(level_set.status, "active")
+
+        timeline = active_progress_timeline(
+            level_set,
+            xp_history=xp,
+            progress=progress,
+            curve_totals=SIMPLE_CURVE,
+            account="Thombay",
+            platinum=platinum,
+        )
+        self.assertEqual(list(timeline.columns), ["date", "requirement_id", "label", "percent"])
+        self.assertTrue(pd.api.types.is_float_dtype(timeline["percent"]))
+        self.assertTrue(timeline["percent"].map(lambda value: 0.0 <= float(value) <= 100.0).all())
+
+        def rows_on(requirement_id: str, day: str) -> pd.DataFrame:
+            matched = timeline[timeline["requirement_id"].astype(str) == requirement_id]
+            return matched[pd.to_datetime(matched["date"]).dt.normalize().eq(pd.Timestamp(day))]
+
+        def percent_on(requirement_id: str, day: str) -> float:
+            matched = rows_on(requirement_id, day)
+            self.assertGreaterEqual(len(matched), 1)
+            percents = {round(float(value), 6) for value in matched["percent"]}
+            self.assertEqual(percents, {round(float(matched.iloc[0]["percent"]), 6)})
+            return float(matched.iloc[0]["percent"])
+
+        self.assertAlmostEqual(percent_on(XP_REQUIREMENT_ID, "2026-09-28"), 100.0)
+        self.assertEqual(rows_on(XP_REQUIREMENT_ID, "2026-09-28")["label"].astype(str).unique().tolist(), ["XP"])
+        self.assertAlmostEqual(percent_on("field_task", "2026-09-28"), 50.0)
+        self.assertEqual(rows_on("field_task", "2026-09-28")["label"].astype(str).unique().tolist(), ["Field task"])
+        self.assertAlmostEqual(percent_on("zero_task", "2026-09-28"), 0.0)
+        self.assertAlmostEqual(percent_on("platinum_medals_78", "2026-09-28"), 100.0)
+        self.assertEqual(
+            rows_on("platinum_medals_78", "2026-09-28")["label"].astype(str).unique().tolist(),
+            ["Earn platinum medals"],
+        )
+
+        platinum_rows = timeline[timeline["requirement_id"].astype(str) == "platinum_medals_78"]
+        for value in platinum_rows["percent"]:
+            self.assertNotAlmostEqual(float(value), 20.0)
+        stray = rows_on("platinum_medals_78", "2026-09-01")
+        self.assertTrue(stray.empty)
+
+    def _level_79_set(
+        self,
+        xp: pd.DataFrame,
+        progress: pd.DataFrame,
+        platinum: pd.DataFrame | None = None,
+    ) -> tuple[LevelSet, pd.DataFrame]:
+        requirements = _requirements(
+            [
+                ("platinum_medals_79", 79, "Earn platinum medals", 45, 1),
+                ("rocket_leaders_79", 79, "Defeat a Team GO Rocket Leader", 30, 2),
+            ]
+        )
+        level_set = _build(requirements, progress, xp, SIMPLE_CURVE, platinum=platinum)[0]
+        timeline = active_progress_timeline(
+            level_set,
+            xp_history=xp,
+            progress=progress,
+            curve_totals=SIMPLE_CURVE,
+            account="Thombay",
+            platinum=platinum,
+        )
+        return level_set, timeline
+
+    def test_progression_starts_when_the_level_number_changes(self):
+        xp = _xp(
+            [
+                ("2026-11-03", "Thombay", 77, 0, 5_000),
+                ("2026-11-24", "Thombay", 78, 0, 1_200),
+            ]
+        )
+        progress = _progress([("2026-11-03", "Thombay", "rocket_leaders_79", 4)])
+        level_set, timeline = self._level_79_set(xp, progress)
+        self.assertEqual(level_set.target_level, 79)
+        self.assertEqual(level_set.unlock_level, 78)
+        early_xp = timeline[
+            (timeline["requirement_id"] == XP_REQUIREMENT_ID)
+            & (pd.to_datetime(timeline["date"]) == pd.Timestamp("2026-11-03"))
+        ]
+        self.assertFalse(early_xp.empty)
+        self.assertGreater(float(early_xp["percent"].iloc[0]), 0)
+
+        start = progression_start_date(
+            level_set,
+            xp_history=xp,
+            timeline=timeline,
+            account="Thombay",
+        )
+        self.assertEqual(start, pd.Timestamp("2026-11-24"))
+
+    def test_progression_starts_when_every_requirement_is_complete_without_a_level_change(self):
+        xp = _xp(
+            [
+                ("2026-11-01", "Thombay", 78, 0, 5_000),
+                ("2026-11-26", "Thombay", 78, 0, 5_100),
+            ]
+        )
+        progress = _progress(
+            [
+                ("2026-11-10", "Thombay", "rocket_leaders_79", 10),
+                ("2026-11-26", "Thombay", "rocket_leaders_79", 30),
+            ]
+        )
+        platinum = _platinum([("2026-11-20", "Thombay", 50, "platinum_medals")])
+        level_set, timeline = self._level_79_set(xp, progress, platinum)
+        start = progression_start_date(
+            level_set,
+            xp_history=xp,
+            timeline=timeline,
+            account="Thombay",
+        )
+        self.assertEqual(start, pd.Timestamp("2026-11-26"))
+
+    def test_progression_has_no_start_before_level_change_or_completion(self):
+        xp = _xp([("2026-11-01", "Thombay", 78, 0, 5_000)])
+        progress = _progress([("2026-11-10", "Thombay", "rocket_leaders_79", 10)])
+        platinum = _platinum([("2026-11-01", "Thombay", 50, "platinum_medals")])
+        level_set, timeline = self._level_79_set(xp, progress, platinum)
+        start = progression_start_date(
+            level_set,
+            xp_history=xp,
+            timeline=timeline,
+            account="Thombay",
+        )
+        self.assertIsNone(start)
+
+    def test_other_account_names_excludes_personal_and_sorts(self):
+        result = other_account_names(
+            ["Thombay", "Babsi", "Cerius", " Azog ", "", "Babsi"],
+            ["Thombay", "Cerius", "Thomzay"],
+        )
+        self.assertEqual(result, ["Azog", "Babsi"])
+
+    def test_requirement_levels_cover_2_through_80(self):
+        self.assertEqual(REQUIREMENT_LEVELS, list(range(2, 81)))
+
+    def test_level_65_activates_xp_only_level_66_inside_full_range(self):
+        sets = _build(
+            _requirements([]),
+            _progress([]),
+            _xp([("2026-09-28", "Thombay", 65, 0, 100)]),
+            SIMPLE_CURVE,
+            levels=list(REQUIREMENT_LEVELS),
+        )
+        level_66 = _level(sets, 66)
+        self.assertEqual(level_66.status, "active")
+        self.assertEqual(level_66.unlock_level, 65)
+        self.assertEqual([row.requirement_id for row in level_66.rows], [XP_REQUIREMENT_ID])
+        self.assertEqual(_level(sets, 65).status, "reached")
+        self.assertEqual(_level(sets, 67).status, "locked")
+        self.assertEqual(_level(sets, 2).status, "reached")
 
 
 if __name__ == "__main__":
